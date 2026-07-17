@@ -23,6 +23,8 @@ namespace Ryujinx.Ava.UI.Renderer
             {
                 GraphicsBackend.OpenGl => new EmbeddedWindowOpenGL(),
                 GraphicsBackend.Vulkan => new EmbeddedWindowVulkan(),
+                GraphicsBackend.Metal when OperatingSystem.IsMacOS() => new EmbeddedWindowMetal(),
+                GraphicsBackend.Metal => throw new PlatformNotSupportedException("The native Metal backend is only available on macOS."),
                 _ => throw new NotSupportedException()
             };
 
@@ -34,6 +36,7 @@ namespace Ryujinx.Ava.UI.Renderer
             {
                 EmbeddedWindowVulkan => GraphicsBackend.Vulkan,
                 EmbeddedWindowOpenGL => GraphicsBackend.OpenGl,
+                EmbeddedWindowMetal => GraphicsBackend.Metal,
                 _ => throw new NotImplementedException()
             };
 

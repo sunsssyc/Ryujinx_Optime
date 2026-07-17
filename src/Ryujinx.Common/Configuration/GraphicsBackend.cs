@@ -7,5 +7,6 @@ namespace Ryujinx.Common.Configuration
     {
         Vulkan,
         OpenGl,
+        Metal
     }
 }

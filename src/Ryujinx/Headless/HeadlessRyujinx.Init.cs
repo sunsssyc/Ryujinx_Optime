@@ -11,6 +11,7 @@ using Ryujinx.Common.Logging;
 using Ryujinx.Common.Utilities;
 using Ryujinx.Cpu;
 using Ryujinx.Graphics.GAL;
+using Ryujinx.Graphics.Metal;
 using Ryujinx.Graphics.OpenGL;
 using Ryujinx.Graphics.Vulkan;
 using Ryujinx.HLE;
@@ -208,6 +209,13 @@ namespace Ryujinx.Headless
                     (instance, vk) => new SurfaceKHR((ulong)vulkanWindow.CreateWindowSurface(instance.Handle)),
                     VulkanWindow.GetRequiredInstanceExtensions,
                     preferredGpuId);
+            }
+
+            if (options.GraphicsBackend == GraphicsBackend.Metal && window is MetalWindow metalWindow)
+            {
+#pragma warning disable CA1416
+                return new MetalRenderer(metalWindow.GetLayer);
+#pragma warning restore CA1416
             }
 
             return new OpenGLRenderer();
