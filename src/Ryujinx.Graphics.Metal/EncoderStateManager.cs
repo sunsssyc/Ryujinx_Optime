@@ -2,6 +2,7 @@ using Ryujinx.Common.Logging;
 using Ryujinx.Common.Memory;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Metal.State;
+using Ryujinx.Graphics.Metal.SharpMetalExtensions;
 using Ryujinx.Graphics.Shader;
 using SharpMetal.Metal;
 using System;
@@ -381,7 +382,7 @@ namespace Ryujinx.Graphics.Metal
 
             if (count != 0)
             {
-                renderCommandEncoder.UseResources(resources, (ulong)count, usage, stages);
+                renderCommandEncoder.UseResourcesCompat(resources, (ulong)count, usage, stages);
             }
         }
 
@@ -416,7 +417,7 @@ namespace Ryujinx.Graphics.Metal
 
             if (count != 0)
             {
-                computeCommandEncoder.UseResources(resources, (ulong)count, usage);
+                computeCommandEncoder.UseResourcesCompat(resources, (ulong)count, usage);
             }
         }
 
