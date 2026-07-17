@@ -13,6 +13,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl
 
         public StructuredFunction CurrentFunction { get; set; }
 
+        public bool IsMainFunction { get; set; }
+
         public StructuredProgramInfo Info { get; }
 
         public AttributeUsage AttributeUsage { get; }

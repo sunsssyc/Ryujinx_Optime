@@ -40,6 +40,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl
         private static void PrintFunction(CodeGenContext context, StructuredFunction function, ShaderStage stage, int[] sets, bool isMainFunc = false)
         {
             context.CurrentFunction = function;
+            context.IsMainFunction = isMainFunc;
 
             context.AppendLine(GetFunctionSignature(context, function, stage, sets, isMainFunc));
             context.EnterScope();

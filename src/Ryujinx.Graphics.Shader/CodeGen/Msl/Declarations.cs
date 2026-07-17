@@ -68,6 +68,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl
             context.AppendLine("using namespace metal;");
             context.AppendLine();
 
+            DeclareAtomicHelpers(context);
+
             bool fsi = (info.HelperFunctionsMask & HelperFunctionsMask.FSI) != 0;
 
             DeclareInputAttributes(context, info.IoDefinitions.Where(x => IsUserDefined(x, StorageKind.Input)));
@@ -127,6 +129,23 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl
             }
 
             return sets;
+        }
+
+        private static void DeclareAtomicHelpers(CodeGenContext context)
+        {
+            context.AppendLine("inline uint RyujinxAtomicCompareExchangeDevice(device atomic_uint *object, uint expected, uint desired)");
+            context.EnterScope();
+            context.AppendLine("atomic_compare_exchange_weak_explicit(object, &expected, desired, memory_order_relaxed, memory_order_relaxed);");
+            context.AppendLine("return expected;");
+            context.LeaveScope();
+            context.AppendLine();
+
+            context.AppendLine("inline uint RyujinxAtomicCompareExchangeThreadgroup(threadgroup atomic_uint *object, uint expected, uint desired)");
+            context.EnterScope();
+            context.AppendLine("atomic_compare_exchange_weak_explicit(object, &expected, desired, memory_order_relaxed, memory_order_relaxed);");
+            context.AppendLine("return expected;");
+            context.LeaveScope();
+            context.AppendLine();
         }
 
         static bool IsUserDefined(IoDefinition ioDefinition, StorageKind storageKind)

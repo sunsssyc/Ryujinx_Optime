@@ -17,7 +17,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
 #pragma warning disable IDE0055 // Disable formatting
             Add(Instruction.AtomicAdd,                InstType.AtomicBinary,   "atomic_fetch_add_explicit");
             Add(Instruction.AtomicAnd,                InstType.AtomicBinary,   "atomic_fetch_and_explicit");
-            Add(Instruction.AtomicCompareAndSwap,     InstType.AtomicBinary,   "atomic_compare_exchange_weak_explicit");
+            Add(Instruction.AtomicCompareAndSwap,     InstType.AtomicTernary,  "atomic_compare_exchange_weak_explicit");
             Add(Instruction.AtomicMaxU32,             InstType.AtomicBinary,   "atomic_fetch_max_explicit");
             Add(Instruction.AtomicMinU32,             InstType.AtomicBinary,   "atomic_fetch_min_explicit");
             Add(Instruction.AtomicOr,                 InstType.AtomicBinary,   "atomic_fetch_or_explicit");

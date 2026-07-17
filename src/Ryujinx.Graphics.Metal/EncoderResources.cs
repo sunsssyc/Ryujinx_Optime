@@ -1,35 +1,62 @@
 using SharpMetal.Metal;
 using System.Collections.Generic;
+using System.Runtime.Versioning;
 
 namespace Ryujinx.Graphics.Metal
 {
+    [SupportedOSPlatform("macos")]
     public struct RenderEncoderBindings
     {
         public List<Resource> Resources = [];
         public List<BufferResource> VertexBuffers = [];
         public List<BufferResource> FragmentBuffers = [];
+        internal List<ScopedTemporaryBuffer> TemporaryBuffers = [];
 
         public RenderEncoderBindings() { }
 
         public readonly void Clear()
         {
+            DisposeTemporaryBuffers();
             Resources.Clear();
             VertexBuffers.Clear();
             FragmentBuffers.Clear();
         }
+
+        public readonly void DisposeTemporaryBuffers()
+        {
+            foreach (ScopedTemporaryBuffer buffer in TemporaryBuffers)
+            {
+                buffer.Dispose();
+            }
+
+            TemporaryBuffers.Clear();
+        }
     }
 
+    [SupportedOSPlatform("macos")]
     public struct ComputeEncoderBindings
     {
         public List<Resource> Resources = [];
         public List<BufferResource> Buffers = [];
+        internal List<ScopedTemporaryBuffer> TemporaryBuffers = [];
 
         public ComputeEncoderBindings() { }
 
         public readonly void Clear()
         {
+            DisposeTemporaryBuffers();
             Resources.Clear();
             Buffers.Clear();
+        }
+
+        public readonly void DisposeTemporaryBuffers()
+        {
+            foreach (ScopedTemporaryBuffer buffer in TemporaryBuffers)
+            {
+                buffer.Dispose();
+            }
+
+            TemporaryBuffers.Clear();
         }
     }
 

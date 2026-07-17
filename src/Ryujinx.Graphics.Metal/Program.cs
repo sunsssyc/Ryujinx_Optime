@@ -8,15 +8,17 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Metal
 {
     [SupportedOSPlatform("macos")]
     class Program : IProgram
     {
-        private ProgramLinkStatus _status;
+        private volatile ProgramLinkStatus _status;
         private readonly ShaderSource[] _shaders;
         private readonly GCHandle[] _handles;
+        private readonly ManualResetEventSlim _compilationEvent = new(false);
         private int _successCount;
 
         private readonly MetalRenderer _renderer;
@@ -83,6 +85,7 @@ namespace Ryujinx.Graphics.Metal
                 Logger.Warning?.PrintMsg(LogClass.Gpu, shader.Code);
                 Logger.Warning?.Print(LogClass.Gpu, $"{shader.Stage} shader linking failed: \n{StringHelper.String(error.LocalizedDescription)}");
                 _status = ProgramLinkStatus.Failure;
+                _compilationEvent.Set();
                 return;
             }
 
@@ -102,11 +105,10 @@ namespace Ryujinx.Graphics.Metal
                     break;
             }
 
-            _successCount++;
-
-            if (_successCount >= _shaders.Length && _status != ProgramLinkStatus.Failure)
+            if (Interlocked.Increment(ref _successCount) >= _shaders.Length && _status != ProgramLinkStatus.Failure)
             {
                 _status = ProgramLinkStatus.Success;
+                _compilationEvent.Set();
             }
         }
 
@@ -201,10 +203,7 @@ namespace Ryujinx.Graphics.Metal
         {
             if (blocking)
             {
-                while (_status == ProgramLinkStatus.Incomplete)
-                { }
-
-                return _status;
+                _compilationEvent.Wait();
             }
 
             return _status;
@@ -212,7 +211,7 @@ namespace Ryujinx.Graphics.Metal
 
         public byte[] GetBinary()
         {
-            return [];
+            return MslProgramBinarySerializer.Pack(_shaders);
         }
 
         public void AddGraphicsPipeline(ref PipelineUid key, MTLRenderPipelineState pipeline)
@@ -281,6 +280,7 @@ namespace Ryujinx.Graphics.Metal
             VertexFunction.Dispose();
             FragmentFunction.Dispose();
             ComputeFunction.Dispose();
+            _compilationEvent.Dispose();
         }
     }
 }

@@ -21,11 +21,13 @@ namespace Ryujinx.Graphics.Metal
     class Pipeline : IPipeline, IEncoderFactory, IDisposable
     {
         private const ulong MinByteWeightForFlush = 256 * 1024 * 1024; // MiB
+        private const int MaxDisposedResourceCountForFlush = 4096;
 
         private readonly MTLDevice _device;
         private readonly MetalRenderer _renderer;
         private EncoderStateManager _encoderStateManager;
         private ulong _byteWeight;
+        private int _disposedResourceCount;
 
         public MTLCommandBuffer CommandBuffer;
 
@@ -190,8 +192,12 @@ namespace Ryujinx.Graphics.Metal
                 // To prevent that, we force submit command buffers if the memory usage by resources
                 // in use by the current command buffer is above a given limit, and those resources were disposed.
                 _byteWeight += byteWeight;
+                _disposedResourceCount++;
 
-                if (_byteWeight >= MinByteWeightForFlush)
+                // A large number of tiny Metal resources has significant driver-side
+                // overhead even when their combined payload is small. Bound both the
+                // byte weight and object count so they cannot accumulate indefinitely.
+                if (_byteWeight >= MinByteWeightForFlush || _disposedResourceCount >= MaxDisposedResourceCountForFlush)
                 {
                     FlushCommandsImpl();
                 }
@@ -203,6 +209,7 @@ namespace Ryujinx.Graphics.Metal
             EndCurrentPass();
 
             _byteWeight = 0;
+            _disposedResourceCount = 0;
 
             if (PreloadCbs != null)
             {
@@ -390,6 +397,8 @@ namespace Ryujinx.Graphics.Metal
             {
                 PopDebugGroup();
             }
+
+            _encoderStateManager.DisposeComputeTemporaryBuffers();
         }
 
         public void Draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance)
@@ -444,6 +453,8 @@ namespace Ryujinx.Graphics.Metal
                     PopDebugGroup();
                 }
             }
+
+            _encoderStateManager.DisposeRenderTemporaryBuffers();
         }
 
         private IndexBufferPattern GetIndexBufferPattern()
@@ -518,6 +529,8 @@ namespace Ryujinx.Graphics.Metal
                     firstVertex,
                     (ulong)firstInstance);
             }
+
+            _encoderStateManager.DisposeRenderTemporaryBuffers();
         }
 
         public void DrawIndexedIndirect(BufferRange indirectBuffer)
@@ -553,6 +566,8 @@ namespace Ryujinx.Graphics.Metal
                     buffer,
                     (ulong)(indirectBuffer.Offset + offset));
             }
+
+            _encoderStateManager.DisposeRenderTemporaryBuffers();
         }
 
         public void DrawIndexedIndirectCount(BufferRange indirectBuffer, BufferRange parameterBuffer, int maxDrawCount, int stride)
@@ -587,6 +602,8 @@ namespace Ryujinx.Graphics.Metal
                 primitiveType,
                 buffer,
                 (ulong)(indirectBuffer.Offset + offset));
+
+            _encoderStateManager.DisposeRenderTemporaryBuffers();
         }
 
         public void DrawIndirectCount(BufferRange indirectBuffer, BufferRange parameterBuffer, int maxDrawCount, int stride)
@@ -702,12 +719,12 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetPatchParameters(int vertices, ReadOnlySpan<float> defaultOuterLevel, ReadOnlySpan<float> defaultInnerLevel)
         {
-            Logger.Warning?.Print(LogClass.Gpu, "Not Implemented!");
+            // TODO: Default tessellation levels need shader emulation.
         }
 
         public void SetPointParameters(float size, bool isProgramPointSize, bool enablePointSprite, Origin origin)
         {
-            Logger.Warning?.Print(LogClass.Gpu, "Not Implemented!");
+            // TODO: Point size and point sprites need shader emulation.
         }
 
         public void SetPolygonMode(PolygonMode frontMode, PolygonMode backMode)

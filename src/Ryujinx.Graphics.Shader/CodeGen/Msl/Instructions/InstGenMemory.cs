@@ -449,14 +449,40 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                 Append(Src(AggregateType.FP32));
             }
 
-            if (hasDerivatives)
+            string AssembleDerivativesVector(int count)
             {
-                Logger.Warning?.PrintMsg(LogClass.Gpu, "Unused sampler derivatives!");
+                if (count > 1)
+                {
+                    string[] elems = new string[count];
+
+                    for (int index = 0; index < count; index++)
+                    {
+                        elems[index] = Src(AggregateType.FP32);
+                    }
+
+                    return "float" + count + "(" + string.Join(", ", elems) + ")";
+                }
+
+                return Src(AggregateType.FP32);
             }
 
-            if (hasLodBias)
+            string samplingOption = null;
+
+            if (hasDerivatives)
             {
-                Logger.Warning?.PrintMsg(LogClass.Gpu, "Unused sample LOD bias!");
+                string gradientType = (texOp.Type & SamplerType.Mask) switch
+                {
+                    SamplerType.Texture1D => "gradient1d",
+                    SamplerType.Texture2D => "gradient2d",
+                    SamplerType.Texture3D => "gradient3d",
+                    SamplerType.TextureCube => "gradientcube",
+                    _ => throw new InvalidOperationException($"Sampler type {texOp.Type} does not support gradients."),
+                };
+
+                string dPdx = AssembleDerivativesVector(coordsCount);
+                string dPdy = AssembleDerivativesVector(coordsCount);
+
+                samplingOption = $"{gradientType}({dPdx}, {dPdy})";
             }
 
             if (hasLodLevel)
@@ -467,7 +493,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                 }
                 else
                 {
-                    Append($"level({Src(coordType)})");
+                    samplingOption = $"level({Src(coordType)})";
                 }
             }
 
@@ -490,17 +516,43 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                 }
             }
 
-            // TODO: Support reads with offsets
+            string offset = null;
+
+            // TODO: Support reads with offsets.
             if (!intCoords)
             {
                 if (hasOffset)
                 {
-                    Append(AssembleOffsetVector(coordsCount));
+                    offset = AssembleOffsetVector(coordsCount);
                 }
                 else if (hasOffsets)
                 {
+                    // Consume all four source offsets even though Metal does not
+                    // expose the equivalent multi-offset gather overload here.
+                    for (int index = 0; index < 4; index++)
+                    {
+                        AssembleOffsetVector(coordsCount);
+                    }
+
                     Logger.Warning?.PrintMsg(LogClass.Gpu, "Multiple offsets on gathers are not yet supported!");
                 }
+            }
+
+            // LodBias follows offsets in the IR source list, but Metal expects
+            // the sampling option before the optional offset argument.
+            if (hasLodBias)
+            {
+                samplingOption = $"bias({Src(AggregateType.FP32)})";
+            }
+
+            if (samplingOption != null)
+            {
+                Append(samplingOption);
+            }
+
+            if (offset != null)
+            {
+                Append(offset);
             }
 
             texCallBuilder.Append(')');

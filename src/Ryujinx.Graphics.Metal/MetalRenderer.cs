@@ -13,6 +13,7 @@ namespace Ryujinx.Graphics.Metal
     public sealed class MetalRenderer : IRenderer
     {
         public const int TotalSets = 4;
+        private const ulong MaxReportedGpuMemory = 8UL * 1024 * 1024 * 1024;
 
         private readonly MTLDevice _device;
         private readonly MTLCommandQueue _queue;
@@ -213,11 +214,14 @@ namespace Ryujinx.Graphics.Metal
                 maximumImagesPerStage: Constants.MaxImagesPerStage,
                 maximumComputeSharedMemorySize: (int)_device.MaxThreadgroupMemoryLength,
                 maximumSupportedAnisotropy: 16,
-                shaderSubgroupSize: 256,
+                shaderSubgroupSize: 32,
                 storageBufferOffsetAlignment: 16,
                 textureBufferOffsetAlignment: 16,
                 gatherBiasPrecision: 0,
-                maximumGpuMemory: 0
+                // Apple GPUs share system memory with the CPU. Capping the reported
+                // budget keeps the texture cache at or below 4 GiB while still avoiding
+                // the overly aggressive 512 MiB fallback used for an unknown budget.
+                maximumGpuMemory: Math.Min(_device.RecommendedMaxWorkingSetSize, MaxReportedGpuMemory)
             );
         }
 
@@ -233,7 +237,8 @@ namespace Ryujinx.Graphics.Metal
 
         public IProgram LoadProgramBinary(byte[] programBinary, bool hasFragmentShader, ShaderInfo info)
         {
-            throw new NotImplementedException();
+            ShaderSource[] shaders = MslProgramBinarySerializer.Unpack(programBinary);
+            return new Program(this, _device, shaders, info.ResourceLayout, info.ComputeLocalSize);
         }
 
         public void SetBufferData(BufferHandle buffer, int offset, ReadOnlySpan<byte> data)

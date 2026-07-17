@@ -55,8 +55,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
 
                     for (int argIndex = operation.SourcesCount - arity + 2; argIndex < operation.SourcesCount; argIndex++)
                     {
-                        builder.Append($", {GetSourceExpr(context, operation.GetSource(argIndex), dstType)}, memory_order_relaxed");
+                        builder.Append($", {GetSourceExpr(context, operation.GetSource(argIndex), dstType)}");
                     }
+
+                    if (operation.Inst == Instruction.AtomicCompareAndSwap)
+                    {
+                        string functionName = shared
+                            ? "RyujinxAtomicCompareExchangeThreadgroup"
+                            : "RyujinxAtomicCompareExchangeDevice";
+
+                        return $"{functionName}({builder})";
+                    }
+
+                    builder.Append(", memory_order_relaxed");
                 }
                 else
                 {
@@ -89,7 +100,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                 {
                     return $"{op} {GetSourceExpr(context, operation.GetSource(0), context.CurrentFunction.ReturnType)}";
                 }
-                if (inst == Instruction.Return && context.Definitions.Stage is ShaderStage.Vertex or ShaderStage.Fragment)
+                if (inst == Instruction.Return && context.IsMainFunction && context.Definitions.Stage is ShaderStage.Vertex or ShaderStage.Fragment)
                 {
                     return $"{op} out";
                 }
