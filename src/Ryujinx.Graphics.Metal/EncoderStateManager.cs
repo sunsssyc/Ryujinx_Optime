@@ -411,7 +411,7 @@ namespace Ryujinx.Graphics.Metal
             SignalDirty(DirtyFlags.RenderPipeline);
         }
 
-        public readonly void UpdateRenderTargets(ITexture[] colors, ITexture depthStencil)
+        public readonly void UpdateRenderTargets(Span<ITexture> colors, ITexture depthStencil)
         {
             _currentState.FramebufferUsingColorWriteMask = false;
             UpdateRenderTargetsInternal(colors, depthStencil);
@@ -470,7 +470,7 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
-        private readonly void UpdateRenderTargetsInternal(ITexture[] colors, ITexture depthStencil)
+        private readonly void UpdateRenderTargetsInternal(Span<ITexture> colors, ITexture depthStencil)
         {
             // TBDR GPUs don't work properly if the same attachment is bound to multiple targets,
             // due to each attachment being a copy of the real attachment, rather than a direct write.
@@ -551,11 +551,11 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
-        private readonly void MaskOut(ITexture[] colors, ITexture depthStencil)
+        private readonly void MaskOut(Span<ITexture> colors, ITexture depthStencil)
         {
             if (!_currentState.FramebufferUsingColorWriteMask)
             {
-                _currentState.PreMaskRenderTargets = colors;
+                _currentState.PreMaskRenderTargets = colors.ToArray();
                 _currentState.PreMaskDepthStencil = depthStencil;
             }
 

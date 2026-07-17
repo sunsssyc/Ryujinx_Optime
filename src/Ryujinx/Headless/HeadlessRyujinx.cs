@@ -7,6 +7,7 @@ using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Configuration.Hid;
 using Ryujinx.Common.Configuration.Hid.Controller;
 using Ryujinx.Common.GraphicsDriver;
+using Ryujinx.Common.Helper;
 using Ryujinx.Common.Logging;
 using Ryujinx.Common.Logging.Targets;
 using Ryujinx.Common.SystemInterop;
@@ -359,9 +360,9 @@ namespace Ryujinx.Headless
             return options.GraphicsBackend switch
             {
                 GraphicsBackend.Vulkan => new VulkanWindow(_inputManager, options.LoggingGraphicsDebugLevel, options.AspectRatio, options.EnableMouse, options.HideCursorMode, options.IgnoreControllerApplet),
-                GraphicsBackend.Metal => OperatingSystem.IsMacOS() ?
-                    new MetalWindow(_inputManager, options.LoggingGraphicsDebugLevel, options.AspectRatio, options.EnableKeyboard, options.HideCursorMode, options.IgnoreControllerApplet) :
-                    throw new Exception("Attempted to use Metal renderer on non-macOS platform!"),
+                GraphicsBackend.Metal => OperatingSystem.IsMacOS() && RunningPlatform.IsArm
+                    ? new MetalWindow(_inputManager, options.LoggingGraphicsDebugLevel, options.AspectRatio, options.EnableMouse, options.HideCursorMode, options.IgnoreControllerApplet)
+                    : throw new PlatformNotSupportedException("The experimental native Metal backend is only available on Apple Silicon Macs."),
                 _ => new OpenGLWindow(_inputManager, options.LoggingGraphicsDebugLevel, options.AspectRatio, options.EnableMouse, options.HideCursorMode, options.IgnoreControllerApplet)
             };
         }

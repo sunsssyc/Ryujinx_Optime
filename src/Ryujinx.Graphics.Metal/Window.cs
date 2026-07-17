@@ -22,7 +22,7 @@ namespace Ryujinx.Graphics.Metal
 
         private int _requestedWidth;
         private int _requestedHeight;
-        
+
         private AntiAliasing _currentAntiAliasing;
         private bool _updateEffect;
         private IPostProcessingEffect _effect;
@@ -30,7 +30,7 @@ namespace Ryujinx.Graphics.Metal
         private bool _isLinear;
 
         public bool IsVSyncEnabled => _metalLayer.DisplaySyncEnabled;
-        
+
         // private float _scalingFilterLevel;
         private bool _updateScalingFilter;
         private ScalingFilter _currentScalingFilter;
@@ -140,7 +140,7 @@ namespace Ryujinx.Graphics.Metal
             _requestedWidth = width;
             _requestedHeight = height;
         }
-        
+
         public void ChangeVSyncMode(VSyncMode vSyncMode)
         {
             _metalLayer.DisplaySyncEnabled = vSyncMode is VSyncMode.Switch;

@@ -575,7 +575,9 @@ namespace Ryujinx.Ava.UI.ViewModels
                 IsVulkanAvailable = false;
                 GraphicsBackendIndex = IsOpenGLAvailable
                     ? (int)GraphicsBackend.OpenGl
-                    : (int)GraphicsBackend.Metal;
+                    : IsMetalAvailable
+                        ? (int)GraphicsBackend.Metal
+                        : (int)GraphicsBackend.Vulkan;
             }
             else
             {

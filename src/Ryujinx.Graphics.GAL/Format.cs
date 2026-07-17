@@ -214,6 +214,32 @@ namespace Ryujinx.Graphics.GAL
             };
 
             /// <summary>
+            /// Gets the byte size of one complete element of this format.
+            /// </summary>
+            public int BytesPerElement => fmt switch
+            {
+                Format.R8G8Unorm or Format.R8G8Snorm or Format.R8G8Uint or Format.R8G8Sint
+                    or Format.R8G8Uscaled or Format.R8G8Sscaled or Format.R16G16Float or Format.R16G16Unorm
+                    or Format.R16G16Snorm or Format.R16G16Uint or Format.R16G16Sint or Format.R16G16Uscaled
+                    or Format.R16G16Sscaled or Format.R32G32Float or Format.R32G32Uint or Format.R32G32Sint
+                    or Format.R32G32Uscaled or Format.R32G32Sscaled => 2 * fmt.ScalarSize,
+                Format.R8G8B8Unorm or Format.R8G8B8Snorm or Format.R8G8B8Uint or Format.R8G8B8Sint
+                    or Format.R8G8B8Uscaled or Format.R8G8B8Sscaled or Format.R16G16B16Float
+                    or Format.R16G16B16Unorm or Format.R16G16B16Snorm or Format.R16G16B16Uint
+                    or Format.R16G16B16Sint or Format.R16G16B16Uscaled or Format.R16G16B16Sscaled
+                    or Format.R32G32B32Float or Format.R32G32B32Uint or Format.R32G32B32Sint
+                    or Format.R32G32B32Uscaled or Format.R32G32B32Sscaled => 3 * fmt.ScalarSize,
+                Format.R8G8B8A8Unorm or Format.R8G8B8A8Snorm or Format.R8G8B8A8Uint or Format.R8G8B8A8Sint
+                    or Format.R8G8B8A8Srgb or Format.R8G8B8A8Uscaled or Format.R8G8B8A8Sscaled
+                    or Format.B8G8R8A8Unorm or Format.B8G8R8A8Srgb or Format.R16G16B16A16Float
+                    or Format.R16G16B16A16Unorm or Format.R16G16B16A16Snorm or Format.R16G16B16A16Uint
+                    or Format.R16G16B16A16Sint or Format.R16G16B16A16Uscaled or Format.R16G16B16A16Sscaled
+                    or Format.R32G32B32A32Float or Format.R32G32B32A32Uint or Format.R32G32B32A32Sint
+                    or Format.R32G32B32A32Uscaled or Format.R32G32B32A32Sscaled => 4 * fmt.ScalarSize,
+                _ => fmt.ScalarSize
+            };
+
+            /// <summary>
             /// Checks if the texture format is a depth or depth-stencil format.
             /// </summary>
             public bool HasDepth => fmt is

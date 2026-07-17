@@ -1,5 +1,6 @@
 using Ryujinx.Graphics.Shader.CodeGen;
 using Ryujinx.Graphics.Shader.CodeGen.Glsl;
+using Ryujinx.Graphics.Shader.CodeGen.Msl;
 using Ryujinx.Graphics.Shader.CodeGen.Spirv;
 using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
@@ -331,6 +332,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 definitions,
                 resourceManager,
                 Options.TargetLanguage,
+                usedFeatures.HasFlag(FeatureFlags.Precise),
                 Options.Flags.HasFlag(TranslationFlags.DebugMode));
 
             int geometryVerticesPerPrimitive = Definitions.OutputTopology switch
@@ -374,6 +376,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 TargetLanguage.Glsl => new ShaderProgram(info, TargetLanguage.Glsl, GlslGenerator.Generate(sInfo, parameters)),
                 TargetLanguage.Spirv => new ShaderProgram(info, TargetLanguage.Spirv, SpirvGenerator.Generate(sInfo, parameters)),
+                TargetLanguage.Msl => new ShaderProgram(info, TargetLanguage.Msl, MslGenerator.Generate(sInfo, parameters)),
                 _ => throw new NotImplementedException(Options.TargetLanguage.ToString()),
             };
         }

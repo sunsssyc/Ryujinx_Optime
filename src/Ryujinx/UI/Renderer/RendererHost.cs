@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Media;
 using Ryujinx.Ava.Systems.Configuration;
 using Ryujinx.Common.Configuration;
+using Ryujinx.Common.Helper;
 using System;
 
 namespace Ryujinx.Ava.UI.Renderer
@@ -23,8 +24,8 @@ namespace Ryujinx.Ava.UI.Renderer
             {
                 GraphicsBackend.OpenGl => new EmbeddedWindowOpenGL(),
                 GraphicsBackend.Vulkan => new EmbeddedWindowVulkan(),
-                GraphicsBackend.Metal when OperatingSystem.IsMacOS() => new EmbeddedWindowMetal(),
-                GraphicsBackend.Metal => throw new PlatformNotSupportedException("The native Metal backend is only available on macOS."),
+                GraphicsBackend.Metal when RunningPlatform.IsArmMac => new EmbeddedWindowMetal(),
+                GraphicsBackend.Metal => throw new PlatformNotSupportedException("The experimental native Metal backend is only available on Apple Silicon Macs."),
                 _ => throw new NotSupportedException()
             };
 

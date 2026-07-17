@@ -746,7 +746,7 @@ namespace Ryujinx.Graphics.Metal
             _encoderStateManager.UpdateRenderTargetColorMasks(componentMask);
         }
 
-        public void SetRenderTargets(ITexture[] colors, ITexture depthStencil)
+        public void SetRenderTargets(Span<ITexture> colors, ITexture depthStencil)
         {
             _encoderStateManager.UpdateRenderTargets(colors, depthStencil);
         }

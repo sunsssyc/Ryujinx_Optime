@@ -26,6 +26,7 @@ using Ryujinx.Ava.Utilities;
 using Ryujinx.Common;
 using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Configuration.Multiplayer;
+using Ryujinx.Common.Helper;
 using Ryujinx.Common.Logging;
 using Ryujinx.Common.SystemInterop;
 using Ryujinx.Common.UI;
@@ -981,8 +982,8 @@ namespace Ryujinx.Ava.Systems
             IRenderer renderer = backend switch
             {
 #pragma warning disable CA1416 // This call site is reachable on all platforms
-                GraphicsBackend.Metal when OperatingSystem.IsMacOS() => new MetalRenderer((RendererHost.EmbeddedWindow as EmbeddedWindowMetal)!.CreateSurface),
-                GraphicsBackend.Metal => throw new PlatformNotSupportedException("The native Metal backend is only available on macOS."),
+                GraphicsBackend.Metal when RunningPlatform.IsArmMac => new MetalRenderer((RendererHost.EmbeddedWindow as EmbeddedWindowMetal)!.CreateSurface),
+                GraphicsBackend.Metal => throw new PlatformNotSupportedException("The experimental native Metal backend is only available on Apple Silicon Macs."),
 #pragma warning restore CA1416
                 GraphicsBackend.Vulkan => VulkanRenderer.Create(
                     ConfigurationState.Instance.Graphics.PreferredGpu,

@@ -196,7 +196,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
 
             StringBuilder coordsBuilder = new();
 
-            int coordsCount = texOp.Type.GetDimensions();
+            int coordsCount = texOp.Type.Dimensions;
 
             if (coordsCount > 1)
             {
@@ -302,7 +302,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
         {
             AstTextureOperation texOp = (AstTextureOperation)operation;
 
-            int coordsCount = texOp.Type.GetDimensions();
+            int coordsCount = texOp.Type.Dimensions;
             int coordsIndex = 0;
 
             string textureName = GetTextureName(context, texOp, ref coordsIndex);
@@ -392,7 +392,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                 texCallBuilder.Append($"({samplerName}, ");
             }
 
-            int coordsCount = texOp.Type.GetDimensions();
+            int coordsCount = texOp.Type.Dimensions;
 
             int pCount = coordsCount;
 

@@ -12,6 +12,7 @@ namespace Ryujinx.Headless
     class MetalWindow : WindowBase
     {
         private CAMetalLayer _caMetalLayer;
+        private nint _metalView;
 
         public CAMetalLayer GetLayer()
         {
@@ -23,17 +24,19 @@ namespace Ryujinx.Headless
             GraphicsDebugLevel glLogLevel,
             AspectRatio aspectRatio,
             bool enableMouse,
-            HideCursorMode hideCursorMode, 
+            HideCursorMode hideCursorMode,
             bool ignoreControllerApplet)
             : base(inputManager, glLogLevel, aspectRatio, enableMouse, hideCursorMode, ignoreControllerApplet) { }
 
         public override SDL_WindowFlags WindowFlags => SDL_WindowFlags.SDL_WINDOW_METAL;
 
-        protected override void InitializeWindowRenderer()
+        protected override unsafe void InitializeWindowRenderer()
         {
             void CreateLayer()
             {
-                _caMetalLayer = new CAMetalLayer(SDL_Metal_GetLayer(SDL_Metal_CreateView(WindowHandle)));
+                nint metalView = SDL_Metal_CreateView(WindowHandle);
+                _metalView = metalView;
+                _caMetalLayer = new CAMetalLayer((nint)SDL_Metal_GetLayer(metalView));
             }
 
             if (SDL3Driver.MainThreadDispatcher != null)
@@ -48,7 +51,14 @@ namespace Ryujinx.Headless
 
         protected override void InitializeRenderer() { }
 
-        protected override void FinalizeWindowRenderer() { }
+        protected override unsafe void FinalizeWindowRenderer()
+        {
+            if (_metalView != 0)
+            {
+                SDL_Metal_DestroyView(_metalView);
+                _metalView = 0;
+            }
+        }
 
         protected override void SwapBuffers() { }
     }

@@ -10,7 +10,7 @@ namespace Ryujinx.Graphics.Metal.SharpMetalExtensions
     {
         private static readonly Selector sel_getCStringMaxLengthEncoding = "getCString:maxLength:encoding:";
         private static readonly Selector sel_stringWithUTF8String = "stringWithUTF8String:";
-        
+
         public static unsafe string ToDotNetString(this NSString source)
         {
             char[] sourceBuffer = new char[source.Length];
@@ -25,8 +25,8 @@ namespace Ryujinx.Graphics.Metal.SharpMetalExtensions
 
             return new string(sourceBuffer);
         }
-        
-        public static NSString ToNSString(this string source) 
+
+        public static NSString ToNSString(this string source)
             => new(ObjectiveC.IntPtr_objc_msgSend(new ObjectiveCClass(nameof(NSString)), sel_stringWithUTF8String, source));
     }
 }

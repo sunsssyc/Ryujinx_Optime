@@ -177,13 +177,13 @@ namespace Ryujinx.Graphics.Metal
             MTLTexture srcImage = GetHandle();
             MTLTexture dstImage = dst.GetHandle();
 
-            if (!dst.Info.Target.IsMultisample() && Info.Target.IsMultisample())
+            if (!dst.Info.Target.IsMultisample && Info.Target.IsMultisample)
             {
                 // int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
 
                 // _gd.HelperShader.CopyMSToNonMS(_gd, cbs, src, dst, 0, firstLayer, layers);
             }
-            else if (dst.Info.Target.IsMultisample() && !Info.Target.IsMultisample())
+            else if (dst.Info.Target.IsMultisample && !Info.Target.IsMultisample)
             {
                 // int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
 
@@ -196,7 +196,7 @@ namespace Ryujinx.Graphics.Metal
 
                 // _gd.HelperShader.CopyIncompatibleFormats(_gd, cbs, src, dst, 0, firstLayer, 0, firstLevel, layers, levels);
             }
-            else if (src.Info.Format.IsDepthOrStencil() != dst.Info.Format.IsDepthOrStencil())
+            else if (src.Info.Format.IsDepthOrStencil != dst.Info.Format.IsDepthOrStencil)
             {
                 // int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
                 // int levels = Math.Min(Info.Levels, dst.Info.Levels - firstLevel);
@@ -234,11 +234,11 @@ namespace Ryujinx.Graphics.Metal
             MTLTexture srcImage = GetHandle();
             MTLTexture dstImage = dst.GetHandle();
 
-            if (!dst.Info.Target.IsMultisample() && Info.Target.IsMultisample())
+            if (!dst.Info.Target.IsMultisample && Info.Target.IsMultisample)
             {
                 // _gd.HelperShader.CopyMSToNonMS(_gd, cbs, src, dst, srcLayer, dstLayer, 1);
             }
-            else if (dst.Info.Target.IsMultisample() && !Info.Target.IsMultisample())
+            else if (dst.Info.Target.IsMultisample && !Info.Target.IsMultisample)
             {
                 // _gd.HelperShader.CopyNonMSToMS(_gd, cbs, src, dst, srcLayer, dstLayer, 1);
             }
@@ -246,7 +246,7 @@ namespace Ryujinx.Graphics.Metal
             {
                 // _gd.HelperShader.CopyIncompatibleFormats(_gd, cbs, src, dst, srcLayer, dstLayer, srcLevel, dstLevel, 1, 1);
             }
-            else if (src.Info.Format.IsDepthOrStencil() != dst.Info.Format.IsDepthOrStencil())
+            else if (src.Info.Format.IsDepthOrStencil != dst.Info.Format.IsDepthOrStencil)
             {
                 // _gd.HelperShader.CopyColor(_gd, cbs, src, dst, srcLayer, dstLayer, srcLevel, dstLevel, 1, 1);
             }
@@ -278,7 +278,7 @@ namespace Ryujinx.Graphics.Metal
 
             Texture dst = (Texture)destination;
 
-            bool isDepthOrStencil = dst.Info.Format.IsDepthOrStencil();
+            bool isDepthOrStencil = dst.Info.Format.IsDepthOrStencil;
 
             Pipeline.Blit(this, dst, srcRegion, dstRegion, isDepthOrStencil, linearFilter);
         }

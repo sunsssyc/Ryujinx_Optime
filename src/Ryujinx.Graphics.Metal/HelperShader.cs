@@ -256,7 +256,7 @@ namespace Ryujinx.Graphics.Metal
                 0f,
                 1f);
 
-            bool dstIsDepthOrStencil = dst.Info.Format.IsDepthOrStencil();
+            bool dstIsDepthOrStencil = dst.Info.Format.IsDepthOrStencil;
 
             if (dstIsDepthOrStencil)
             {
@@ -268,14 +268,14 @@ namespace Ryujinx.Graphics.Metal
 
             string debugGroupName = "Blit Color ";
 
-            if (src.Info.Target.IsMultisample())
+            if (src.Info.Target.IsMultisample)
             {
-                if (dst.Info.Format.IsSint())
+                if (dst.Info.Format.IsSignedInt)
                 {
                     debugGroupName += "MS Int";
                     _pipeline.SetProgram(_programColorBlitMsI);
                 }
-                else if (dst.Info.Format.IsUint())
+                else if (dst.Info.Format.IsUnsignedInt)
                 {
                     debugGroupName += "MS UInt";
                     _pipeline.SetProgram(_programColorBlitMsU);
@@ -288,12 +288,12 @@ namespace Ryujinx.Graphics.Metal
             }
             else
             {
-                if (dst.Info.Format.IsSint())
+                if (dst.Info.Format.IsSignedInt)
                 {
                     debugGroupName += "Int";
                     _pipeline.SetProgram(_programColorBlitI);
                 }
-                else if (dst.Info.Format.IsUint())
+                else if (dst.Info.Format.IsUnsignedInt)
                 {
                     debugGroupName += "UInt";
                     _pipeline.SetProgram(_programColorBlitU);
@@ -465,13 +465,13 @@ namespace Ryujinx.Graphics.Metal
             if (isDepth)
             {
                 debugGroupName = "Depth Blit";
-                _pipeline.SetProgram(src.Info.Target.IsMultisample() ? _programDepthBlitMs : _programDepthBlit);
+                _pipeline.SetProgram(src.Info.Target.IsMultisample ? _programDepthBlitMs : _programDepthBlit);
                 _pipeline.SetDepthTest(new DepthTestDescriptor(true, true, CompareOp.Always));
             }
             else
             {
                 debugGroupName = "Stencil Blit";
-                _pipeline.SetProgram(src.Info.Target.IsMultisample() ? _programStencilBlitMs : _programStencilBlit);
+                _pipeline.SetProgram(src.Info.Target.IsMultisample ? _programStencilBlitMs : _programStencilBlit);
                 _pipeline.SetStencilTest(CreateStencilTestDescriptor(true));
             }
 
@@ -728,12 +728,12 @@ namespace Ryujinx.Graphics.Metal
 
             string debugGroupName = "Clear Color ";
 
-            if (format.IsSint())
+            if (format.IsSignedInt)
             {
                 debugGroupName += "Int";
                 _pipeline.SetProgram(_programsColorClearI[index]);
             }
-            else if (format.IsUint())
+            else if (format.IsUnsignedInt)
             {
                 debugGroupName += "UInt";
                 _pipeline.SetProgram(_programsColorClearU[index]);

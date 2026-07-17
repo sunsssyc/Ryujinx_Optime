@@ -12,7 +12,7 @@ namespace Ryujinx.Ava.UI.Renderer
             {
                 return new CAMetalLayer(MetalLayer);
             }
-            
+
             throw new NotSupportedException($"Cannot create a {nameof(CAMetalLayer)} without being on ARM Mac.");
         }
     }

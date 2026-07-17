@@ -225,7 +225,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
             TranslatedShader translatedShader = TranslateShader(_dumper, channel, translatorContext, cachedGuestCode, asCompute: false);
 
             ShaderSource[] shaderSourcesArray = new ShaderSource[] { CreateShaderSource(translatedShader.Program) };
-            ShaderInfo info = ShaderInfoBuilder.BuildForCompute(_context, translatedShader.Program.Info);
+            ShaderInfo info = ShaderInfoBuilder.BuildForCompute(_context, translatedShader.Program.Info, computeState.GetLocalSize());
             IProgram hostProgram = _context.Renderer.CreateProgram(shaderSourcesArray, info);
 
             cpShader = new CachedShaderProgram(hostProgram, specState, translatedShader.Shader);
@@ -837,9 +837,13 @@ namespace Ryujinx.Graphics.Gpu.Shader
         /// <returns>Translation options</returns>
         private static TranslationOptions CreateTranslationOptions(TargetApi api, TranslationFlags flags)
         {
-            TargetLanguage lang = GraphicsConfig.EnableSpirvCompilationOnVulkan && api == TargetApi.Vulkan
-                ? TargetLanguage.Spirv
-                : TargetLanguage.Glsl;
+            TargetLanguage lang = api switch
+            {
+                TargetApi.OpenGL => TargetLanguage.Glsl,
+                TargetApi.Vulkan => GraphicsConfig.EnableSpirvCompilationOnVulkan ? TargetLanguage.Spirv : TargetLanguage.Glsl,
+                TargetApi.Metal => TargetLanguage.Msl,
+                _ => throw new NotImplementedException()
+            };
 
             return new TranslationOptions(lang, api, flags);
         }

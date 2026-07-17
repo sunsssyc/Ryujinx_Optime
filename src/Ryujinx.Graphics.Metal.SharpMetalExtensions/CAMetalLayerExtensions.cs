@@ -16,7 +16,7 @@ namespace Ryujinx.Graphics.Metal.SharpMetalExtensions
         public static NSDictionary GetDeveloperHudProperties(this CAMetalLayer metalLayer)
             => new(ObjectiveCRuntime.IntPtr_objc_msgSend(metalLayer.NativePtr, sel_developerHUDProperties));
 
-        public static void SetDeveloperHudProperties(this CAMetalLayer metalLayer, NSDictionary dictionary) 
+        public static void SetDeveloperHudProperties(this CAMetalLayer metalLayer, NSDictionary dictionary)
             => ObjectiveCRuntime.objc_msgSend(metalLayer.NativePtr, sel_setDeveloperHUDProperties, dictionary);
     }
 }
