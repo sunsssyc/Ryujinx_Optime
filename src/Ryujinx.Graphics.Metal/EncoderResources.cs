@@ -1,4 +1,5 @@
 using SharpMetal.Metal;
+using System;
 using System.Collections.Generic;
 using System.Runtime.Versioning;
 
@@ -11,6 +12,7 @@ namespace Ryujinx.Graphics.Metal
         public List<BufferResource> VertexBuffers = [];
         public List<BufferResource> FragmentBuffers = [];
         internal List<ScopedTemporaryBuffer> TemporaryBuffers = [];
+        private MTLResource[] _resourceScratch = [];
 
         public RenderEncoderBindings() { }
 
@@ -31,6 +33,16 @@ namespace Ryujinx.Graphics.Metal
 
             TemporaryBuffers.Clear();
         }
+
+        public MTLResource[] GetResourceScratch(int minimumLength)
+        {
+            if (_resourceScratch.Length < minimumLength)
+            {
+                Array.Resize(ref _resourceScratch, minimumLength);
+            }
+
+            return _resourceScratch;
+        }
     }
 
     [SupportedOSPlatform("macos")]
@@ -39,6 +51,7 @@ namespace Ryujinx.Graphics.Metal
         public List<Resource> Resources = [];
         public List<BufferResource> Buffers = [];
         internal List<ScopedTemporaryBuffer> TemporaryBuffers = [];
+        private MTLResource[] _resourceScratch = [];
 
         public ComputeEncoderBindings() { }
 
@@ -57,6 +70,16 @@ namespace Ryujinx.Graphics.Metal
             }
 
             TemporaryBuffers.Clear();
+        }
+
+        public MTLResource[] GetResourceScratch(int minimumLength)
+        {
+            if (_resourceScratch.Length < minimumLength)
+            {
+                Array.Resize(ref _resourceScratch, minimumLength);
+            }
+
+            return _resourceScratch;
         }
     }
 

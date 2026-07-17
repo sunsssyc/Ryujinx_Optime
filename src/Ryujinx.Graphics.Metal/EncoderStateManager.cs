@@ -5,6 +5,7 @@ using Ryujinx.Graphics.Metal.State;
 using Ryujinx.Graphics.Shader;
 using SharpMetal.Metal;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -312,10 +313,7 @@ namespace Ryujinx.Graphics.Metal
                 SetScissors(renderCommandEncoder);
             }
 
-            foreach (Resource resource in _currentState.RenderEncoderBindings.Resources)
-            {
-                renderCommandEncoder.UseResource(resource.MtlResource, resource.ResourceUsage, resource.Stages);
-            }
+            UseRenderResources(renderCommandEncoder, ref _currentState.RenderEncoderBindings);
 
             foreach (BufferResource buffer in _currentState.RenderEncoderBindings.VertexBuffers)
             {
@@ -330,17 +328,14 @@ namespace Ryujinx.Graphics.Metal
             _currentState.Dirty &= ~DirtyFlags.RenderAll;
         }
 
-        public readonly void RebindComputeState(MTLComputeCommandEncoder computeCommandEncoder)
+        public void RebindComputeState(MTLComputeCommandEncoder computeCommandEncoder)
         {
             if ((_currentState.Dirty & DirtyFlags.ComputePipeline) != 0)
             {
                 SetComputePipelineState(computeCommandEncoder);
             }
 
-            foreach (Resource resource in _currentState.ComputeEncoderBindings.Resources)
-            {
-                computeCommandEncoder.UseResource(resource.MtlResource, resource.ResourceUsage);
-            }
+            UseComputeResources(computeCommandEncoder, ref _currentState.ComputeEncoderBindings);
 
             foreach (BufferResource buffer in _currentState.ComputeEncoderBindings.Buffers)
             {
@@ -348,6 +343,81 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _currentState.Dirty &= ~DirtyFlags.ComputeAll;
+        }
+
+        private static void UseRenderResources(MTLRenderCommandEncoder renderCommandEncoder, ref RenderEncoderBindings bindings)
+        {
+            if (bindings.Resources.Count == 0)
+            {
+                return;
+            }
+
+            MTLResource[] resources = bindings.GetResourceScratch(bindings.Resources.Count);
+
+            UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read, MTLRenderStages.RenderStageVertex);
+            UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read, MTLRenderStages.RenderStageFragment);
+            UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read, MTLRenderStages.RenderStageVertex | MTLRenderStages.RenderStageFragment);
+            UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read | MTLResourceUsage.Write, MTLRenderStages.RenderStageVertex);
+            UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read | MTLResourceUsage.Write, MTLRenderStages.RenderStageFragment);
+            UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read | MTLResourceUsage.Write, MTLRenderStages.RenderStageVertex | MTLRenderStages.RenderStageFragment);
+        }
+
+        private static void UseRenderResources(
+            MTLRenderCommandEncoder renderCommandEncoder,
+            List<Resource> bindings,
+            MTLResource[] resources,
+            MTLResourceUsage usage,
+            MTLRenderStages stages)
+        {
+            int count = 0;
+
+            foreach (Resource binding in bindings)
+            {
+                if (binding.ResourceUsage == usage && binding.Stages == stages)
+                {
+                    resources[count++] = binding.MtlResource;
+                }
+            }
+
+            if (count != 0)
+            {
+                renderCommandEncoder.UseResources(resources, (ulong)count, usage, stages);
+            }
+        }
+
+        private static void UseComputeResources(MTLComputeCommandEncoder computeCommandEncoder, ref ComputeEncoderBindings bindings)
+        {
+            if (bindings.Resources.Count == 0)
+            {
+                return;
+            }
+
+            MTLResource[] resources = bindings.GetResourceScratch(bindings.Resources.Count);
+
+            UseComputeResources(computeCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read);
+            UseComputeResources(computeCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read | MTLResourceUsage.Write);
+        }
+
+        private static void UseComputeResources(
+            MTLComputeCommandEncoder computeCommandEncoder,
+            List<Resource> bindings,
+            MTLResource[] resources,
+            MTLResourceUsage usage)
+        {
+            int count = 0;
+
+            foreach (Resource binding in bindings)
+            {
+                if (binding.ResourceUsage == usage)
+                {
+                    resources[count++] = binding.MtlResource;
+                }
+            }
+
+            if (count != 0)
+            {
+                computeCommandEncoder.UseResources(resources, (ulong)count, usage);
+            }
         }
 
         private readonly void SetRenderPipelineState(MTLRenderCommandEncoder renderCommandEncoder)
