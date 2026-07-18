@@ -40,6 +40,7 @@ namespace Ryujinx.Graphics.Metal
         internal Action<Action> InterruptAction { get; private set; }
         internal SyncManager SyncManager { get; private set; }
         internal AutoFlushCounter AutoFlush { get; private set; }
+        internal FrameCapture FrameCapture { get; private set; }
 
         internal HashSet<Program> Programs { get; }
         internal HashSet<SamplerHolder> Samplers { get; }
@@ -69,6 +70,7 @@ namespace Ryujinx.Graphics.Metal
 
             CommandBufferPool = new CommandBufferPool(_queue);
             AutoFlush = new AutoFlushCounter(this);
+            FrameCapture = new FrameCapture(_device);
             _window = new Window(this, layer);
             _pipeline = new Pipeline(_device, this);
             BufferManager = new BufferManager(_device, this, _pipeline);

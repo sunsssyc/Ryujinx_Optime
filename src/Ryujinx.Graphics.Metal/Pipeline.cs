@@ -177,6 +177,7 @@ namespace Ryujinx.Graphics.Metal
             FlushCommandsImpl();
 
             _renderer.AutoFlush.Present();
+            _renderer.FrameCapture.ProcessPresent();
 
             _presentCount++;
 
@@ -469,6 +470,19 @@ namespace Ryujinx.Graphics.Metal
             DrawCount++;
         }
 
+        private void TraceDraw(string kind, int count, int instanceCount, int firstIndexOrVertex)
+        {
+            if (_renderer.FrameCapture.DrawTraceActive)
+            {
+                Texture target = _encoderStateManager.RenderTargets[0];
+                string targetText = target != null ? $"{target.Width}x{target.Height}/{target.Info.Format}" : "none";
+
+                Logger.Warning?.PrintMsg(
+                    LogClass.Gpu,
+                    $"trace draw#{DrawCount} {kind} count={count} inst={instanceCount} first={firstIndexOrVertex} rt={targetText}");
+            }
+        }
+
         public void Draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance, string debugGroupName)
         {
             if (vertexCount == 0)
@@ -477,6 +491,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
+            TraceDraw("Draw", vertexCount, instanceCount, firstVertex);
 
             MTLPrimitiveType primitiveType = TopologyRemap(_encoderStateManager.Topology).Convert();
 
@@ -560,6 +575,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
+            TraceDraw("DrawIndexed", indexCount, instanceCount, firstIndex);
 
             MTLBuffer mtlBuffer;
             int offset;
