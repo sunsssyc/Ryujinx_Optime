@@ -324,17 +324,17 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
 
                 bool loadHostCache = header.CodeGenVersion == CodeGenVersion;
 
-                if (context.Capabilities.Api == TargetApi.Metal)
-                {
-                    loadHostCache = false;
-                }
-
                 int programIndex = 0;
 
                 DataEntry entry = new();
 
                 while (tocFileStream.Position < tocFileStream.Length && loader.Active)
                 {
+                    if (!loader.ShouldLoadProgram(programIndex))
+                    {
+                        break;
+                    }
+
                     ulong dataOffset = 0;
                     tocReader.Read(ref dataOffset);
 
@@ -466,7 +466,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
                 string tocFilePath = Path.Combine(_basePath, GetHostTocFileName(context));
                 string dataFilePath = Path.Combine(_basePath, GetHostDataFileName(context));
 
-                if (!File.Exists(tocFilePath) || !File.Exists(dataFilePath))
+                if (!File.Exists(tocFilePath) ||
+                    !File.Exists(dataFilePath) ||
+                    new FileInfo(tocFilePath).Length < Unsafe.SizeOf<TocHeader>())
                 {
                     return (null, null);
                 }
@@ -478,7 +480,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
 
                 TocHeader header = new();
 
-                tempTocReader.Read(ref header);
+                if (!tempTocReader.TryRead(ref header) ||
+                    header.Magic != TochMagic ||
+                    header.FormatVersion != FileFormatVersionPacked)
+                {
+                    return (null, null);
+                }
 
                 if (header.Timestamp < expectedTimestamp)
                 {
@@ -635,10 +642,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
                 return;
             }
 
-            if (context.Capabilities.Api != TargetApi.Metal)
-            {
-                WriteHostCode(context, hostCode, program.Shaders, streams, timestamp);
-            }
+            WriteHostCode(context, hostCode, program.Shaders, streams, timestamp);
         }
 
         /// <summary>

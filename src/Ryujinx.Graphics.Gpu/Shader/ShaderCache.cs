@@ -155,20 +155,20 @@ namespace Ryujinx.Graphics.Gpu.Shader
         /// <param name="cancellationToken">Cancellation token to cancel the shader cache initialization process</param>
         internal void Initialize(CancellationToken cancellationToken)
         {
-            // The experimental Metal backend currently keeps a MTLLibrary and its
-            // functions alive for every loaded program. Preloading a large disk
-            // cache can therefore consume tens of gigabytes and cause heavy swap.
-            // Populate Metal's in-memory cache on demand until it has a persistent
-            // compiled pipeline/archive cache that can be loaded without doing so.
-            if (_diskCacheHostStorage.CacheEnabled && _context.Capabilities.Api != TargetApi.Metal)
+            if (_diskCacheHostStorage.CacheEnabled)
             {
+                int preloadLimit = _context.Capabilities.Api == TargetApi.Metal
+                    ? GraphicsConfig.MetalShaderCachePreloadLimit
+                    : -1;
+
                 ParallelDiskCacheLoader loader = new(
                     _context,
                     _graphicsShaderCache,
                     _computeShaderCache,
                     _diskCacheHostStorage,
                     ShaderCacheStateUpdate,
-                    cancellationToken);
+                    cancellationToken,
+                    preloadLimit);
 
                 loader.LoadShaders();
 

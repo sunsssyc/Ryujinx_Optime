@@ -24,6 +24,7 @@ namespace Ryujinx.Graphics.Metal
         private readonly IProgram _programColorBlitF;
         private readonly IProgram _programColorBlitI;
         private readonly IProgram _programColorBlitU;
+        private readonly IProgram _programPresentF;
         private readonly IProgram _programColorBlitMsF;
         private readonly IProgram _programColorBlitMsI;
         private readonly IProgram _programColorBlitMsU;
@@ -73,6 +74,17 @@ namespace Ryujinx.Graphics.Metal
                 new ShaderSource(blitSourceU, ShaderStage.Fragment, TargetLanguage.Msl),
                 new ShaderSource(blitSourceU, ShaderStage.Vertex, TargetLanguage.Msl)
             ], blitResourceLayout);
+
+            ResourceLayout presentResourceLayout = new ResourceLayoutBuilder()
+                .Add(ResourceStages.Vertex | ResourceStages.Fragment, ResourceType.UniformBuffer, 0)
+                .Add(ResourceStages.Fragment, ResourceType.TextureAndSampler, 0).Build();
+
+            string presentSource = ReadMsl("Present.metal");
+            string presentSourceF = presentSource.Replace("FORMAT", "float", StringComparison.Ordinal);
+            _programPresentF = new Program(renderer, device, [
+                new ShaderSource(presentSourceF, ShaderStage.Fragment, TargetLanguage.Msl),
+                new ShaderSource(presentSourceF, ShaderStage.Vertex, TargetLanguage.Msl)
+            ], presentResourceLayout);
 
             string blitMsSource = ReadMsl("BlitMs.metal");
 
@@ -328,6 +340,86 @@ namespace Ryujinx.Graphics.Metal
             }
 
             // Restore previous state
+            _pipeline.SwapState(null);
+        }
+
+        public unsafe void PresentColor(
+            CommandBufferScoped cbs,
+            Texture src,
+            Texture dst,
+            Extents2D srcRegion,
+            Extents2D dstRegion,
+            float sharpeningLevel,
+            bool clear = false)
+        {
+            _pipeline.SwapState(_helperShaderState);
+
+            const int RegionBufferSize = 32;
+
+            _pipeline.SetTextureAndSampler(ShaderStage.Fragment, 0, src, _samplerLinear);
+
+            Span<float> region = stackalloc float[RegionBufferSize / sizeof(float)];
+
+            region[0] = srcRegion.X1 / (float)src.Width;
+            region[1] = srcRegion.X2 / (float)src.Width;
+            region[2] = srcRegion.Y1 / (float)src.Height;
+            region[3] = srcRegion.Y2 / (float)src.Height;
+
+            if (dstRegion.X1 > dstRegion.X2)
+            {
+                (region[0], region[1]) = (region[1], region[0]);
+            }
+
+            if (dstRegion.Y1 > dstRegion.Y2)
+            {
+                (region[2], region[3]) = (region[3], region[2]);
+            }
+
+            region[4] = 1f / src.Width;
+            region[5] = 1f / src.Height;
+            region[6] = Math.Clamp(sharpeningLevel, 0f, 1f) * 0.25f;
+            region[7] = 0f;
+
+            using ScopedTemporaryBuffer buffer = _renderer.BufferManager.ReserveOrCreate(cbs, RegionBufferSize);
+            buffer.Holder.SetDataUnchecked<float>(buffer.Offset, region);
+            _pipeline.SetUniformBuffers([new BufferAssignment(0, buffer.Range)]);
+
+            Rectangle<float> rect = new(
+                MathF.Min(dstRegion.X1, dstRegion.X2),
+                MathF.Min(dstRegion.Y1, dstRegion.Y2),
+                MathF.Abs(dstRegion.X2 - dstRegion.X1),
+                MathF.Abs(dstRegion.Y2 - dstRegion.Y1));
+
+            Span<Viewport> viewports = stackalloc Viewport[16];
+
+            viewports[0] = new Viewport(
+                rect,
+                ViewportSwizzle.PositiveX,
+                ViewportSwizzle.PositiveY,
+                ViewportSwizzle.PositiveZ,
+                ViewportSwizzle.PositiveW,
+                0f,
+                1f);
+
+            Span<Rectangle<int>> scissors = stackalloc Rectangle<int>[16];
+
+            scissors[0] = new Rectangle<int>(0, 0, dst.Width, dst.Height);
+
+            _pipeline.SetRenderTargets([dst], null);
+            _pipeline.SetScissors(scissors);
+
+            _pipeline.SetClearLoadAction(clear);
+
+            _pipeline.SetViewports(viewports);
+            _pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+            _pipeline.SetProgram(_programPresentF);
+            _pipeline.Draw(4, 1, 0, 0, "Present Color Sharp");
+
+            if (clear)
+            {
+                _pipeline.SetClearLoadAction(false);
+            }
+
             _pipeline.SwapState(null);
         }
 

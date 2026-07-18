@@ -148,13 +148,20 @@ namespace Ryujinx.Graphics.Metal
             return _encoderStateManager.CreateComputeCommandEncoder();
         }
 
-        public void Present(CAMetalDrawable drawable, Texture src, Extents2D srcRegion, Extents2D dstRegion, bool isLinear)
+        public void Present(CAMetalDrawable drawable, Texture src, Extents2D srcRegion, Extents2D dstRegion, bool isLinear, bool useFsrSharpener, float scalingFilterLevel)
         {
             // TODO: Clean this up
             TextureCreateInfo textureInfo = new((int)drawable.Texture.Width, (int)drawable.Texture.Height, (int)drawable.Texture.Depth, (int)drawable.Texture.MipmapLevelCount, (int)drawable.Texture.SampleCount, 0, 0, 0, Format.B8G8R8A8Unorm, 0, Target.Texture2D, SwizzleComponent.Red, SwizzleComponent.Green, SwizzleComponent.Blue, SwizzleComponent.Alpha);
             Texture dst = new(_device, _renderer, this, textureInfo, drawable.Texture, 0, 0);
 
-            _renderer.HelperShader.BlitColor(Cbs, src, dst, srcRegion, dstRegion, isLinear, true);
+            if (useFsrSharpener)
+            {
+                _renderer.HelperShader.PresentColor(Cbs, src, dst, srcRegion, dstRegion, scalingFilterLevel / 100f, true);
+            }
+            else
+            {
+                _renderer.HelperShader.BlitColor(Cbs, src, dst, srcRegion, dstRegion, isLinear, true);
+            }
 
             EndCurrentPass();
 

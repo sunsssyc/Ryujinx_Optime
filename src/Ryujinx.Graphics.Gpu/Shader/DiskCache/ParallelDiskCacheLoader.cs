@@ -21,11 +21,17 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
         private readonly DiskCacheHostStorage _hostStorage;
         private readonly CancellationToken _cancellationToken;
         private readonly Action<ShaderCacheState, int, int> _stateChangeCallback;
+        private readonly int _programLoadLimit;
 
         /// <summary>
         /// Indicates if the cache should be loaded.
         /// </summary>
         public bool Active => !_cancellationToken.IsCancellationRequested;
+
+        /// <summary>
+        /// Indicates if the cache load is capped to avoid keeping too many host programs alive.
+        /// </summary>
+        public bool IsLimitedLoad => _programLoadLimit >= 0;
 
         private bool _needsHostRegen;
 
@@ -208,7 +214,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
             ComputeShaderCacheHashTable computeCache,
             DiskCacheHostStorage hostStorage,
             Action<ShaderCacheState, int, int> stateChangeCallback,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            int programLoadLimit = -1)
         {
             _context = context;
             _graphicsCache = graphicsCache;
@@ -216,11 +223,22 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
             _hostStorage = hostStorage;
             _stateChangeCallback = stateChangeCallback;
             _cancellationToken = cancellationToken;
+            _programLoadLimit = programLoadLimit;
             _validationQueue = new Queue<ProgramEntry>();
             _compilationQueue = new ConcurrentQueue<ProgramCompilation>();
             _asyncTranslationQueue = new BlockingCollection<AsyncProgramTranslation>(ThreadCount);
             _programList = new SortedList<int, (CachedShaderProgram, byte[])>();
             _backendParallelCompileThreads = Math.Min(Environment.ProcessorCount, 8); // Must be kept in sync with the backend code.
+        }
+
+        /// <summary>
+        /// Checks if a cache entry should be loaded.
+        /// </summary>
+        /// <param name="programIndex">Program index on disk</param>
+        /// <returns>True if the program is within the configured load range, false otherwise</returns>
+        public bool ShouldLoadProgram(int programIndex)
+        {
+            return _programLoadLimit < 0 || programIndex < _programLoadLimit;
         }
 
         /// <summary>
@@ -238,14 +256,22 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
                 };
             }
 
-            int programCount = _hostStorage.GetProgramCount();
+            int storedProgramCount = _hostStorage.GetProgramCount();
+            int programCount = _programLoadLimit < 0 ? storedProgramCount : Math.Min(storedProgramCount, _programLoadLimit);
 
             _compiledCount = 0;
             _totalCount = programCount;
 
             _stateChangeCallback(ShaderCacheState.Start, 0, programCount);
 
-            Logger.Info?.Print(LogClass.Gpu, $"Loading {programCount} shaders from the cache...");
+            if (programCount == storedProgramCount)
+            {
+                Logger.Info?.Print(LogClass.Gpu, $"Loading {programCount} shaders from the cache...");
+            }
+            else
+            {
+                Logger.Info?.Print(LogClass.Gpu, $"Loading {programCount} of {storedProgramCount} shaders from the cache...");
+            }
 
             for (int index = 0; index < ThreadCount; index++)
             {
@@ -286,7 +312,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
 
             CheckCompilationBlocking();
 
-            if (_needsHostRegen && Active)
+            if (_needsHostRegen && Active && !IsLimitedLoad)
             {
                 // Rebuild both shared and host cache files.
                 // Rebuilding shared is required because the shader information returned by the translator
@@ -336,6 +362,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
                 {
                     Logger.Warning?.Print(LogClass.Gpu, $"Error deleting the shader cache file. {ioException.Message}");
                 }
+            }
+            else if (_needsHostRegen && IsLimitedLoad)
+            {
+                Logger.Warning?.Print(LogClass.Gpu, "Skipping shader cache rebuild because this cache load was limited.");
             }
 
             Logger.Info?.Print(LogClass.Gpu, "Shader cache loaded.");

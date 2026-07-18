@@ -31,9 +31,10 @@ namespace Ryujinx.Graphics.Metal
 
         public bool IsVSyncEnabled => _metalLayer.DisplaySyncEnabled;
 
-        // private float _scalingFilterLevel;
+        private float _scalingFilterLevel = 80f;
         private bool _updateScalingFilter;
         private ScalingFilter _currentScalingFilter;
+        private bool _useFsrSharpener;
         // private bool _colorSpacePassthroughEnabled;
 
         public Window(MetalRenderer renderer, CAMetalLayer metalLayer)
@@ -131,7 +132,9 @@ namespace Ryujinx.Graphics.Metal
                     tex,
                     new Extents2D(srcX0, srcY0, srcX1, srcY1),
                     new Extents2D(dstX0, dstY0, dstX1, dstY1),
-                    _isLinear);
+                    _isLinear,
+                    _useFsrSharpener,
+                    _scalingFilterLevel);
             }
         }
 
@@ -172,7 +175,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetScalingFilterLevel(float level)
         {
-            // _scalingFilterLevel = level;
+            _scalingFilterLevel = level;
             _updateScalingFilter = true;
         }
 
@@ -218,9 +221,14 @@ namespace Ryujinx.Graphics.Metal
                         _scalingFilter?.Dispose();
                         _scalingFilter = null;
                         _isLinear = _currentScalingFilter == ScalingFilter.Bilinear;
+                        _useFsrSharpener = false;
                         break;
                     case ScalingFilter.Fsr:
-                        Logger.Warning?.PrintMsg(LogClass.Gpu, "FSR not implemented for Metal backend!");
+                        _scalingFilter?.Dispose();
+                        _scalingFilter = null;
+                        _isLinear = true;
+                        _useFsrSharpener = true;
+                        Logger.Info?.PrintMsg(LogClass.Gpu, "Using Metal present sharpener for FSR scaling filter.");
                         break;
                 }
             }

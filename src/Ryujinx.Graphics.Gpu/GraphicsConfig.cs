@@ -1,3 +1,5 @@
+using System;
+
 namespace Ryujinx.Graphics.Gpu
 {
     /// <summary>
@@ -63,6 +65,14 @@ namespace Ryujinx.Graphics.Gpu
         public static bool EnableSpirvCompilationOnVulkan { get; set; } = true;
 
         /// <summary>
+        /// Maximum number of Metal shader cache entries to preload at startup.
+        /// Set RYUJINX_METAL_SHADER_CACHE_PRELOAD_LIMIT to override. Use 0 to disable
+        /// Metal preloading, or a negative value to load the full cache.
+        /// </summary>
+        public static int MetalShaderCachePreloadLimit { get; set; } =
+            GetEnvironmentInt("RYUJINX_METAL_SHADER_CACHE_PRELOAD_LIMIT", 0);
+
+        /// <summary>
         /// Enables or disables recompression of compressed textures that are not natively supported by the host.
         /// </summary>
         public static bool EnableTextureRecompression { get; set; } = false;
@@ -71,5 +81,12 @@ namespace Ryujinx.Graphics.Gpu
         /// Enables or disables color space passthrough, if available.
         /// </summary>
         public static bool EnableColorSpacePassthrough { get; set; } = false;
+
+        private static int GetEnvironmentInt(string name, int defaultValue)
+        {
+            string value = Environment.GetEnvironmentVariable(name);
+
+            return int.TryParse(value, out int result) ? result : defaultValue;
+        }
     }
 }

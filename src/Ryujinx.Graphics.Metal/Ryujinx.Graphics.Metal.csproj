@@ -13,6 +13,7 @@
     <ItemGroup>
       <EmbeddedResource Include="Shaders\Blit.metal" />
       <EmbeddedResource Include="Shaders\BlitMs.metal" />
+      <EmbeddedResource Include="Shaders\Present.metal" />
       <EmbeddedResource Include="Shaders\ChangeBufferStride.metal" />
       <EmbeddedResource Include="Shaders\ConvertD32S8ToD24S8.metal" />
       <EmbeddedResource Include="Shaders\ConvertIndexBuffer.metal" />
