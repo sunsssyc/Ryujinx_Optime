@@ -979,6 +979,8 @@ namespace Ryujinx.Ava.Systems
             // Initialize Renderer.
             GraphicsBackend backend = ConfigurationState.Instance.Graphics.GraphicsBackend;
 
+            GraphicsConfig.MetalBackendActive = backend == GraphicsBackend.Metal && RunningPlatform.IsArmMac;
+
             IRenderer renderer = backend switch
             {
 #pragma warning disable CA1416 // This call site is reachable on all platforms

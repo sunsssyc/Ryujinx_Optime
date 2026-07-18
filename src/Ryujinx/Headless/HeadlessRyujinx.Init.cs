@@ -14,6 +14,7 @@ using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Metal;
 using Ryujinx.Graphics.OpenGL;
 using Ryujinx.Graphics.Vulkan;
+using Ryujinx.Graphics.Gpu;
 using Ryujinx.HLE;
 using Ryujinx.Input;
 using Ryujinx.Input.SDL3;
@@ -214,6 +215,8 @@ namespace Ryujinx.Headless
             if (options.GraphicsBackend == GraphicsBackend.Metal && window is MetalWindow metalWindow)
             {
 #pragma warning disable CA1416
+                GraphicsConfig.MetalBackendActive = true;
+
                 return new MetalRenderer(metalWindow.GetLayer);
 #pragma warning restore CA1416
             }

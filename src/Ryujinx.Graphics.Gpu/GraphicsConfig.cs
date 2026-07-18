@@ -65,12 +65,25 @@ namespace Ryujinx.Graphics.Gpu
         public static bool EnableSpirvCompilationOnVulkan { get; set; } = true;
 
         /// <summary>
+        /// Indicates that the active renderer is the native Metal backend.
+        /// Set by the frontend before the emulated console is initialized. The shader
+        /// disk cache uses a separate directory in this case, because Metal builds use
+        /// a different shader codegen version than the stock Vulkan releases and the
+        /// two would otherwise invalidate (and concurrently clobber) each other's
+        /// shared cache files.
+        /// </summary>
+        public static bool MetalBackendActive { get; set; }
+
+        /// <summary>
         /// Maximum number of Metal shader cache entries to preload at startup.
         /// Set RYUJINX_METAL_SHADER_CACHE_PRELOAD_LIMIT to override. Use 0 to disable
         /// Metal preloading, or a negative value to load the full cache.
+        /// The full cache is loaded by default now that Metal has its own cache
+        /// directory: it starts empty and grows organically, and host binaries are
+        /// valid on reload, so preloading no longer risks a long first-boot freeze.
         /// </summary>
         public static int MetalShaderCachePreloadLimit { get; set; } =
-            GetEnvironmentInt("RYUJINX_METAL_SHADER_CACHE_PRELOAD_LIMIT", 0);
+            GetEnvironmentInt("RYUJINX_METAL_SHADER_CACHE_PRELOAD_LIMIT", -1);
 
         /// <summary>
         /// Forces Metal WaitForIdle host syncs to be submitted immediately.
