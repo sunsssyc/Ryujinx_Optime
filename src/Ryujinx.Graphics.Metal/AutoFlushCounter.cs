@@ -97,6 +97,24 @@ namespace Ryujinx.Graphics.Metal
             return now > _lastFlush + _drawFlushTimer;
         }
 
+        /// <summary>
+        /// Time-based submission bound for upload/compute heavy stretches (asset
+        /// streaming), where draws and attachment changes are too rare to drive the
+        /// cadence. Only fires outside an active render pass, so normal rendering
+        /// never gets split by it; the caller checks the current encoder type.
+        /// </summary>
+        public bool ShouldFlushDeferredSync()
+        {
+            if (!Enabled)
+            {
+                return false;
+            }
+
+            long now = Stopwatch.GetTimestamp();
+
+            return now > _lastFlush + _framebufferFlushTimer;
+        }
+
         public bool ShouldFlushAttachmentChange(ulong drawCount)
         {
             if (!Enabled)

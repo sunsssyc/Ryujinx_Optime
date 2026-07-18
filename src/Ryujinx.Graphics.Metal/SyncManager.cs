@@ -106,7 +106,19 @@ namespace Ryujinx.Graphics.Metal
                 // interrupts in real games. Submit a small batch proactively so Metal
                 // can overlap execution with guest CPU work while preserving every
                 // original sync and wait boundary.
+                //
+                // During asset streaming there are almost no draws or attachment
+                // changes, so the draw-driven auto-flush cannot bound the deferral
+                // window and waits grow to the size of upload-heavy command buffers.
+                // Outside of an active render pass a time-based bound is cheap and
+                // safe, so apply it here in addition to the count-based backstop.
                 if (_deferredSyncBatchSize != 0 && ++_deferredSyncsSinceFlush >= _deferredSyncBatchSize)
+                {
+                    Interlocked.Increment(ref _proactiveFlushCount);
+                    _renderer.FlushAllCommands();
+                }
+                else if (_renderer.CurrentEncoderType != EncoderType.Render &&
+                    _renderer.AutoFlush.ShouldFlushDeferredSync())
                 {
                     Interlocked.Increment(ref _proactiveFlushCount);
                     _renderer.FlushAllCommands();

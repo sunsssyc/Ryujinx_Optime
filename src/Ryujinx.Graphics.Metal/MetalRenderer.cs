@@ -285,6 +285,8 @@ namespace Ryujinx.Graphics.Metal
             _pipeline.FlushCommandsImpl();
         }
 
+        internal EncoderType CurrentEncoderType => _pipeline.CurrentEncoderType;
+
         public void RegisterFlush()
         {
             SyncManager.RegisterFlush();
