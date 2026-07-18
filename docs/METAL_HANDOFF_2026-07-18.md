@@ -94,7 +94,35 @@ FSR 变回 Bilinear、各向异性变回 Auto；修复后为 8GiB / FSR 80 / 16x
 ```text
 cbb82c7b metal: add adaptive auto-flush submission scheduling
 bd4827f1 metal: declare sRGB color space on the CAMetalLayer
+bfd8e4cc metal: bound deferred sync latency during upload-heavy stretches
 ```
+
+### 0.5 v29 MainField 实测与 v30（2026-07-18 深夜）
+
+用户用 v29 实际进入 MainField 游玩（骑马夜间移动）：大部分 25–30 FPS，
+跑动进入新场景时仍可掉到 ~15；截图 23.49 FPS / 42.58ms / FIFO 26.73%。
+对实时会话日志（`~/Library/Logs/Ryujinx/`）和 5 秒 sample 的分析显示系统
+呈**双模**：
+
+- **安静片段：同步等待已经归零**（多个 120 帧窗口 0 waits；5s sample 中
+  waitUntilCompleted 仅 9/2375 样本）。此时 host GPU ~27% 忙、后端线程
+  ~70% 空闲、guest 线程主要在等游戏内部同步 —— 剩余天花板在模拟 CPU 的
+  单线程关键路径，不在 Metal 后端。v28 的目标在稳态已全部达成。
+- **流送突发（新场景加载）**：每 120 帧 2–5 秒等待、200+ 次 ≥8ms、
+  forced flush ~99。原因：上传密集、draw 稀少，draw/attachment 两个
+  auto-flush 触发器都不工作，只剩 batch-16 兜底，command buffer 又变大。
+
+v30（commit `bfd8e4cc`，candidate `Ryujinx-metal-v30-stream-flush`）针对
+后者：deferred sync 创建时若距上次提交 >1ms 且当前不在 render pass 内
+（blit/compute/none encoder）则提交。正常渲染不会被此路径切分。预期
+流送掉帧变浅变短；稳态行为不变。**组装时用户正在玩 v29，该候选尚未做
+冒烟启动验证。**
+
+**下一步的决定性测试（P0，用户操作）**：同一存档同一地点，Vulkan 与
+Metal v30 各测一次（静止/跑动/新场景流送）。若该场景 Vulkan 也只有
+25–30，则 Metal 已达平价，"Vulkan 30–45" 可能来自更轻的场景记忆；若
+Vulkan 明显更高，则差距在模拟 CPU 关键路径与 Vulkan/Metal 的驱动开销
+差异，需要新的 profiling 方向（GAL 命令处理、编码器重绑成本等）。
 
 ## 1. 结论先行
 
