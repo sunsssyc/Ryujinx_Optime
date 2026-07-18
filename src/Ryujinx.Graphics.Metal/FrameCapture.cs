@@ -20,26 +20,35 @@ namespace Ryujinx.Graphics.Metal
     class FrameCapture
     {
         private const string TriggerPath = "/tmp/ryujinx-metal-capture";
+        private const string TraceTriggerPath = "/tmp/ryujinx-metal-trace";
 
-        private readonly MTLDevice _device;
+        private readonly MTLCommandQueue _queue;
         private bool _capturing;
+        private int _traceFramesRemaining;
         private bool _supportChecked;
         private bool _supported;
         private string _outputPath;
 
-        public bool DrawTraceActive => _capturing;
+        public bool DrawTraceActive => _capturing || _traceFramesRemaining > 0;
 
-        public FrameCapture(MTLDevice device)
+        public FrameCapture(MTLCommandQueue queue)
         {
-            _device = device;
+            _queue = queue;
         }
 
         /// <summary>
         /// Called once per presented frame, after the present was queued. Starts a
         /// capture when the trigger file exists and stops it one full frame later.
+        /// The draw-trace trigger logs the draws of the next frames without touching
+        /// MTLCaptureManager at all, so it cannot disturb the frame pipeline.
         /// </summary>
         public void ProcessPresent()
         {
+            if (_traceFramesRemaining > 0 && --_traceFramesRemaining == 0)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, "Metal draw trace finished.");
+            }
+
             if (_capturing)
             {
                 MTLCaptureManager.SharedCaptureManager().StopCapture();
@@ -50,18 +59,17 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            if (!File.Exists(TriggerPath))
+            if (_traceFramesRemaining == 0 && TryConsumeTrigger(TraceTriggerPath))
             {
+                _traceFramesRemaining = 3;
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu, "Metal draw trace started for 3 frames.");
+
                 return;
             }
 
-            try
+            if (!TryConsumeTrigger(TriggerPath))
             {
-                File.Delete(TriggerPath);
-            }
-            catch (IOException)
-            {
-                // If the trigger cannot be deleted, do not capture endlessly.
                 return;
             }
 
@@ -85,6 +93,32 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            StartGpuTrace(manager);
+        }
+
+        private static bool TryConsumeTrigger(string path)
+        {
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+
+            try
+            {
+                File.Delete(path);
+            }
+            catch (IOException)
+            {
+                // If the trigger cannot be deleted, do not fire endlessly.
+                return false;
+            }
+
+            return true;
+        }
+
+        private void StartGpuTrace(MTLCaptureManager manager)
+        {
+
             _outputPath = $"/tmp/ryujinx-metal-{DateTime.Now:yyyyMMdd-HHmmss}.gputrace";
 
             NSString outputString = StringHelper.NSString(_outputPath);
@@ -92,7 +126,10 @@ namespace Ryujinx.Graphics.Metal
 
             MTLCaptureDescriptor descriptor = new()
             {
-                CaptureObject = _device,
+                // Capture only the main command queue: a whole-device capture also
+                // records the background queue and has been observed to wedge the
+                // frame pipeline entirely.
+                CaptureObject = _queue,
                 Destination = MTLCaptureDestination.GPUTraceDocument,
                 OutputURL = outputUrl,
             };

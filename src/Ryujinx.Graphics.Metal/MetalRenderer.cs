@@ -70,7 +70,7 @@ namespace Ryujinx.Graphics.Metal
 
             CommandBufferPool = new CommandBufferPool(_queue);
             AutoFlush = new AutoFlushCounter(this);
-            FrameCapture = new FrameCapture(_device);
+            FrameCapture = new FrameCapture(_queue);
             _window = new Window(this, layer);
             _pipeline = new Pipeline(_device, this);
             BufferManager = new BufferManager(_device, this, _pipeline);
