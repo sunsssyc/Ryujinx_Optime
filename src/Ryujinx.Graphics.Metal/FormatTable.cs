@@ -161,6 +161,7 @@ namespace Ryujinx.Graphics.Metal
             Add(Format.A1B5G5R5Unorm, MTLPixelFormat.A1BGR5Unorm);
             Add(Format.B8G8R8A8Unorm, MTLPixelFormat.BGRA8Unorm);
             Add(Format.B8G8R8A8Srgb, MTLPixelFormat.BGRA8UnormsRGB);
+            Add(Format.B10G10R10A2Unorm, MTLPixelFormat.BGR10A2Unorm);
         }
 
         private static void Add(Format format, MTLPixelFormat mtlFormat)

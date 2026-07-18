@@ -2,6 +2,7 @@ using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Metal.Effects;
+using Ryujinx.Graphics.Metal.SharpMetalExtensions;
 using SharpMetal.ObjectiveCCore;
 using SharpMetal.QuartzCore;
 using System;
@@ -43,12 +44,41 @@ namespace Ryujinx.Graphics.Metal
         private int _lastLoggedPresentDrawableHeight;
         private ScalingFilter _lastLoggedPresentScalingFilter;
         private float _lastLoggedPresentScalingLevel = -1f;
-        // private bool _colorSpacePassthroughEnabled;
+        private bool _colorSpacePassthroughEnabled;
+
+        // The emulated console renders in sRGB. Without an explicit layer color space
+        // the compositor does no color matching, so on wide-gamut (P3) displays the
+        // output is oversaturated with a cyan/green shift and deeper shadows compared
+        // to the Vulkan (MoltenVK) backend, which declares an sRGB surface.
+        private static readonly IntPtr _srgbColorSpace =
+            CAMetalLayerExtensions.CreateNamedColorSpace("kCGColorSpaceSRGB");
 
         public Window(MetalRenderer renderer, CAMetalLayer metalLayer)
         {
             _renderer = renderer;
             _metalLayer = metalLayer;
+
+            ApplyColorSpace();
+        }
+
+        private void ApplyColorSpace()
+        {
+            if (_colorSpacePassthroughEnabled)
+            {
+                _metalLayer.SetColorspace(IntPtr.Zero);
+
+                Logger.Info?.PrintMsg(LogClass.Gpu, "Metal layer color space: passthrough (no color matching).");
+            }
+            else if (_srgbColorSpace != IntPtr.Zero)
+            {
+                _metalLayer.SetColorspace(_srgbColorSpace);
+
+                Logger.Info?.PrintMsg(LogClass.Gpu, "Metal layer color space: sRGB.");
+            }
+            else
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, "Failed to create sRGB color space; Metal layer keeps the system default.");
+            }
         }
 
         private void ResizeIfNeeded()
@@ -191,7 +221,9 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetColorSpacePassthrough(bool colorSpacePassThroughEnabled)
         {
-            // _colorSpacePassthroughEnabled = colorSpacePassThroughEnabled;
+            _colorSpacePassthroughEnabled = colorSpacePassThroughEnabled;
+
+            ApplyColorSpace();
         }
 
         private void UpdateEffect()
@@ -279,7 +311,8 @@ namespace Ryujinx.Graphics.Metal
 
             Logger.Info?.PrintMsg(
                 LogClass.Gpu,
-                $"Metal present: src {srcWidth}x{srcHeight} texture {tex.Width}x{tex.Height} dst {dstWidth}x{dstHeight} drawable {_width}x{_height} scaling {_currentScalingFilter} level {_scalingFilterLevel:0.##}.");
+                $"Metal present: src {srcWidth}x{srcHeight} texture {tex.Width}x{tex.Height} format {tex.Info.Format}/{tex.MtlFormat} " +
+                $"dst {dstWidth}x{dstHeight} drawable {_width}x{_height} scaling {_currentScalingFilter} level {_scalingFilterLevel:0.##}.");
         }
 
         public void Dispose()
