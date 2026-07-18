@@ -136,7 +136,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
                     _activeStream = new BrotliStream(_stream, CompressionMode.Decompress, true);
                     break;
                 default:
-                    throw new ArgumentException($"Invalid compression algorithm \"{algorithm}\"");
+                    // An unknown algorithm value means the record is torn or was
+                    // overwritten (observed after two emulator instances appended to
+                    // the same cache concurrently). InvalidDataException is handled
+                    // by ParallelDiskCacheLoader, which then rebuilds the cache from
+                    // the successfully loaded programs instead of crashing.
+                    throw new InvalidDataException($"Invalid compression algorithm \"{algorithm}\"");
             }
         }
 
