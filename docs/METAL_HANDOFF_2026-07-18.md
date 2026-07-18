@@ -156,6 +156,40 @@ commit `45d21716` 已把读侧 BeginCompression 改抛 `InvalidDataException`，
    metal_apple.* 已随备份移出活动目录（重建后索引已错位且当前构建
    反正不读它）。
 
+### 0.7 v31：同场景对测裁决与两项针对性修复（2026-07-19 凌晨）
+
+用户完成了深穴同点位、同 mod（dFPS 45 上限）的双后端对测：
+
+- **帧率**：Vulkan 44.8–44.9（顶满 mod 上限，FIFO 46–51%）vs
+  Metal v30 30.7–32.4（FIFO 28–40%）。Metal 仍落后约 30%，未达平价。
+  稳态同步等待已清零，剩余差距是新的 profiling 课题（后端线程编码成本、
+  pass 切分、pacing 交互）。
+- **画质**：整体色调两边已基本一致（v29 colorspace 修复被实测确认）。
+  但 Metal 缺少发光蘑菇/植物，瘴气（gloom）不流动呈死红色。已排除
+  FXAA（用户设置为 None）与 shader 转换失败（会话日志零错误）。
+
+v31（candidate `Ryujinx-metal-v31-cache-indirect`）两项修复：
+
+1. **独立着色器缓存目录**（commit `78a3bbdd`）：Metal 构建改用
+   `cache/shader-metal`，与原装版的 `cache/shader` 彻底解耦，根治
+   7353/7354 互相无效化和并发追加损坏两类事故；同时预加载默认改为
+   完整加载（`RYUJINX_METAL_SHADER_CACHE_PRELOAD_LIMIT` 默认 -1，
+   0 可回退旧的按需模式）。新缓存从空开始自然增长，首次游玩有按需
+   编译卡顿，之后启动即预加载。
+2. **停止谎报 indirect count 支持**（commit `e54c9a15`）：Metal 后端的
+   `DrawIndexedIndirectCount` 实现忽略 GPU 写入的 count 缓冲、盲目循环
+   maxDrawCount 次——TOTK 的植被/特效是 GPU 剔除 + indirect count 驱动，
+   这正是蘑菇缺失/瘴气凝固的最大嫌疑。能力位改为 false 后，
+   `MultiDrawElementsIndirectCount` 宏不再走 HLE，而由 Macro JIT 在模拟
+   CPU 上读取真实 count 逐条绘制——与 Vulkan 在 Apple GPU 上（MoltenVK
+   无 VK_KHR_draw_indirect_count）实际运行的路径完全一致，该路径已被
+   证明画面正确且能到 45 帧。真正的 GPU 侧实现（compute 预处理 patch
+   indirect buffer 或 ICB）留作后续优化。
+
+v31 冒烟（无人值守）：shader-metal 目录正常创建、空缓存加载 0 条、
+sRGB 生效、零致命错误。**待用户验证：深穴同点位蘑菇/瘴气是否恢复、
+帧率变化（宏 JIT 路径每帧增加模拟 CPU 工作，需实测）。**
+
 ## 1. 结论先行
 
 当前分支已经恢复并适配了实验性原生 Metal 后端，能够在 Apple M1 Max 上启动
