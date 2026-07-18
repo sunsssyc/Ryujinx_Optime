@@ -86,13 +86,17 @@ namespace Ryujinx.Graphics.Gpu
             GetEnvironmentInt("RYUJINX_METAL_SHADER_CACHE_PRELOAD_LIMIT", -1);
 
         /// <summary>
-        /// Forces Metal WaitForIdle host syncs to be submitted immediately.
-        /// This is disabled by default so CPU and GPU work can overlap. It is kept as
-        /// an experimental A/B fallback for diagnosing games that require the older
-        /// strict submission behaviour.
+        /// Forces Metal WaitForIdle host syncs to be submitted immediately, matching
+        /// the upstream behaviour of every other backend. Strict is the default again:
+        /// the deferred mode predates the adaptive auto-flush and saved little after
+        /// it, while breaking pipelines that read GPU-written data on the CPU right
+        /// after a WaitForIdle (the macro JIT path for indirect-count multi-draws
+        /// fetches GPU-computed draw parameters, and non-strict syncs let it observe
+        /// stale data, seen as flickering foliage in TOTK's Depths).
+        /// Set RYUJINX_METAL_STRICT_WFI=0 to get the old deferred mode for A/B tests.
         /// </summary>
         public static bool MetalStrictWaitForIdle { get; set; } =
-            GetEnvironmentInt("RYUJINX_METAL_STRICT_WFI", 0) != 0;
+            GetEnvironmentInt("RYUJINX_METAL_STRICT_WFI", 1) != 0;
 
         /// <summary>
         /// Enables or disables recompression of compressed textures that are not natively supported by the host.
