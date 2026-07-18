@@ -15,6 +15,7 @@
 - macOS App 的资源封装受代码签名清单保护。替换任意被封装的 DLL 都会使原签名失效，即使主可执行文件本身没有变化。
 - Ad-hoc 重签名会产生新的 CDHash；旧 App 已经获得的本机许可不会自动继承给新 CDHash。
 - 在没有有效 Apple 代码签名身份时，不得承诺新 ad-hoc App 可以通过 Finder、右键“打开”或 Gatekeeper 提示正常启动。先执行 `security find-identity -v -p codesigning` 确认签名条件。
+- Apple Development/Personal Team 签名只能说明本机身份可用，不代表所有 entitlement 都会被系统接受。尤其是 `com.apple.security.hypervisor`、JIT、可执行内存和库验证相关 entitlement，必须通过实际启动日志、崩溃日志或最小探针确认已经生效。
 - 不得为了绕过签名问题擅自启用 Terminal 开发者模式、关闭 Gatekeeper、修改“允许以下来源的应用程序”或安装自签名根证书。这些操作必须由用户明确批准。
 - 每个候选包至少执行以下检查：
   - `codesign --verify --deep --verbose=4 <app>`
@@ -27,6 +28,8 @@
 
 - 将“源码正确”“命令行构建可运行”“App 打包正确”“Finder 可启动”视为四个独立阶段，分别验证，不能相互代替。
 - 不要把松散的 RID 输出误当成正式 `.app`。正式交付必须使用匹配当前项目结构的打包流程，并保持版本信息、entitlements、原生库和资源目录一致。
+- 当签名或 Finder 启动仍不稳定时，先用终端启动的松散运行目录验证 Metal 后端的真实性能和画质；等游戏加载、Shader 编译、Mod 和帧率都稳定后，再回到 `.app` 签名打包。不要让打包问题污染性能判断。
+- 终端可运行不代表 `.app` 可运行。手工封装 .NET/macOS App 时，apphost 路径、`Contents/MacOS`、`Contents/Resources`、`Contents/Frameworks`、托管 DLL 和原生库布局必须一起验证，不能只复制一个可执行文件。
 - 版本号必须在交付前核对。基于 1.3.3 的本地修复包不能显示成 1.0.1；标题栏、程序集信息和 App 元数据应一致。
 - 对 .NET universal single-file App 做 bundle 分析前，先使用 `lipo -thin arm64` 或 `lipo -thin x86_64` 提取对应架构；bundle 内偏移通常相对于单架构切片，不能直接按 universal 文件偏移解析。
 - 如果 File Provider 路径中的 publish 长时间停在项目图计算，优先把构建输出、中间目录和 NuGet 缓存放到本地临时磁盘；不要反复启动多个挂起的 publish 进程。
@@ -42,6 +45,7 @@
   4. 检查画面、材质、特效和黑屏/闪烁问题。
   5. 确认用户的 Mod 被加载且画质效果仍存在。
   6. 在相同场景、分辨率、Mod 和缓存条件下对比 Vulkan 与 Metal 帧率。
+- 性能优化必须与正确性一起验收。若 Metal 帧率低于 Vulkan、画质 Mod 不生效或 Shader 阶段卡住，应先保留日志和场景条件，再定位资源绑定、管线缓存、同步等待和 Mod 加载路径；不能用降低画质或跳过错误来掩盖问题。
 - `Subgroup builtins are not available in this type of function` 一类错误属于着色器转换失败，不是单纯编译速度慢。异步编译只能改变卡顿出现的时间，不能使无效着色器成功转换。
 - 优化性能前先建立可重复基线。记录游戏版本、场景、分辨率、VSync、Mod、Shader 缓存状态、平均帧率和最低帧率，避免把缓存预热或 Mod 丢失误判为后端优化。
 - 不得通过禁用画质路径、忽略 Shader 错误或跳过资源同步来换取表面帧率，除非用户明确接受对应画质/正确性损失。
