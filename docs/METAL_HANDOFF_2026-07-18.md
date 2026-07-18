@@ -124,6 +124,38 @@ Metal v30 各测一次（静止/跑动/新场景流送）。若该场景 Vulkan 
 Vulkan 明显更高，则差距在模拟 CPU 关键路径与 Vulkan/Metal 的驱动开销
 差异，需要新的 profiling 方向（GAL 命令处理、编码器重绑成本等）。
 
+### 0.6 着色器缓存事故与共享缓存的重要事实（2026-07-18 深夜）
+
+事故：用户在 Metal 会话尚未退出时启动了原装 Vulkan 版（22:21–22:22），
+两个进程同时对共享的 `cache/shader/shared.data` 追加写入，互相踩踏，
+第 23166 条记录的压缩算法字节被写成垃圾（69）。原装版每次启动加载到该
+条即抛 `ArgumentException`（`Invalid compression algorithm "69"`）闪退
+——该异常不在 ParallelDiskCacheLoader 的 catch 列表里，自愈路径没有机会
+执行。修复：手工把 shared.toc 中该条的 offset 改为 0xFFFFFFFFFFFFFFFF，
+触发 `DiskCacheLoadException`（可被接住）→ 原装版自动用已加载的前
+23166 条重建缓存。修改前全套备份在
+`games/0100F2C0115B6000/cache/shader-backup-corrupt-20260718/`。
+commit `45d21716` 已把读侧 BeginCompression 改抛 `InvalidDataException`，
+使同类损坏今后直接走自愈而不是闪退。
+
+过程中确认的三个重要事实：
+
+1. **CodeGenVersion 版本差**：原装 1.3.3 发行版是 7353；上游 master 在
+   `c0078088`（非均匀索引支持）升到 7354，本分支继承 7354。共享的
+   shared.toc 头由创建者盖章（当前为 7353）。版本不匹配的一方会跳过自己
+   的 host cache 全量重编（并在完整加载时用自己的版本号重写缓存 →
+   两个版本会互相反复重写）。**不要把本分支的常量改回 7353**——上游
+   bump 是真实的 codegen 变更。
+2. **本分支 Metal 路径实际走"受限加载"**（`RYUJINX_METAL_SHADER_CACHE_
+   PRELOAD_LIMIT` 默认 0 → `IsLimitedLoad=true`）：启动时不预编译、
+   不触发重建、也读不到坏记录——这就是 Metal 版一直"没事"而原装版闪退
+   的原因，同时也意味着 Metal 的着色器都是游玩中按需编译的（卡顿来源
+   之一，后续可评估配合 7354 host cache 做真正的预加载）。
+3. **操作规矩**：绝不同时运行两个 Ryujinx 实例（共享缓存无写锁）；
+   退出用界面正常退出，不要强杀进程（后台缓存写入器可能正在追加）。
+   metal_apple.* 已随备份移出活动目录（重建后索引已错位且当前构建
+   反正不读它）。
+
 ## 1. 结论先行
 
 当前分支已经恢复并适配了实验性原生 Metal 后端，能够在 Apple M1 Max 上启动
