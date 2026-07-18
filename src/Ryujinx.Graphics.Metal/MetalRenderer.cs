@@ -206,7 +206,15 @@ namespace Ryujinx.Graphics.Metal
                 supportsViewportIndexVertexTessellation: false,
                 supportsViewportMask: false,
                 supportsViewportSwizzle: false,
-                supportsIndirectParameters: true,
+                // The backend's DrawIndexedIndirectCount/DrawIndirectCount currently
+                // ignore the GPU-written draw count buffer and blindly loop
+                // maxDrawCount times, which breaks GPU-driven foliage and effect
+                // rendering (missing luminous plants, frozen gloom in TOTK).
+                // MoltenVK does not expose VK_KHR_draw_indirect_count on this
+                // hardware either, so the Vulkan backend runs the GPU emulation
+                // layer's indirect-count fallback path — report false so Metal
+                // takes the same proven-correct path.
+                supportsIndirectParameters: false,
                 supportsDepthClipControl: false,
                 uniformBufferSetIndex: (int)Constants.ConstantBuffersSetIndex,
                 storageBufferSetIndex: (int)Constants.StorageBuffersSetIndex,
