@@ -19,7 +19,11 @@
   </Target>
 
   <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="$([MSBuild]::IsOSPlatform('OSX'))">
-    <Exec Command="codesign --entitlements '$(ProjectDir)..\..\distribution\macos\entitlements.xml' -f -s $(SigningCertificate) '$(TargetDir)$(TargetName)'" />
+    <Exec Command="codesign --entitlements '$(ProjectDir)..\..\distribution\macos\entitlements.xml' -f -s &quot;$(SigningCertificate)&quot; '$(TargetDir)$(TargetName)'" />
+  </Target>
+
+  <Target Name="SignMacOSPublishedExecutable" AfterTargets="Publish" Condition="$([MSBuild]::IsOSPlatform('OSX')) And Exists('$(PublishDir)$(TargetName)')">
+    <Exec Command="codesign --entitlements '$(ProjectDir)..\..\distribution\macos\entitlements.xml' -f -s &quot;$(SigningCertificate)&quot; '$(PublishDir)$(TargetName)'" />
   </Target>
 
   <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">

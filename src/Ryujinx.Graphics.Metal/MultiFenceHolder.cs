@@ -1,3 +1,4 @@
+using Ryujinx.Common.Memory;
 using SharpMetal.Metal;
 using System;
 using System.Runtime.Versioning;
@@ -158,7 +159,8 @@ namespace Ryujinx.Graphics.Metal
         /// <returns>True if all fences were signaled before the timeout expired, false otherwise</returns>
         private bool WaitForFencesImpl(int offset, int size, bool indefinite)
         {
-            Span<FenceHolder> fenceHolders = new FenceHolder[CommandBufferPool.MaxCommandBuffers];
+            using SpanOwner<FenceHolder> fenceHoldersOwner = SpanOwner<FenceHolder>.Rent(CommandBufferPool.MaxCommandBuffers);
+            Span<FenceHolder> fenceHolders = fenceHoldersOwner.Span;
 
             int count = size != 0 ? GetOverlappingFences(fenceHolders, offset, size) : GetFences(fenceHolders);
             Span<MTLCommandBuffer> fences = stackalloc MTLCommandBuffer[count];
@@ -167,13 +169,21 @@ namespace Ryujinx.Graphics.Metal
 
             for (int i = 0; i < count; i++)
             {
-                if (fenceHolders[i].TryGet(out MTLCommandBuffer fence))
+                FenceHolder fenceHolder = fenceHolders[i];
+
+                if (fenceHolder.TryGet(out MTLCommandBuffer fence))
                 {
+                    if (fence.Status == MTLCommandBufferStatus.Completed)
+                    {
+                        fenceHolder.Put();
+                        continue;
+                    }
+
                     fences[fenceCount] = fence;
 
                     if (fenceCount < i)
                     {
-                        fenceHolders[fenceCount] = fenceHolders[i];
+                        fenceHolders[fenceCount] = fenceHolder;
                     }
 
                     fenceCount++;
@@ -187,27 +197,33 @@ namespace Ryujinx.Graphics.Metal
 
             bool signaled = true;
 
-            if (indefinite)
+            try
             {
-                foreach (MTLCommandBuffer fence in fences)
+                if (indefinite)
                 {
-                    fence.WaitUntilCompleted();
-                }
-            }
-            else
-            {
-                foreach (MTLCommandBuffer fence in fences)
-                {
-                    if (fence.Status != MTLCommandBufferStatus.Completed)
+                    for (int i = 0; i < fenceCount; i++)
                     {
-                        signaled = false;
+                        fences[i].WaitUntilCompleted();
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < fenceCount; i++)
+                    {
+                        if (fences[i].Status != MTLCommandBufferStatus.Completed)
+                        {
+                            signaled = false;
+                            break;
+                        }
                     }
                 }
             }
-
-            for (int i = 0; i < fenceCount; i++)
+            finally
             {
-                fenceHolders[i].Put();
+                for (int i = 0; i < fenceCount; i++)
+                {
+                    fenceHolders[i].Put();
+                }
             }
 
             return signaled;

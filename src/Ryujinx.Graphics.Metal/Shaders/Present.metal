@@ -21,6 +21,50 @@ struct Textures
     sampler sampler;
 };
 
+static float cubicWeight(float x) {
+    x = abs(x);
+    float x2 = x * x;
+    float x3 = x2 * x;
+
+    if (x <= 1.0f) {
+        return 1.5f * x3 - 2.5f * x2 + 1.0f;
+    }
+
+    if (x < 2.0f) {
+        return -0.5f * x3 + 2.5f * x2 - 4.0f * x + 2.0f;
+    }
+
+    return 0.0f;
+}
+
+static FORMAT4 sampleCatmullRom(texture2d<FORMAT, access::sample> texture,
+                                sampler samplerState,
+                                float2 uv,
+                                float2 texel) {
+    float2 sourceSize = 1.0f / texel;
+    float2 pixel = uv * sourceSize - 0.5f;
+    float2 basePixel = floor(pixel);
+    float2 fraction = pixel - basePixel;
+
+    float4 color = float4(0.0f);
+    float weightSum = 0.0f;
+
+    for (int y = -1; y <= 2; y++) {
+        float wy = cubicWeight(float(y) - fraction.y);
+
+        for (int x = -1; x <= 2; x++) {
+            float wx = cubicWeight(float(x) - fraction.x);
+            float weight = wx * wy;
+            float2 sampleUv = (basePixel + float2(float(x), float(y)) + 0.5f) * texel;
+
+            color += float4(texture.sample(samplerState, sampleUv)) * weight;
+            weightSum += weight;
+        }
+    }
+
+    return FORMAT4(color / max(weightSum, 0.00001f));
+}
+
 vertex CopyVertexOut vertexMain(uint vid [[vertex_id]],
                                 constant ConstantBuffers &constant_buffers [[buffer(CONSTANT_BUFFERS_INDEX)]]) {
     CopyVertexOut out;
@@ -50,13 +94,28 @@ fragment FORMAT4 fragmentMain(CopyVertexOut in [[stage_in]],
         return center;
     }
 
+    center = sampleCatmullRom(textures.texture, textures.sampler, in.uv, texel);
+
     float3 north = float3(textures.texture.sample(textures.sampler, in.uv + float2(0.0f, -texel.y)).rgb);
     float3 south = float3(textures.texture.sample(textures.sampler, in.uv + float2(0.0f, texel.y)).rgb);
     float3 east = float3(textures.texture.sample(textures.sampler, in.uv + float2(texel.x, 0.0f)).rgb);
     float3 west = float3(textures.texture.sample(textures.sampler, in.uv + float2(-texel.x, 0.0f)).rgb);
 
-    float3 blurred = (north + south + east + west) * 0.25f;
-    float3 sharpened = clamp(float3(center.rgb) + (float3(center.rgb) - blurred) * sharpness, 0.0f, 1.0f);
+    float3 e = float3(center.rgb);
+    float3 mn4 = min(min(north, south), min(east, west));
+    float3 mx4 = max(max(north, south), max(east, west));
+
+    float3 hitMin = min(mn4, e) / max(4.0f * mx4, float3(0.00001f));
+    float3 hitMax = (1.0f - max(mx4, e)) / min(4.0f * mn4 - 4.0f, float3(-0.00001f));
+    float3 lobeRgb = max(-hitMin, hitMax);
+
+    float lobe = max(max(lobeRgb.r, lobeRgb.g), lobeRgb.b);
+    float rcasSharpness = exp2(-(1.5f - clamp(sharpness, 0.0f, 1.0f) * 1.5f));
+
+    lobe = max(-0.1875f, min(lobe, 0.0f)) * rcasSharpness;
+
+    float rcpL = 1.0f / (4.0f * lobe + 1.0f);
+    float3 sharpened = clamp((lobe * (north + south + east + west) + e) * rcpL, 0.0f, 1.0f);
 
     return FORMAT4(sharpened, center.a);
 }

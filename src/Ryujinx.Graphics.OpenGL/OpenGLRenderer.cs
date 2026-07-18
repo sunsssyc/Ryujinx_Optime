@@ -304,12 +304,12 @@ namespace Ryujinx.Graphics.OpenGL
             return new Program(programBinary, hasFragmentShader, info.FragmentOutputMap);
         }
 
-        public void CreateSync(ulong id, bool strict)
+        public void CreateSync(ulong id, bool strict, HostSyncCreateSource source = HostSyncCreateSource.Unknown)
         {
             _sync.Create(id);
         }
 
-        public void WaitSync(ulong id)
+        public void WaitSync(ulong id, HostSyncWaitSource source = HostSyncWaitSource.Unknown)
         {
             _sync.Wait(id);
         }

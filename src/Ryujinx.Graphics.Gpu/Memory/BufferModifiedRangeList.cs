@@ -1,3 +1,4 @@
+using Ryujinx.Graphics.GAL;
 using Ryujinx.Memory.Range;
 using System;
 using System.Buffers;
@@ -412,49 +413,73 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 return;
             }
             
-            Lock.EnterWriteLock();
-            // We use the non-span method here because the array is partially modified by the code, which would invalidate a span.
-            BufferModifiedRange[] overlaps = FindOverlapsAsArray(address, size, out int rangeCount);
-
-            if (rangeCount == 0)
-            {
-                Lock.ExitWriteLock();
-                
-                return;
-            }
-
-            // First, determine which syncpoint to wait on.
-            // This is the latest syncpoint that is not equal to the current sync.
-
             long highestDiff = long.MinValue;
+            BufferModifiedRange[] overlaps = null;
+            int rangeCount = 0;
 
-            for (int i = 0; i < rangeCount; i++)
+            // Snapshot the sync number to wait for while the range list is stable, but
+            // do not keep its lock while the host GPU is executing. Holding the write
+            // lock across WaitSync serializes unrelated buffer tracking work with Metal.
+            Lock.EnterReadLock();
+
+            try
             {
-                BufferModifiedRange overlap = overlaps![i];
+                overlaps = FindOverlapsAsArray(address, size, out rangeCount);
 
-                long diff = (long)(overlap.SyncNumber - currentSync);
-
-                if (diff < 0 && diff > highestDiff)
+                for (int i = 0; i < rangeCount; i++)
                 {
-                    highestDiff = diff;
+                    BufferModifiedRange overlap = overlaps[i];
+                    long diff = (long)(overlap.SyncNumber - currentSync);
+
+                    if (diff < 0 && diff > highestDiff)
+                    {
+                        highestDiff = diff;
+                    }
+                }
+            }
+            finally
+            {
+                Lock.ExitReadLock();
+
+                if (overlaps != null)
+                {
+                    ArrayPool<BufferModifiedRange>.Shared.Return(overlaps);
+                    overlaps = null;
                 }
             }
 
             if (highestDiff == long.MinValue)
             {
-                Lock.ExitWriteLock();
-                
                 return;
             }
 
-            // Wait for the syncpoint.
-            _context.Renderer.WaitSync(currentSync + (ulong)highestDiff);
+            // Wait without holding the range lock. Another thread may update the list
+            // while waiting, so the overlapping ranges are queried again afterwards.
+            _context.Renderer.WaitSync(currentSync + (ulong)highestDiff, HostSyncWaitSource.BufferModifiedRange);
 
-            RemoveRangesAndFlush(overlaps, rangeCount, highestDiff, currentSync, address, endAddress);
-            
-            ArrayPool<BufferModifiedRange>.Shared.Return(overlaps!);
-            
-            Lock.ExitWriteLock();
+            Lock.EnterWriteLock();
+
+            try
+            {
+                overlaps = FindOverlapsAsArray(address, size, out rangeCount);
+
+                if (rangeCount != 0)
+                {
+                    // The original sync boundary is intentionally reused here. Any new
+                    // modification registered while waiting has a newer sync number and
+                    // is therefore kept in the list rather than flushed prematurely.
+                    RemoveRangesAndFlush(overlaps, rangeCount, highestDiff, currentSync, address, endAddress);
+                }
+            }
+            finally
+            {
+                if (overlaps != null)
+                {
+                    ArrayPool<BufferModifiedRange>.Shared.Return(overlaps);
+                }
+
+                Lock.ExitWriteLock();
+            }
         }
 
         /// <summary>

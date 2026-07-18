@@ -1,3 +1,4 @@
+using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Synchronization;
 using Ryujinx.Memory.Tracking;
 using System;
@@ -337,7 +338,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             {
                 // On unbind, textures that flush often should immediately create sync so their result can be obtained as soon as possible.
 
-                context.CreateHostSyncIfNeeded(HostSyncFlags.Force);
+                context.CreateHostSyncIfNeeded(HostSyncFlags.Force, HostSyncCreateSource.TextureUnbindForce);
             }
 
             // Note: Bind count currently resets to 0 on inherit for safety, as the handle <-> view relationship can change.
@@ -379,7 +380,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             if (diff > 0)
             {
-                context.Renderer.WaitSync(sync);
+                context.Renderer.WaitSync(sync, inBuffer ? HostSyncWaitSource.TextureGroupInBuffer : HostSyncWaitSource.TextureGroup);
 
                 if ((long)(_modifiedSync - sync) > 0)
                 {

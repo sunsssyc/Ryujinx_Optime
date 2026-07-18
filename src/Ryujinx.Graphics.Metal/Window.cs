@@ -35,6 +35,14 @@ namespace Ryujinx.Graphics.Metal
         private bool _updateScalingFilter;
         private ScalingFilter _currentScalingFilter;
         private bool _useFsrSharpener;
+        private int _lastLoggedPresentSrcWidth;
+        private int _lastLoggedPresentSrcHeight;
+        private int _lastLoggedPresentDstWidth;
+        private int _lastLoggedPresentDstHeight;
+        private int _lastLoggedPresentDrawableWidth;
+        private int _lastLoggedPresentDrawableHeight;
+        private ScalingFilter _lastLoggedPresentScalingFilter;
+        private float _lastLoggedPresentScalingLevel = -1f;
         // private bool _colorSpacePassthroughEnabled;
 
         public Window(MetalRenderer renderer, CAMetalLayer metalLayer)
@@ -126,6 +134,8 @@ namespace Ryujinx.Graphics.Metal
                 {
                     // TODO: Run scaling filter
                 }
+
+                LogPresentConfigurationIfChanged(tex, srcX0, srcX1, srcY0, srcY1, dstWidth, dstHeight);
 
                 pipeline.Present(
                     drawable,
@@ -232,6 +242,44 @@ namespace Ryujinx.Graphics.Metal
                         break;
                 }
             }
+        }
+
+        private void LogPresentConfigurationIfChanged(
+            Texture tex,
+            int srcX0,
+            int srcX1,
+            int srcY0,
+            int srcY1,
+            int dstWidth,
+            int dstHeight)
+        {
+            int srcWidth = Math.Abs(srcX1 - srcX0);
+            int srcHeight = Math.Abs(srcY1 - srcY0);
+
+            if (srcWidth == _lastLoggedPresentSrcWidth &&
+                srcHeight == _lastLoggedPresentSrcHeight &&
+                dstWidth == _lastLoggedPresentDstWidth &&
+                dstHeight == _lastLoggedPresentDstHeight &&
+                _width == _lastLoggedPresentDrawableWidth &&
+                _height == _lastLoggedPresentDrawableHeight &&
+                _currentScalingFilter == _lastLoggedPresentScalingFilter &&
+                Math.Abs(_scalingFilterLevel - _lastLoggedPresentScalingLevel) < 0.01f)
+            {
+                return;
+            }
+
+            _lastLoggedPresentSrcWidth = srcWidth;
+            _lastLoggedPresentSrcHeight = srcHeight;
+            _lastLoggedPresentDstWidth = dstWidth;
+            _lastLoggedPresentDstHeight = dstHeight;
+            _lastLoggedPresentDrawableWidth = _width;
+            _lastLoggedPresentDrawableHeight = _height;
+            _lastLoggedPresentScalingFilter = _currentScalingFilter;
+            _lastLoggedPresentScalingLevel = _scalingFilterLevel;
+
+            Logger.Info?.PrintMsg(
+                LogClass.Gpu,
+                $"Metal present: src {srcWidth}x{srcHeight} texture {tex.Width}x{tex.Height} dst {dstWidth}x{dstHeight} drawable {_width}x{_height} scaling {_currentScalingFilter} level {_scalingFilterLevel:0.##}.");
         }
 
         public void Dispose()

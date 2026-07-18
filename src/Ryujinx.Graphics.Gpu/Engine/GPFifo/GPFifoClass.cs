@@ -1,4 +1,6 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.Device;
+using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Engine.MME;
 using Ryujinx.Graphics.Gpu.Synchronization;
 using System;
@@ -17,6 +19,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         private readonly DeviceState<GPFifoClassState> _state;
 
         private bool _createSyncPending;
+        private static int _metalWaitForIdleModeLogged;
 
         private const int MacrosCount = 0x80;
 
@@ -49,6 +52,15 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
 
             _macros = new Macro[MacrosCount];
             _macroCode = new int[MacroCodeSize];
+
+            if (_context.Capabilities.Api == Ryujinx.Graphics.Shader.Translation.TargetApi.Metal &&
+                Interlocked.Exchange(ref _metalWaitForIdleModeLogged, 1) == 0)
+            {
+                string mode = GraphicsConfig.MetalStrictWaitForIdle ? "strict" : "deferred";
+                Logger.Info?.PrintMsg(
+                    LogClass.Gpu,
+                    $"Metal WaitForIdle host sync mode: {mode}. Set RYUJINX_METAL_STRICT_WFI=1 to use the strict A/B fallback.");
+            }
         }
 
         /// <summary>
@@ -59,7 +71,17 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             if (_createSyncPending)
             {
                 _createSyncPending = false;
-                _context.CreateHostSyncIfNeeded(HostSyncFlags.None);
+
+                // Keep WaitForIdle lazy by default so the CPU can continue submitting
+                // work while Metal executes previous command buffers. The strict mode
+                // is retained only as an opt-in A/B fallback for correctness testing.
+                HostSyncFlags flags =
+                    _context.Capabilities.Api == Ryujinx.Graphics.Shader.Translation.TargetApi.Metal &&
+                    GraphicsConfig.MetalStrictWaitForIdle
+                    ? HostSyncFlags.Strict
+                    : HostSyncFlags.None;
+
+                _context.CreateHostSyncIfNeeded(flags, HostSyncCreateSource.WaitForIdle);
             }
         }
 
@@ -160,7 +182,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
                 // "Unbind" render targets since a syncpoint increment might indicate future CPU access for the textures.
                 _parent.TextureManager.RefreshModifiedTextures();
 
-                _context.CreateHostSyncIfNeeded(HostSyncFlags.StrictSyncpoint);
+                _context.CreateHostSyncIfNeeded(HostSyncFlags.StrictSyncpoint, HostSyncCreateSource.Syncpoint);
                 _context.Synchronization.IncrementSyncpoint(syncpointId);
             }
 
@@ -187,7 +209,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         {
             _context.Renderer.Pipeline.CommandBufferBarrier();
 
-            _context.CreateHostSyncIfNeeded(HostSyncFlags.Strict);
+            _context.CreateHostSyncIfNeeded(HostSyncFlags.Strict, HostSyncCreateSource.SetReference);
         }
 
         /// <summary>

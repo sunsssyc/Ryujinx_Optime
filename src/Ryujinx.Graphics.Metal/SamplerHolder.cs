@@ -19,7 +19,17 @@ namespace Ryujinx.Graphics.Metal
 
             (MTLSamplerMinMagFilter minFilter, MTLSamplerMipFilter mipFilter) = info.MinFilter.Convert();
 
+            float minLod = info.MinLod;
+            float maxLod = info.MaxLod;
+
+            if (info.MinFilter is MinFilter.Nearest or MinFilter.Linear)
+            {
+                minLod = 0;
+                maxLod = 0.25f;
+            }
+
             MTLSamplerBorderColor borderColor = GetConstrainedBorderColor(info.BorderColor, out _);
+            uint maxAnisotropy = Math.Clamp((uint)MathF.Ceiling(info.MaxAnisotropy), 1, 16);
 
             using MTLSamplerDescriptor descriptor = new()
             {
@@ -28,10 +38,11 @@ namespace Ryujinx.Graphics.Metal
                 MagFilter = info.MagFilter.Convert(),
                 MipFilter = mipFilter,
                 CompareFunction = info.CompareOp.Convert(),
-                LodMinClamp = info.MinLod,
-                LodMaxClamp = info.MaxLod,
+                LodMinClamp = minLod,
+                LodMaxClamp = maxLod,
+                LodBias = info.MipLodBias,
                 LodAverage = false,
-                MaxAnisotropy = Math.Max((uint)info.MaxAnisotropy, 1),
+                MaxAnisotropy = maxAnisotropy,
                 SAddressMode = info.AddressU.Convert(),
                 TAddressMode = info.AddressV.Convert(),
                 RAddressMode = info.AddressP.Convert(),

@@ -5,6 +5,7 @@ using SharpMetal.Foundation;
 using SharpMetal.Metal;
 using SharpMetal.QuartzCore;
 using System;
+using System.Diagnostics;
 using System.Runtime.Versioning;
 
 namespace Ryujinx.Graphics.Metal
@@ -22,12 +23,14 @@ namespace Ryujinx.Graphics.Metal
     {
         private const ulong MinByteWeightForFlush = 256 * 1024 * 1024; // MiB
         private const int MaxDisposedResourceCountForFlush = 4096;
+        private const int SyncStatsLogFrameInterval = 120;
 
         private readonly MTLDevice _device;
         private readonly MetalRenderer _renderer;
         private EncoderStateManager _encoderStateManager;
         private ulong _byteWeight;
         private int _disposedResourceCount;
+        private int _presentCount;
 
         public MTLCommandBuffer CommandBuffer;
 
@@ -169,8 +172,31 @@ namespace Ryujinx.Graphics.Metal
 
             FlushCommandsImpl();
 
-            // TODO: Auto flush counting
-            _renderer.SyncManager.GetAndResetWaitTicks();
+            _presentCount++;
+
+            if (_presentCount % SyncStatsLogFrameInterval == 0)
+            {
+                long syncWaitTicks = _renderer.SyncManager.GetAndResetWaitStats(
+                    out int syncWaitCount,
+                    out int forcedSyncFlushCount,
+                    out int proactiveSyncFlushCount,
+                    out int coalescedSyncSignalCount,
+                    out string waitBreakdown,
+                    out string createBreakdown);
+
+                if (syncWaitCount != 0 || forcedSyncFlushCount != 0 || proactiveSyncFlushCount != 0 || coalescedSyncSignalCount != 0)
+                {
+                    double waitMs = syncWaitTicks * 1000.0 / Stopwatch.Frequency;
+                    string sourceText = string.IsNullOrEmpty(waitBreakdown) ? string.Empty : $" wait: {waitBreakdown}.";
+                    string createText = string.IsNullOrEmpty(createBreakdown) ? string.Empty : $" created: {createBreakdown}.";
+
+                    Logger.Info?.PrintMsg(
+                        LogClass.Gpu,
+                        $"Metal sync stats over last {SyncStatsLogFrameInterval} frames: {waitMs:F2}ms in {syncWaitCount} waits, " +
+                        $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
+                        $"{coalescedSyncSignalCount} coalesced signals.{sourceText}{createText}");
+                }
+            }
 
             // Cleanup
             dst.Dispose();

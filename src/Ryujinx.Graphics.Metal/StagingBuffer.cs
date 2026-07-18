@@ -25,7 +25,7 @@ namespace Ryujinx.Graphics.Metal
     [SupportedOSPlatform("macos")]
     class StagingBuffer : IDisposable
     {
-        private const int BufferSize = 32 * 1024 * 1024;
+        private const int BufferSize = 128 * 1024 * 1024;
 
         private int _freeOffset;
         private int _freeSize;

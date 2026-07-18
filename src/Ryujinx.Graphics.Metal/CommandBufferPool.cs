@@ -258,7 +258,11 @@ namespace Ryujinx.Graphics.Metal
 
             if (entry.InConsumption)
             {
-                entry.Fence.Wait();
+                if (!entry.Fence.IsSignaled())
+                {
+                    entry.Fence.Wait();
+                }
+
                 entry.InConsumption = false;
             }
 

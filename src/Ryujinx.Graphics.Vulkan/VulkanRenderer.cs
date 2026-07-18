@@ -987,7 +987,7 @@ namespace Ryujinx.Graphics.Vulkan
             action();
         }
 
-        public void CreateSync(ulong id, bool strict)
+        public void CreateSync(ulong id, bool strict, HostSyncCreateSource source = HostSyncCreateSource.Unknown)
         {
             SyncManager.Create(id, strict);
         }
@@ -997,7 +997,7 @@ namespace Ryujinx.Graphics.Vulkan
             throw new NotImplementedException();
         }
 
-        public void WaitSync(ulong id)
+        public void WaitSync(ulong id, HostSyncWaitSource source = HostSyncWaitSource.Unknown)
         {
             SyncManager.Wait(id);
         }

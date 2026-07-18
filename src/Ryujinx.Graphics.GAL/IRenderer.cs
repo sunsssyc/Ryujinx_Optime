@@ -48,7 +48,7 @@ namespace Ryujinx.Graphics.GAL
 
         bool PrepareHostMapping(nint address, ulong size);
 
-        void CreateSync(ulong id, bool strict);
+        void CreateSync(ulong id, bool strict, HostSyncCreateSource source = HostSyncCreateSource.Unknown);
 
         void DeleteBuffer(BufferHandle buffer);
 
@@ -75,7 +75,7 @@ namespace Ryujinx.Graphics.GAL
             gpuLoop();
         }
 
-        void WaitSync(ulong id);
+        void WaitSync(ulong id, HostSyncWaitSource source = HostSyncWaitSource.Unknown);
 
         void Initialize(GraphicsDebugLevel logLevel);
 

@@ -138,9 +138,9 @@ namespace Ryujinx.Graphics.Metal
             return false;
         }
 
-        public void CreateSync(ulong id, bool strict)
+        public void CreateSync(ulong id, bool strict, HostSyncCreateSource source = HostSyncCreateSource.Unknown)
         {
-            SyncManager.Create(id, strict);
+            SyncManager.Create(id, strict, source);
         }
 
         public void DeleteBuffer(BufferHandle buffer)
@@ -168,7 +168,11 @@ namespace Ryujinx.Graphics.Metal
                 supportsBc123Compression: true,
                 supportsBc45Compression: true,
                 supportsBc67Compression: true,
-                supportsEtc2Compression: true,
+                // SharpMetal 1.0.0-preview21 exposes ETC2 RGB/RGB_A1 formats, but not
+                // ETC2 RGBA8/RGBA8 sRGB. Report ETC2 as unsupported so the GPU texture
+                // compatibility path decodes all ETC2 variants to RGBA8 instead of
+                // allowing unsupported RGBA ETC2 textures to reach the Metal backend.
+                supportsEtc2Compression: false,
                 supports3DTextureCompression: true,
                 supportsBgraFormat: true,
                 supportsR4G4Format: false,
@@ -269,9 +273,9 @@ namespace Ryujinx.Graphics.Metal
             // https://developer.apple.com/documentation/metal/gpu_counters_and_counter_sample_buffers/creating_a_counter_sample_buffer_to_store_a_gpu_s_counter_data_during_a_pass?language=objc
         }
 
-        public void WaitSync(ulong id)
+        public void WaitSync(ulong id, HostSyncWaitSource source = HostSyncWaitSource.Unknown)
         {
-            SyncManager.Wait(id);
+            SyncManager.Wait(id, source);
         }
 
         public void FlushAllCommands()

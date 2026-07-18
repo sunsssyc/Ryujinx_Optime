@@ -377,7 +377,7 @@ namespace Ryujinx.Graphics.Metal
 
             region[4] = 1f / src.Width;
             region[5] = 1f / src.Height;
-            region[6] = Math.Clamp(sharpeningLevel, 0f, 1f) * 0.25f;
+            region[6] = Math.Clamp(sharpeningLevel, 0f, 1f);
             region[7] = 0f;
 
             using ScopedTemporaryBuffer buffer = _renderer.BufferManager.ReserveOrCreate(cbs, RegionBufferSize);
@@ -413,7 +413,7 @@ namespace Ryujinx.Graphics.Metal
             _pipeline.SetViewports(viewports);
             _pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
             _pipeline.SetProgram(_programPresentF);
-            _pipeline.Draw(4, 1, 0, 0, "Present Color Sharp");
+            _pipeline.Draw(4, 1, 0, 0, "Present Color RCAS Sharp");
 
             if (clear)
             {

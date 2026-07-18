@@ -327,10 +327,10 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             return sampler;
         }
 
-        public unsafe void CreateSync(ulong id, bool strict)
+        public unsafe void CreateSync(ulong id, bool strict, HostSyncCreateSource source = HostSyncCreateSource.Unknown)
         {
             Sync.CreateSyncHandle(id);
-            New<CreateSyncCommand>()->Set(id, strict);
+            New<CreateSyncCommand>()->Set(id, strict, source);
             QueueCommand();
         }
 
@@ -470,11 +470,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             QueueCommand();
         }
 
-        public void WaitSync(ulong id)
+        public void WaitSync(ulong id, HostSyncWaitSource source = HostSyncWaitSource.Unknown)
         {
             Sync.WaitSyncAvailability(id);
 
-            _baseRenderer.WaitSync(id);
+            _baseRenderer.WaitSync(id, source);
         }
 
         private void Interrupt(Action action)

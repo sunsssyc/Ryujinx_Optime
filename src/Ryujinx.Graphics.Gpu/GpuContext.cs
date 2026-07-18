@@ -379,7 +379,7 @@ namespace Ryujinx.Graphics.Gpu
         /// If no actions are present, a host sync object is not created.
         /// </summary>
         /// <param name="flags">Modifiers for how host sync should be created</param>
-        internal void CreateHostSyncIfNeeded(HostSyncFlags flags)
+        internal void CreateHostSyncIfNeeded(HostSyncFlags flags, HostSyncCreateSource source = HostSyncCreateSource.Unknown)
         {
             bool syncPoint = (flags & HostSyncFlags.Syncpoint) == HostSyncFlags.Syncpoint;
             bool strict = (flags & HostSyncFlags.Strict) == HostSyncFlags.Strict;
@@ -417,7 +417,7 @@ namespace Ryujinx.Graphics.Gpu
                     action.SyncPreAction(syncPoint);
                 }
 
-                Renderer.CreateSync(SyncNumber, strict);
+                Renderer.CreateSync(SyncNumber, strict, source);
 
                 SyncNumber++;
 
