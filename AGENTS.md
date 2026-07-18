@@ -31,6 +31,8 @@
 - 当签名或 Finder 启动仍不稳定时，先用终端启动的松散运行目录验证 Metal 后端的真实性能和画质；等游戏加载、Shader 编译、Mod 和帧率都稳定后，再回到 `.app` 签名打包。不要让打包问题污染性能判断。
 - 终端可运行不代表 `.app` 可运行。手工封装 .NET/macOS App 时，apphost 路径、`Contents/MacOS`、`Contents/Resources`、`Contents/Frameworks`、托管 DLL 和原生库布局必须一起验证，不能只复制一个可执行文件。
 - 版本号必须在交付前核对。基于 1.3.3 的本地修复包不能显示成 1.0.1；标题栏、程序集信息和 App 元数据应一致。
+- 单独构建并替换某个 Graphics DLL 时，必须核对该 DLL 的 `AssemblyVersion`、`FileVersion`、`AssemblyInformationalVersion` 是否与当前运行目录匹配。单项目 `dotnet build` 可能产出默认 `1.0.0.0` 程序集版本，导致运行时按 `Ryujinx.Graphics.Metal, Version=1.3.3.0` 加载失败，表现为主界面能开但启动游戏闪退。
+- 如果需要临时单独构建 DLL，必须显式传入当前候选包所需版本参数（例如 `-p:AssemblyVersion=1.3.3.0 -p:FileVersion=1.3.3.0 -p:Version=1.3.3 -p:InformationalVersion=...`），并用 `strings <dll>`、哈希和一次实际游戏加载验证，不得只凭编译通过交付。
 - 对 .NET universal single-file App 做 bundle 分析前，先使用 `lipo -thin arm64` 或 `lipo -thin x86_64` 提取对应架构；bundle 内偏移通常相对于单架构切片，不能直接按 universal 文件偏移解析。
 - 如果 File Provider 路径中的 publish 长时间停在项目图计算，优先把构建输出、中间目录和 NuGet 缓存放到本地临时磁盘；不要反复启动多个挂起的 publish 进程。
 - Git 提交只代表已跟踪源码。交付 App、临时 DLL 和 `artifacts/` 中的未跟踪文件不能被描述成“已随 commit 保存”。交付时明确记录分支、基线提交、修复提交和产物路径。
