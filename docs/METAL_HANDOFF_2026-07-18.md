@@ -190,6 +190,54 @@ v31 冒烟（无人值守）：shader-metal 目录正常创建、空缓存加载
 sRGB 生效、零致命错误。**待用户验证：深穴同点位蘑菇/瘴气是否恢复、
 帧率变化（宏 JIT 路径每帧增加模拟 CPU 工作，需实测）。**
 
+### 0.8 v31 实测、v32/v33 与绘制流取证（2026-07-19 凌晨）
+
+v31 用户实测：植物可见性改善（indirect count 修复生效，远处可见），
+但**走近或转动视角时整批闪烁/消失**；瘴气仍不流动；地面纹理仍有硬块
+（部分归因于配置又被原装版回写：各向异性回到 Auto，已再次恢复 16 并
+写入 0.6 节的注意事项）。个别点位帧率高于 v30（40.30 FPS @瘴气长廊），
+不同点位 26–34。
+
+v32（commit `2a0dae97`）：Metal WaitForIdle 物化恢复严格默认
+（`RYUJINX_METAL_STRICT_WFI=0` 回退旧延迟模式）。理由：延迟模式是
+auto-flush 之前的优化，现在收益归零，而宏 JIT 路径要在 CPU 读
+GPU 写的数据。**用户实测：严格模式没有消除闪烁 → 时序理论被证伪**，
+但严格默认保留（上游正确行为、开销可忽略）。
+
+v33（commits `237f2f3f`+`16fcb1b6`，candidate `Ryujinx-metal-v33-capture`）：
+触发文件式取证工具。教训：整设备 MTLCaptureManager 捕获会卡死帧管线
+（16 个 draw 后停滞、gputrace 0 字节，进程空转），已改为只捕获主队列 +
+新增零风险的纯日志绘制追踪（`touch /tmp/ryujinx-metal-trace` → 记录
+3 帧全部绘制；gputrace 用 `/tmp/ryujinx-metal-capture` 且需
+`METAL_CAPTURE_ENABLED=1` 启动）。
+
+**双状态绘制流取证结论**（闪烁帧组 vs 稳定可见帧组，各 3 帧，证据在
+`artifacts/diagnostics/v33-capture/`）：
+
+- 植被以"4 顶点 quad × 数百至数千实例"的公告板方式绘制，采样每帧
+  烘焙的 64×64 R11G11B10Float 替身图集（每帧数百个小绘制烘焙页面，
+  数量逐帧摊销波动属正常）。
+- **两状态的绘制流结构等价**：27 个实例化绘制两边恒定提交，实例总数
+  仅随相机小幅变化（14.6k vs 15.4k）。闪烁帧组内部逐帧也稳定。
+- 因此**排除"绘制未提交/剔除计数错误"**；问题在内容层——图集页面
+  内容或实例数据在坏帧为空/错。哪个页面被采样取决于相机角度与 LOD
+  距离，正好解释"转视角消失、走近消失"。
+
+**下一轮建议（按优先级）**：
+
+1. 重点审查 [TextureCopy.cs](../src/Ryujinx.Graphics.Metal/TextureCopy.cs)
+   与纹理 view 的 slice/level 映射：烘焙→拷入图集→采样 链条中拷贝环节
+   最可疑（页面级、相机相关的内容错误特征）。对照 Vulkan 的
+   TextureCopy/CommandBufferScoped 实现。
+2. 带 `METAL_CAPTURE_ENABLED=1` 启动 v33，在闪烁现场
+   `touch /tmp/ryujinx-metal-capture` 抓队列范围 gputrace（已加固，
+   未再实测），Xcode 打开检查 64×64 图集纹理内容与实例 buffer。
+3. 瘴气不流动同为内容层问题，同一轮 capture 中检查其材质输入
+   （scrolling noise 纹理 / 时间 uniform / 顶点动画数据）。
+4. 帧率：Vulkan 44.8 vs Metal 30–40（同点位、同 mod dFPS 45 上限）。
+   稳态同步已清零，差距在别处：同点位双后端 5s sample 对比后端线程
+   忙闲与编码成本（注意 v33 起做过多次配置漂移修复，测前核对 0.6 节）。
+
 ## 1. 结论先行
 
 当前分支已经恢复并适配了实验性原生 Metal 后端，能够在 Apple M1 Max 上启动
