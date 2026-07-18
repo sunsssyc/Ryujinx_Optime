@@ -31,6 +31,10 @@ namespace Ryujinx.Graphics.Metal
         private ulong _byteWeight;
         private int _disposedResourceCount;
         private int _presentCount;
+        private int _autoFlushDrawCount;
+        private int _autoFlushAttachmentCount;
+
+        public ulong DrawCount { get; private set; }
 
         public MTLCommandBuffer CommandBuffer;
 
@@ -172,6 +176,8 @@ namespace Ryujinx.Graphics.Metal
 
             FlushCommandsImpl();
 
+            _renderer.AutoFlush.Present();
+
             _presentCount++;
 
             if (_presentCount % SyncStatsLogFrameInterval == 0)
@@ -182,19 +188,29 @@ namespace Ryujinx.Graphics.Metal
                     out int proactiveSyncFlushCount,
                     out int coalescedSyncSignalCount,
                     out string waitBreakdown,
-                    out string createBreakdown);
+                    out string createBreakdown,
+                    out string waitDurations);
 
-                if (syncWaitCount != 0 || forcedSyncFlushCount != 0 || proactiveSyncFlushCount != 0 || coalescedSyncSignalCount != 0)
+                int autoFlushDrawCount = _autoFlushDrawCount;
+                int autoFlushAttachmentCount = _autoFlushAttachmentCount;
+                _autoFlushDrawCount = 0;
+                _autoFlushAttachmentCount = 0;
+
+                if (syncWaitCount != 0 || forcedSyncFlushCount != 0 || proactiveSyncFlushCount != 0 || coalescedSyncSignalCount != 0 ||
+                    autoFlushDrawCount != 0 || autoFlushAttachmentCount != 0)
                 {
                     double waitMs = syncWaitTicks * 1000.0 / Stopwatch.Frequency;
                     string sourceText = string.IsNullOrEmpty(waitBreakdown) ? string.Empty : $" wait: {waitBreakdown}.";
                     string createText = string.IsNullOrEmpty(createBreakdown) ? string.Empty : $" created: {createBreakdown}.";
+                    string durationText = string.IsNullOrEmpty(waitDurations) ? string.Empty : $" durations: {waitDurations}.";
 
                     Logger.Info?.PrintMsg(
                         LogClass.Gpu,
                         $"Metal sync stats over last {SyncStatsLogFrameInterval} frames: {waitMs:F2}ms in {syncWaitCount} waits, " +
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
-                        $"{coalescedSyncSignalCount} coalesced signals.{sourceText}{createText}");
+                        $"{coalescedSyncSignalCount} coalesced signals, " +
+                        $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}");
                 }
             }
 
@@ -239,6 +255,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void FlushCommandsImpl()
         {
+            _renderer.AutoFlush.RegisterFlush(DrawCount);
             EndCurrentPass();
 
             _byteWeight = 0;
@@ -439,12 +456,27 @@ namespace Ryujinx.Graphics.Metal
             Draw(vertexCount, instanceCount, firstVertex, firstInstance, String.Empty);
         }
 
+        // Must run before any state or buffer is captured against the current
+        // command buffer, since a flush swaps Cbs.
+        private void AutoFlushPreDraw()
+        {
+            if (_renderer.AutoFlush.ShouldFlushDraw(DrawCount))
+            {
+                _autoFlushDrawCount++;
+                FlushCommandsImpl();
+            }
+
+            DrawCount++;
+        }
+
         public void Draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance, string debugGroupName)
         {
             if (vertexCount == 0)
             {
                 return;
             }
+
+            AutoFlushPreDraw();
 
             MTLPrimitiveType primitiveType = TopologyRemap(_encoderStateManager.Topology).Convert();
 
@@ -527,6 +559,8 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            AutoFlushPreDraw();
+
             MTLBuffer mtlBuffer;
             int offset;
             MTLIndexType type;
@@ -579,6 +613,8 @@ namespace Ryujinx.Graphics.Metal
                 Logger.Warning?.Print(LogClass.Gpu, $"Drawing indexed with unsupported topology: {_encoderStateManager.Topology}");
             }
 
+            AutoFlushPreDraw();
+
             MTLBuffer buffer = _renderer.BufferManager
                 .GetBuffer(indirectBuffer.Handle, indirectBuffer.Offset, indirectBuffer.Size, false)
                 .Get(Cbs, indirectBuffer.Offset, indirectBuffer.Size).Value;
@@ -623,6 +659,8 @@ namespace Ryujinx.Graphics.Metal
                 // TODO: Reindex unsupported topologies
                 Logger.Warning?.Print(LogClass.Gpu, $"Drawing indirect with unsupported topology: {_encoderStateManager.Topology}");
             }
+
+            AutoFlushPreDraw();
 
             MTLBuffer buffer = _renderer.BufferManager
                 .GetBuffer(indirectBuffer.Handle, indirectBuffer.Offset, indirectBuffer.Size, false)
@@ -798,6 +836,14 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetRenderTargets(Span<ITexture> colors, ITexture depthStencil)
         {
+            // Attachment changes end the current render pass anyway, so they are the
+            // cheapest place to submit pending work early for host sync waits.
+            if (_renderer.AutoFlush.ShouldFlushAttachmentChange(DrawCount))
+            {
+                _autoFlushAttachmentCount++;
+                FlushCommandsImpl();
+            }
+
             _encoderStateManager.UpdateRenderTargets(colors, depthStencil);
         }
 

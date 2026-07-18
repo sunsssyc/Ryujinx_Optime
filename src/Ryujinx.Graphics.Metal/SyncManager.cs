@@ -13,8 +13,16 @@ namespace Ryujinx.Graphics.Metal
     [SupportedOSPlatform("macos")]
     class SyncManager
     {
+        // Without auto-flush the batch is the only proactive submission mechanism, so
+        // it must stay small. With auto-flush enabled it is only a backstop for long
+        // draw-less stretches (compute or upload heavy), so it can be much larger.
         private const int DefaultDeferredSyncBatchSize = 4;
+        private const int DefaultDeferredSyncBatchSizeWithAutoFlush = 16;
         private const int MaximumDeferredSyncBatchSize = 64;
+
+        private static readonly long _waitBucketTicks0 = Stopwatch.Frequency / 2000; // 0.5ms
+        private static readonly long _waitBucketTicks1 = Stopwatch.Frequency / 500; // 2ms
+        private static readonly long _waitBucketTicks2 = Stopwatch.Frequency / 125; // 8ms
 
         private class SyncHandle
         {
@@ -38,10 +46,13 @@ namespace Ryujinx.Graphics.Metal
         private ulong _flushId;
         private int _deferredSyncsSinceFlush;
         private long _waitTicks;
+        private long _autoFlushWaitTicks;
         private int _waitCount;
         private int _forcedFlushCount;
         private int _proactiveFlushCount;
         private int _coalescedSignalCount;
+        private long _maxWaitTicks;
+        private readonly int[] _waitBucketCounts = new int[4];
         private readonly long[] _waitTicksByWaitSource = new long[Enum.GetValues<HostSyncWaitSource>().Length];
         private readonly int[] _waitCountByWaitSource = new int[Enum.GetValues<HostSyncWaitSource>().Length];
         private readonly long[] _waitTicksByCreateSource = new long[Enum.GetValues<HostSyncCreateSource>().Length];
@@ -57,6 +68,12 @@ namespace Ryujinx.Graphics.Metal
                 LogClass.Gpu,
                 $"Metal deferred host-sync batch size: {_deferredSyncBatchSize} (0 disables proactive submission). " +
                 "Set RYUJINX_METAL_DEFERRED_SYNC_BATCH to override it for A/B testing.");
+
+            Logger.Info?.PrintMsg(
+                LogClass.Gpu,
+                AutoFlushCounter.ConfiguredEnabled
+                    ? "Metal deferred sync batch acts as a backstop; submission cadence is driven by auto-flush."
+                    : "Metal auto-flush is disabled; deferred sync batch is the only proactive submission mechanism.");
         }
 
         public void RegisterFlush()
@@ -218,9 +235,11 @@ namespace Ryujinx.Graphics.Metal
                         long elapsedTicks = Stopwatch.GetTimestamp() - beforeTicks;
 
                         Interlocked.Add(ref _waitTicks, elapsedTicks);
+                        Interlocked.Add(ref _autoFlushWaitTicks, elapsedTicks);
                         Interlocked.Increment(ref _waitCount);
                         AddBucket(_waitTicksByWaitSource, _waitCountByWaitSource, source, elapsedTicks);
                         AddBucket(_waitTicksByCreateSource, _waitCountByCreateSource, result.Source, elapsedTicks);
+                        AddWaitDurationSample(elapsedTicks);
                         result.Signalled = true;
                     }
                 }
@@ -315,7 +334,12 @@ namespace Ryujinx.Graphics.Metal
 
         public long GetAndResetWaitStats(out int waitCount, out int forcedFlushCount, out int proactiveFlushCount)
         {
-            return GetAndResetWaitStats(out waitCount, out forcedFlushCount, out proactiveFlushCount, out _, out _, out _);
+            return GetAndResetWaitStats(out waitCount, out forcedFlushCount, out proactiveFlushCount, out _, out _, out _, out _);
+        }
+
+        public long GetAndResetAutoFlushWaitTicks()
+        {
+            return Interlocked.Exchange(ref _autoFlushWaitTicks, 0);
         }
 
         public long GetAndResetWaitStats(
@@ -324,7 +348,8 @@ namespace Ryujinx.Graphics.Metal
             out int proactiveFlushCount,
             out int coalescedSignalCount,
             out string waitBreakdown,
-            out string createBreakdown)
+            out string createBreakdown,
+            out string waitDurations)
         {
             long result = Interlocked.Exchange(ref _waitTicks, 0);
             waitCount = Interlocked.Exchange(ref _waitCount, 0);
@@ -333,8 +358,45 @@ namespace Ryujinx.Graphics.Metal
             coalescedSignalCount = Interlocked.Exchange(ref _coalescedSignalCount, 0);
             waitBreakdown = FormatAndResetWaitBuckets(_waitTicksByWaitSource, _waitCountByWaitSource);
             createBreakdown = FormatAndResetCreateBuckets(_waitTicksByCreateSource, _waitCountByCreateSource);
+            waitDurations = FormatAndResetWaitDurations();
 
             return result;
+        }
+
+        private void AddWaitDurationSample(long elapsedTicks)
+        {
+            int bucket = elapsedTicks < _waitBucketTicks0 ? 0 :
+                elapsedTicks < _waitBucketTicks1 ? 1 :
+                elapsedTicks < _waitBucketTicks2 ? 2 : 3;
+
+            Interlocked.Increment(ref _waitBucketCounts[bucket]);
+
+            long currentMax;
+            while (elapsedTicks > (currentMax = Interlocked.Read(ref _maxWaitTicks)))
+            {
+                if (Interlocked.CompareExchange(ref _maxWaitTicks, elapsedTicks, currentMax) == currentMax)
+                {
+                    break;
+                }
+            }
+        }
+
+        private string FormatAndResetWaitDurations()
+        {
+            int bucket0 = Interlocked.Exchange(ref _waitBucketCounts[0], 0);
+            int bucket1 = Interlocked.Exchange(ref _waitBucketCounts[1], 0);
+            int bucket2 = Interlocked.Exchange(ref _waitBucketCounts[2], 0);
+            int bucket3 = Interlocked.Exchange(ref _waitBucketCounts[3], 0);
+            long maxTicks = Interlocked.Exchange(ref _maxWaitTicks, 0);
+
+            if (bucket0 == 0 && bucket1 == 0 && bucket2 == 0 && bucket3 == 0)
+            {
+                return null;
+            }
+
+            double maxMs = maxTicks * 1000.0 / Stopwatch.Frequency;
+
+            return $"<0.5ms:{bucket0}, 0.5-2ms:{bucket1}, 2-8ms:{bucket2}, >=8ms:{bucket3}, max:{maxMs:F2}ms";
         }
 
         private static void AddBucket<T>(long[] ticks, int[] counts, T source, long elapsedTicks) where T : struct, Enum
@@ -395,7 +457,9 @@ namespace Ryujinx.Graphics.Metal
                 return Math.Clamp(batchSize, 0, MaximumDeferredSyncBatchSize);
             }
 
-            return DefaultDeferredSyncBatchSize;
+            return AutoFlushCounter.ConfiguredEnabled
+                ? DefaultDeferredSyncBatchSizeWithAutoFlush
+                : DefaultDeferredSyncBatchSize;
         }
     }
 }

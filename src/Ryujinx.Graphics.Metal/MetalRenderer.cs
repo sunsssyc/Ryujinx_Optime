@@ -39,6 +39,7 @@ namespace Ryujinx.Graphics.Metal
         internal BackgroundResources BackgroundResources { get; private set; }
         internal Action<Action> InterruptAction { get; private set; }
         internal SyncManager SyncManager { get; private set; }
+        internal AutoFlushCounter AutoFlush { get; private set; }
 
         internal HashSet<Program> Programs { get; }
         internal HashSet<SamplerHolder> Samplers { get; }
@@ -67,6 +68,7 @@ namespace Ryujinx.Graphics.Metal
             layer.FramebufferOnly = false;
 
             CommandBufferPool = new CommandBufferPool(_queue);
+            AutoFlush = new AutoFlushCounter(this);
             _window = new Window(this, layer);
             _pipeline = new Pipeline(_device, this);
             BufferManager = new BufferManager(_device, this, _pipeline);
