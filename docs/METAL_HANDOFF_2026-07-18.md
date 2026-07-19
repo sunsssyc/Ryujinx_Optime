@@ -368,6 +368,32 @@ candidate `Ryujinx-metal-v40-barrier-mips`）修复：
 待用户 v40 实测：瘴气流动（本轮最强线索）、植物闪烁、远处地面质量；
 可选验证层复扫确认两类归零。
 
+**0.14 v40 证伪同步论，转向 MSL 翻译审计（2026-07-19 晚）**：用户 v40
+实测"还是老样子"——五类验证层违规全部修复后三症状不变。随后代码侧
+把同步面彻底排空：所有 MTLBuffer 均 storageModeShared + 默认 hazard
+tracking（tracked，跨编码器自动依赖）、compute encoder 用默认
+descriptor（串行 dispatch，编码器内天然有序）、render pass 全部
+Load/Store、`BufferHolder` 的 CPU 读/写路径与 Vulkan 逐行同构。
+**结论：GPU 时间线与 CPU↔GPU 边界的同步理论全部出局，最大剩余分歧面
+= 自研 MSL codegen（Vulkan 走 SPIRV-Cross/MoltenVK）**。v41（commit
+`23e0f36d`，candidate `Ryujinx-metal-v41-shader-trace`）为取证构建：
+
+1. 绘制追踪每条带稳定程序标签（MSL 源 XXH3 前 16 hex），并把所到
+   程序的 MSL 源转储到 `/tmp/ryujinx-metal-shaders/{label}-{stage}.metal`；
+   compute dispatch 与间接绘制也纳入追踪。
+2. GPU capture 加 3 秒看门狗（定时器线程强制 StopCapture）——此前三次
+   卡死都是"到不了下一个 present → capture 永不结束"，现在自动解卡，
+   不再需要强退。此前卡死发生在命令流每帧含数千条非法 scope 屏障 +
+   全部纹理 Usage=Unknown 的时期，UB 清零后值得重试一次。
+
+用户会话流程：`METAL_CAPTURE_ENABLED=1 OS_ACTIVITY_MODE=disable
+./Ryujinx -g Metal` → 深穴点位 touch `/tmp/ryujinx-metal-capture`
+（capture 重试）→ touch `/tmp/ryujinx-metal-trace`（植物可见态）→
+再 touch 一次（闪烁态）→ 退出。产物：日志（含程序标签）、
+`/tmp/ryujinx-metal-*.gputrace`（若成功）、`/tmp/ryujinx-metal-shaders/`。
+后续离线：比对两态绘制的程序集合差异，审计公告板 vert/frag 与瘴气
+材质及其上游 compute kernel 的 MSL。
+
 **（历史记录）当时排定的下一步**：
 
 1. **Xcode 附加式 GPU capture**（用户操作 ~10 分钟，信息量最大）：
