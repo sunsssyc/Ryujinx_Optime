@@ -352,6 +352,22 @@ MTL_DEBUG_LAYER_ERROR_MODE=nslog MTL_DEBUG_LAYER_WARNING_MODE=nslog`
 应第一时间开验证层拿全量清单，而不是逐个理论探针排除。**
 待用户深穴实测 v39 的蘑菇/瘴气/地面三症状与整体回归。
 
+**0.13 深穴验证清单与 v40（2026-07-19 傍晚）**：v39 深穴实测两症状仍在，
+但用户的深穴验证层运行（832MB 日志，验证信息经 stderr 镜像自动进
+~/Library/Logs 文件日志）交出两条现场专属违规，v40（commit `9ddf5f2f`，
+candidate `Ryujinx-metal-v40-barrier-mips`）修复：
+
+1. **compute 屏障 scope 非法 ×5547**：compute encoder 的 MemoryBarrier
+   传了 render-only 的 RenderTargets scope → 屏障行为未定义（可能整条
+   失效）→ compute 写入可被后续读取"读旧"——瘴气流动图/植被页表冻结的
+   直接同步学机制。现仅 Buffers|Textures。
+2. **mip 拷贝越界**：逐级减半不做逐级钳制，src/dst 基级不同时 4 宽
+   拷进 2/1 宽小 mip → 小 mip 内容损坏（远处地面块状嫌疑）。现按两侧
+   真实 mip 尺寸钳制（对齐 Vulkan）。
+
+待用户 v40 实测：瘴气流动（本轮最强线索）、植物闪烁、远处地面质量；
+可选验证层复扫确认两类归零。
+
 **（历史记录）当时排定的下一步**：
 
 1. **Xcode 附加式 GPU capture**（用户操作 ~10 分钟，信息量最大）：
