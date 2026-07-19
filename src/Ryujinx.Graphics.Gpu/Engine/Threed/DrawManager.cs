@@ -1,10 +1,15 @@
+using Ryujinx.Common;
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw;
 using Ryujinx.Graphics.Gpu.Engine.Types;
 using Ryujinx.Graphics.Gpu.Image;
 using Ryujinx.Graphics.Gpu.Memory;
+using Ryujinx.Graphics.Gpu.Shader;
 using Ryujinx.Memory.Range;
 using System;
+using System.IO;
+using System.Runtime.CompilerServices;
 
 namespace Ryujinx.Graphics.Gpu.Engine.Threed
 {
@@ -41,6 +46,98 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
 
         private const int VertexBufferFirstMethodOffset = 0x35d;
         private const int IndexBufferCountMethodOffset = 0x5f8;
+
+        // Backend-independent draw trace: touch /tmp/ryujinx-gal-trace while a
+        // game runs to log the next TraceDrawBudget draws with a guest-code-based
+        // program hash, so inventories from different backends (same spot, same
+        // save) can be diffed directly.
+        private const string TraceTriggerPath = "/tmp/ryujinx-gal-trace";
+        private const int TraceDrawBudget = 15000;
+
+        private static int _traceRemaining;
+        private static int _traceCheckCounter;
+        private static readonly ConditionalWeakTable<CachedShaderProgram, string> _traceProgramLabels = new();
+
+        private static string GetTraceProgramLabel(CachedShaderProgram program)
+        {
+            if (program == null)
+            {
+                return "none";
+            }
+
+            if (!_traceProgramLabels.TryGetValue(program, out string label))
+            {
+                int totalLength = 0;
+
+                foreach (CachedShaderStage stage in program.Shaders)
+                {
+                    totalLength += stage?.Code?.Length ?? 0;
+                }
+
+                byte[] combined = new byte[totalLength];
+                int position = 0;
+
+                foreach (CachedShaderStage stage in program.Shaders)
+                {
+                    if (stage?.Code != null)
+                    {
+                        stage.Code.CopyTo(combined, position);
+                        position += stage.Code.Length;
+                    }
+                }
+
+                label = Hash128.ComputeHash(combined).ToString()[..16];
+
+                _traceProgramLabels.Add(program, label);
+            }
+
+            return label;
+        }
+
+        private void TraceDrawIfActive(int count, int instanceCount, int firstIndex, int firstVertex, int firstInstance, bool indexed)
+        {
+            if (_traceRemaining <= 0)
+            {
+                // Only look for the trigger file every 512 draws to keep the
+                // steady-state cost negligible.
+                if ((++_traceCheckCounter & 0x1FF) != 0)
+                {
+                    return;
+                }
+
+                if (!File.Exists(TraceTriggerPath))
+                {
+                    return;
+                }
+
+                try
+                {
+                    File.Delete(TraceTriggerPath);
+                }
+                catch (IOException)
+                {
+                    return;
+                }
+
+                _traceRemaining = TraceDrawBudget;
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"GAL draw trace started for {TraceDrawBudget} draws.");
+            }
+
+            if (--_traceRemaining == 0)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, "GAL draw trace finished.");
+            }
+
+            ref RtColorState rt0 = ref _state.State.RtColorState[0];
+
+            Logger.Warning?.PrintMsg(
+                LogClass.Gpu,
+                $"galdraw {(indexed ? "idx" : "arr")} count={count} inst={instanceCount} first={firstIndex} firstVtx={firstVertex} firstInst={firstInstance} " +
+                $"topo={_drawState.Topology} vac={(_drawState.VertexAsCompute != null ? 1 : 0)} " +
+                $"rt0={rt0.Format}/{rt0.WidthOrStride}x{rt0.Height} zeta={_state.State.RtDepthStencilState.Format} " +
+                $"prog={GetTraceProgramLabel(_currentSpecState.CurrentGraphicsShader)}");
+        }
 
         /// <summary>
         /// Creates a new instance of the draw manager.
@@ -585,6 +682,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             int firstInstance,
             bool indexed)
         {
+            TraceDrawIfActive(count, instanceCount, firstIndex, firstVertex, firstInstance, indexed);
+
             if (instanceCount > 1)
             {
                 _channel.BufferManager.SetInstancedDrawVertexCount(count);
@@ -681,6 +780,17 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             _currentSpecState.SetHasConstantBufferDrawParameters(true);
 
             engine.UpdateState();
+
+            if (_traceRemaining > 0)
+            {
+                ref RtColorState rt0 = ref _state.State.RtColorState[0];
+
+                Logger.Warning?.PrintMsg(
+                    LogClass.Gpu,
+                    $"galdraw {(indexed ? "indirect-idx" : "indirect-arr")}{(hasCount ? "-count" : "")} maxDraws={maxDrawCount} stride={stride} " +
+                    $"topo={_drawState.Topology} rt0={rt0.Format}/{rt0.WidthOrStride}x{rt0.Height} zeta={_state.State.RtDepthStencilState.Format} " +
+                    $"prog={GetTraceProgramLabel(_currentSpecState.CurrentGraphicsShader)}");
+            }
 
             if (hasCount)
             {

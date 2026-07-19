@@ -63,8 +63,16 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             _usesDrawParameters = gs.Shaders[1]?.Info.UsesDrawParameters ?? false;
             _usesTopology = gs.SpecializationState.IsPrimitiveTopologyQueried();
 
+            CurrentGraphicsShader = gs;
+
             _changed = false;
         }
+
+        /// <summary>
+        /// The shader program set by the most recent <see cref="SetShader"/> call.
+        /// Backend-independent identity for draw tracing.
+        /// </summary>
+        public CachedShaderProgram CurrentGraphicsShader { get; private set; }
 
         /// <summary>
         /// Get the current graphics state.
