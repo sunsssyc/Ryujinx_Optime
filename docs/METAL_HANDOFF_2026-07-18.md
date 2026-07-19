@@ -319,7 +319,17 @@ GPU capture 看烘焙 pass（程序化捕获已证明不可行，见 0.9）。
    ViewportTransformDisable 分支的交互）。这属于逐路径代码审计 +
    着色器级证据的工作。
 
-**下一步（依信息量排序）**：
+**0.11 验证层一锤定音（2026-07-19 16:0x）**：用户按指引从 Xcode
+`Debug Executable…` 启动（自动开启 Metal 验证层），验证层即刻反复断言：
+`scissor rect (65535x65535) must be <= render pass (1920x1080)`。
+后端把 guest 的全屏剪裁哨兵值原样传给 Metal，对 64×64 烘焙 pass 违规
+最大。无验证层时属未定义行为（TBDR 上随机丢弃光栅化输出）——与全部
+证据吻合（绘制提交正常、逐页内容为空、相机/LOD 相关、Vulkan 因
+MoltenVK 内部钳制而免疫）。v38（commit `93c44024`，candidate
+`Ryujinx-metal-v38-scissor-clamp`）在应用时按当前 pass 尺寸钳制剪裁，
+guest 原值保留供各 pass 重新钳制。待用户验证蘑菇/瘴气/地面三症状。
+
+**（历史记录）当时排定的下一步**：
 
 1. **Xcode 附加式 GPU capture**（用户操作 ~10 分钟，信息量最大）：
    `METAL_CAPTURE_ENABLED=1` 启动任一候选 → Xcode → Debug →
