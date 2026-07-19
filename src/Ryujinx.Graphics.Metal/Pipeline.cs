@@ -480,7 +480,7 @@ namespace Ryujinx.Graphics.Metal
             DrawCount++;
         }
 
-        private void TraceDraw(string kind, int count, int instanceCount, int firstIndexOrVertex)
+        private void TraceDraw(string kind, int count, int instanceCount, int firstIndexOrVertex, int firstInstance)
         {
             if (_renderer.FrameCapture.DrawTraceActive)
             {
@@ -498,7 +498,12 @@ namespace Ryujinx.Graphics.Metal
 
                 Logger.Warning?.PrintMsg(
                     LogClass.Gpu,
-                    $"trace draw#{DrawCount} {kind} count={count} inst={instanceCount} first={firstIndexOrVertex} rt={targetText} prog={programText}");
+                    $"trace draw#{DrawCount} {kind} count={count} inst={instanceCount} first={firstIndexOrVertex} firstInst={firstInstance} topo={_encoderStateManager.Topology} rt={targetText} prog={programText}");
+
+                if (instanceCount > 1 && kind == "Draw")
+                {
+                    _encoderStateManager.TraceDumpInstanceBuffers(firstInstance);
+                }
             }
         }
 
@@ -529,7 +534,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
-            TraceDraw("Draw", vertexCount, instanceCount, firstVertex);
+            TraceDraw("Draw", vertexCount, instanceCount, firstVertex, firstInstance);
 
             MTLPrimitiveType primitiveType = TopologyRemap(_encoderStateManager.Topology).Convert();
 
@@ -543,12 +548,18 @@ namespace Ryujinx.Graphics.Metal
 
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
 
+                // The converted-topology path must keep the draw's instancing and
+                // base vertex/instance: dropping them draws a single instance of
+                // the wrong vertices for instanced quad/fan draws.
                 renderCommandEncoder.DrawIndexedPrimitives(
                     primitiveType,
                     (ulong)indexCount,
                     MTLIndexType.UInt32,
                     mtlBuffer,
-                    0);
+                    0,
+                    (ulong)instanceCount,
+                    firstVertex,
+                    (ulong)firstInstance);
             }
             else
             {
@@ -613,7 +624,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
-            TraceDraw("DrawIndexed", indexCount, instanceCount, firstIndex);
+            TraceDraw("DrawIndexed", indexCount, instanceCount, firstIndex, firstInstance);
 
             MTLBuffer mtlBuffer;
             int offset;
@@ -668,7 +679,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
-            TraceDraw("DrawIndexedIndirect", 0, 0, offset);
+            TraceDraw("DrawIndexedIndirect", 0, 0, offset, 0);
 
             MTLBuffer buffer = _renderer.BufferManager
                 .GetBuffer(indirectBuffer.Handle, indirectBuffer.Offset, indirectBuffer.Size, false)
@@ -716,7 +727,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
-            TraceDraw("DrawIndirect", 0, 0, offset);
+            TraceDraw("DrawIndirect", 0, 0, offset, 0);
 
             MTLBuffer buffer = _renderer.BufferManager
                 .GetBuffer(indirectBuffer.Handle, indirectBuffer.Offset, indirectBuffer.Size, false)

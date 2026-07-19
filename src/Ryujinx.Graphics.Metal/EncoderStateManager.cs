@@ -35,6 +35,53 @@ namespace Ryujinx.Graphics.Metal
         public readonly Texture[] RenderTargets => _currentState.RenderTargets;
         public readonly Program RenderProgram => _currentState.RenderProgram;
         public readonly Program ComputeProgram => _currentState.ComputeProgram;
+
+        /// <summary>
+        /// Diagnostic companion to the draw trace: for every per-instance vertex
+        /// buffer binding, log its layout and the CPU-visible bytes of the record
+        /// the given first instance will fetch, plus which attributes read it.
+        /// </summary>
+        public readonly void TraceDumpInstanceBuffers(int firstInstance)
+        {
+            for (int i = 0; i < _currentState.VertexBuffers.Length; i++)
+            {
+                VertexBufferState vertexBuffer = _currentState.VertexBuffers[i];
+
+                if (vertexBuffer.Divisor <= 0 || vertexBuffer.Stride <= 0)
+                {
+                    continue;
+                }
+
+                int record = firstInstance / vertexBuffer.Divisor;
+                string recordText = vertexBuffer.DescribeRecordForTrace(_bufferManager, record);
+
+                if (recordText == null)
+                {
+                    continue;
+                }
+
+                Logger.Warning?.PrintMsg(
+                    LogClass.Gpu,
+                    $"trace vb[{i}] stride={vertexBuffer.Stride} div={vertexBuffer.Divisor} rec[{record}]={recordText}");
+            }
+
+            for (int i = 0; i < _currentState.VertexAttribs.Length; i++)
+            {
+                VertexAttribDescriptor attrib = _currentState.VertexAttribs[i];
+
+                if (attrib.IsZero || attrib.BufferIndex >= _currentState.VertexBuffers.Length)
+                {
+                    continue;
+                }
+
+                if (_currentState.VertexBuffers[attrib.BufferIndex].Divisor > 0)
+                {
+                    Logger.Warning?.PrintMsg(
+                        LogClass.Gpu,
+                        $"trace attr{i} vb={attrib.BufferIndex} off={attrib.Offset} fmt={attrib.Format}");
+                }
+            }
+        }
         public readonly Texture DepthStencil => _currentState.DepthStencil;
         public readonly ComputeSize ComputeLocalSize => _currentState.ComputeProgram.ComputeLocalSize;
 
