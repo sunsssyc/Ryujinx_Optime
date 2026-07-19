@@ -212,9 +212,23 @@ namespace Ryujinx.Graphics.Metal
             return computeCommandEncoder;
         }
 
+        // Diagnostic probe: with RYUJINX_METAL_FULL_REBIND=1 every draw re-writes the
+        // argument buffers and residency lists from the CURRENT texture/buffer
+        // handles, ignoring dirty tracking. Costs performance; if it eliminates the
+        // stale-content symptoms (vanishing baked foliage, frozen gloom), the dirty
+        // tracking is missing handle-invalidation signals.
+        private static readonly bool _forceFullRebind =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FULL_REBIND") == "1";
+
         public readonly void RenderResourcesPrepass()
         {
             _currentState.RenderEncoderBindings.Clear();
+
+            if (_forceFullRebind)
+            {
+                _currentState.Dirty |= DirtyFlags.RenderPipeline | DirtyFlags.Uniforms |
+                    DirtyFlags.Storages | DirtyFlags.Textures | DirtyFlags.Images;
+            }
 
             if ((_currentState.Dirty & DirtyFlags.RenderPipeline) != 0)
             {
@@ -245,6 +259,12 @@ namespace Ryujinx.Graphics.Metal
         public readonly void ComputeResourcesPrepass()
         {
             _currentState.ComputeEncoderBindings.Clear();
+
+            if (_forceFullRebind)
+            {
+                _currentState.Dirty |= DirtyFlags.Uniforms | DirtyFlags.Storages |
+                    DirtyFlags.Textures | DirtyFlags.Images;
+            }
 
             if ((_currentState.Dirty & DirtyFlags.Uniforms) != 0)
             {
