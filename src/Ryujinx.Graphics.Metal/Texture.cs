@@ -109,6 +109,11 @@ namespace Ryujinx.Graphics.Metal
             descriptor.Texture = _identitySwizzleHandle;
         }
 
+        public override MTLTexture GetIdentityHandle()
+        {
+            return Valid ? _identitySwizzleHandle : new MTLTexture(IntPtr.Zero);
+        }
+
         private MTLTexture CreateDefaultView(MTLTexture texture, MTLTextureSwizzleChannels swizzle, MTLTextureDescriptor descriptor)
         {
             NSRange levels;
@@ -162,6 +167,25 @@ namespace Ryujinx.Graphics.Metal
             };
         }
 
+        private static readonly System.Collections.Generic.HashSet<(string, Format, Format)> _loggedCopyGaps = [];
+
+        // These texture-to-texture copy variants are not implemented yet. They were
+        // silently dropped before, leaving destination textures with stale or empty
+        // content (missing baked foliage pages, frozen gloom in TOTK). Log each
+        // distinct case once so real-game requirements are visible in session logs.
+        private static void LogUnimplementedCopy(string kind, TextureBase src, TextureBase dst)
+        {
+            lock (_loggedCopyGaps)
+            {
+                if (_loggedCopyGaps.Add((kind, src.Info.Format, dst.Info.Format)))
+                {
+                    Logger.Warning?.PrintMsg(
+                        LogClass.Gpu,
+                        $"Unimplemented texture copy ({kind}): {src.Info.Format} {src.Info.Target} -> {dst.Info.Format} {dst.Info.Target}");
+                }
+            }
+        }
+
         public void CopyTo(ITexture destination, int firstLayer, int firstLevel)
         {
             CommandBufferScoped cbs = Pipeline.Cbs;
@@ -174,35 +198,24 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            MTLTexture srcImage = GetHandle();
-            MTLTexture dstImage = dst.GetHandle();
+            MTLTexture srcImage = GetIdentityHandle();
+            MTLTexture dstImage = dst.GetIdentityHandle();
 
             if (!dst.Info.Target.IsMultisample && Info.Target.IsMultisample)
             {
-                // int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
-
-                // _gd.HelperShader.CopyMSToNonMS(_gd, cbs, src, dst, 0, firstLayer, layers);
+                LogUnimplementedCopy("ms-to-nonms", src, dst);
             }
             else if (dst.Info.Target.IsMultisample && !Info.Target.IsMultisample)
             {
-                // int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
-
-                // _gd.HelperShader.CopyNonMSToMS(_gd, cbs, src, dst, 0, firstLayer, layers);
+                LogUnimplementedCopy("nonms-to-ms", src, dst);
             }
             else if (dst.Info.BytesPerPixel != Info.BytesPerPixel)
             {
-                // int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
-                // int levels = Math.Min(Info.Levels, dst.Info.Levels - firstLevel);
-
-                // _gd.HelperShader.CopyIncompatibleFormats(_gd, cbs, src, dst, 0, firstLayer, 0, firstLevel, layers, levels);
+                LogUnimplementedCopy("incompatible-bpp", src, dst);
             }
             else if (src.Info.Format.IsDepthOrStencil != dst.Info.Format.IsDepthOrStencil)
             {
-                // int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
-                // int levels = Math.Min(Info.Levels, dst.Info.Levels - firstLevel);
-
-                // TODO: depth copy?
-                // _gd.HelperShader.CopyColor(_gd, cbs, src, dst, 0, firstLayer, 0, FirstLevel, layers, levels);
+                LogUnimplementedCopy("depth-color", src, dst);
             }
             else
             {
@@ -231,24 +244,24 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            MTLTexture srcImage = GetHandle();
-            MTLTexture dstImage = dst.GetHandle();
+            MTLTexture srcImage = GetIdentityHandle();
+            MTLTexture dstImage = dst.GetIdentityHandle();
 
             if (!dst.Info.Target.IsMultisample && Info.Target.IsMultisample)
             {
-                // _gd.HelperShader.CopyMSToNonMS(_gd, cbs, src, dst, srcLayer, dstLayer, 1);
+                LogUnimplementedCopy("ms-to-nonms", src, dst);
             }
             else if (dst.Info.Target.IsMultisample && !Info.Target.IsMultisample)
             {
-                // _gd.HelperShader.CopyNonMSToMS(_gd, cbs, src, dst, srcLayer, dstLayer, 1);
+                LogUnimplementedCopy("nonms-to-ms", src, dst);
             }
             else if (dst.Info.BytesPerPixel != Info.BytesPerPixel)
             {
-                // _gd.HelperShader.CopyIncompatibleFormats(_gd, cbs, src, dst, srcLayer, dstLayer, srcLevel, dstLevel, 1, 1);
+                LogUnimplementedCopy("incompatible-bpp", src, dst);
             }
             else if (src.Info.Format.IsDepthOrStencil != dst.Info.Format.IsDepthOrStencil)
             {
-                // _gd.HelperShader.CopyColor(_gd, cbs, src, dst, srcLayer, dstLayer, srcLevel, dstLevel, 1, 1);
+                LogUnimplementedCopy("depth-color", src, dst);
             }
             else
             {

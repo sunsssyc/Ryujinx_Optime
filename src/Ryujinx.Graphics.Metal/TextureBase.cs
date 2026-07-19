@@ -46,6 +46,16 @@ namespace Ryujinx.Graphics.Metal
             return MtlTexture;
         }
 
+        /// <summary>
+        /// Handle for blit/copy operations. Metal does not allow copying through a
+        /// swizzled texture view, and copies move raw texel data anyway, so they
+        /// must use the identity-swizzle view of the texture.
+        /// </summary>
+        public virtual MTLTexture GetIdentityHandle()
+        {
+            return GetHandle();
+        }
+
         public virtual void Release()
         {
             Dispose();
