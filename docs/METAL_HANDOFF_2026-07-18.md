@@ -238,6 +238,48 @@ v33（commits `237f2f3f`+`16fcb1b6`，candidate `Ryujinx-metal-v33-capture`）�
    稳态同步已清零，差距在别处：同点位双后端 5s sample 对比后端线程
    忙闲与编码成本（注意 v33 起做过多次配置漂移修复，测前核对 0.6 节）。
 
+### 0.9 v34 与内容层排除链收官（2026-07-19 下午）
+
+上节建议 1、2 已执行完毕，结果如下：
+
+- **gputrace 路线放弃**：GPUTraceDocument 捕获激活后 command buffer 停止
+  完成、后端线程空转轮询完成状态，三种捕获范围（整设备 / 主队列 /
+  队列不含 present）全部同样卡死（用户被迫强退三次）。结论记录在
+  v33 BUILD-INFO。纯日志绘制追踪（`touch /tmp/ryujinx-metal-trace`）
+  安全可用，是本轮取证的主要工具。
+- **v34（commit `337bccac`）拷贝理论证伪**：Texture.CopyTo 确实有四个
+  被注释掉的静默丢弃分支（MS↔非MS、bpp 不匹配、depth↔color），v34
+  为它们加了去重告警日志——但用户在深穴实测**零命中**，该理论对本
+  症状出局。日志保留，其他游戏/场景仍可能命中。顺带的真修复保留：
+  blit 拷贝改走 identity-swizzle view（Metal 禁止对 swizzle view blit，
+  release 下静默错误）。
+- **已证伪清单（全部有实测/代码证据）**：绘制未提交（27 个实例化绘制
+  两状态恒定）、剔除计数（v31 宏 JIT 路径）、WFI 时序（v32 严格模式
+  无效果）、MSL 数组采样索引截断（IR 全程整数）、拷贝丢弃（v34 零
+  命中）、swizzle view blit（修复后症状不变）。
+
+**当前头号嫌疑（未验证，留给下一轮）：argument buffer 纹理地址陈旧。**
+机制：[EncoderStateManager.cs](../src/Ryujinx.Graphics.Metal/EncoderStateManager.cs)
+的 `RenderResourcesPrepass` 只在对应 Dirty 位被置位时才执行
+`UpdateAndBind`（重写 argument buffer 里的纹理 GPU 地址 + 收集驻留
+声明列表）。若纹理对象因失效/迁移被**重建**（MtlTexture 句柄改变）
+而 GAL 层绑定未变（不触发 SetTextureAndSampler → 不置脏），argument
+buffer 中保留**旧句柄地址**，采样读到已释放内存（空/垃圾），且新句柄
+从未进入 `UseResources` 驻留列表。图集类每帧烘焙、频繁失效的纹理最易
+命中；哪个页面坏取决于哪个纹理对象被重建 → 相机/LOD 相关。Vulkan 不
+受影响：descriptor 每次绘制从当前 Auto<> 句柄重写。
+
+验证/修复思路：
+1. 在 Texture 失效/替换路径（Dispose/storage swap/CreateView 替换）
+   打点，确认深穴场景确有"句柄重建但绑定未标脏"的序列；
+2. 快速验证补丁：`RenderResourcesPrepass` 无视 Dirty 位、每次绘制
+   全量 UpdateAndBind（性能会掉，但若闪烁消失即证实机制）；
+3. 正式修复：绑定缓存记录句柄代际（Auto<> 的替换计数），Prepass 比对
+   代际差异自动置脏；或纹理重建时向 EncoderStateManager 广播脏标记。
+   参考 Vulkan DescriptorSetUpdater 的做法。
+4. 瘴气凝固大概率同根因（动画层采样的 noise/位移纹理句柄陈旧 →
+   永远读同一份旧内容）。
+
 ## 1. 结论先行
 
 当前分支已经恢复并适配了实验性原生 Metal 后端，能够在 Apple M1 Max 上启动
