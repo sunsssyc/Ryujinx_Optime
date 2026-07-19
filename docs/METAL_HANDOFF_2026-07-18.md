@@ -426,6 +426,30 @@ candidate `Ryujinx-metal-v42-quadfix-vbdump`。用户流程：先看症状有无
 `open /tmp/ryujinx-metal-20260719-202537.gputrace` 在 Xcode 里点开
 公告板绘制直接看绑定的图集与实例缓冲。
 
+**0.16 v42 记录转储裁决 + v43 跨后端差分器（2026-07-19 深夜）**：v42
+两态转储显示公告板实例记录**编码时完全健康**（近态 inAttr0.w=200>0、
+位置/缩放/四元数/世界矩阵全部合理，页号远 140/近 200；拓扑确认
+TriangleStrip，发光 quad 025a90aa 同为 strip——两者都没踩 v42 修的
+quad 丢参 BUG）。顶点着色器后期击杀分支解码为平面测试
+`dot(实例位置−c8[29].xyz, c8[28].xyz) ≥ 0 → 击杀`：**按设计的近距
+剔除面——替身走近淡出是正常行为，Vulkan 上也发生；差别在 Vulkan 的
+近景接棒表现（真实模型/发光体）能画出来，Metal 的没有。公告板无罪。**
+
+v43（commits `07bd63d0`+`f5deca5c`，candidate
+`Ryujinx-metal-v43-gal-trace`）= 终极差分器：
+- GAL 层（DrawManager）后端无关绘制追踪：touch `/tmp/ryujinx-gal-trace`
+  → 之后 15000 条绘制记录 guest 代码 XXH3 程序标签（**跨后端一致**）、
+  拓扑、计数、firstInstance、vertex-as-compute 标志、RT0/zeta 身份；
+  间接绘制的 host 路径（Vulkan）也覆盖。
+- 本构建的 Vulkan 运行改用独立缓存目录 `shader-vulkan-local`——
+  杜绝与原装 App 共享 Vulkan 缓存的版本拉锯/并发损坏（0.6 节事故的
+  永久解）。首次 Vulkan 启动按需编译当前区域着色器，一次性代价。
+
+用户流程：同一存档同一近距点位，Metal 跑一次 touch 一次退出，再
+Vulkan 跑一次 touch 一次退出（**绝不同时开两个实例**）。离线 diff
+两日志的 galdraw 程序集合：Vulkan 有而 Metal 无的绘制 = 缺失的近景
+表现。v42 症状裁决（quad 修复对瘴气/特效的影响）尚待用户回报。
+
 **（历史记录）当时排定的下一步**：
 
 1. **Xcode 附加式 GPU capture**（用户操作 ~10 分钟，信息量最大）：
