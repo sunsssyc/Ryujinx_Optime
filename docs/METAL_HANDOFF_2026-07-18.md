@@ -280,6 +280,33 @@ buffer 中保留**旧句柄地址**，采样读到已释放内存（空/垃圾�
 4. 瘴气凝固大概率同根因（动画层采样的 noise/位移纹理句柄陈旧 →
    永远读同一份旧内容）。
 
+### 0.10 v35 探针证伪与深度转换新方向（2026-07-19 下午）
+
+**v35（commit `a003702a`，candidate `Ryujinx-metal-v35-rebind-probe`）：
+argument buffer 陈旧假说被证伪。** `RYUJINX_METAL_FULL_REBIND=1` 探针
+（每次绘制无视脏标记、从当前句柄全量重写 argument buffer 与驻留列表）
+下用户实测：植物依旧走近/转视角消失。0.9 节的绑定代际修复思路不必再做。
+
+新方向依据（web 检索 + 能力对照）：
+
+- "花草跑动时快速出现消失"是 Ryujinx 跑 TOTK 的**已知跨后端问题类**
+  （GBAtemp 632372 帖）；Ryujinx 官方 2023-05 进度报告专门处理过 TOTK
+  远处几何的深度精度 z-fighting。
+- 本机 MoltenVK 启用了 `VK_EXT_depth_clip_control`（boot 日志可证），
+  Vulkan 后端把 MinusOneToOne 深度模式交给驱动处理；Metal 后端报告
+  不支持，走 shader 翻译器的顶点补偿（`EmitterContext.PrepareForVertexReturn`
+  的 z' = z·0.5 + w·0.5）。两条路径的实现细节差异（应用位置、精度、
+  与 YNegate/passthrough 阶段的交互）是深度边缘闪烁的候选来源。
+- 已核对等价的部分：视口深度映射两端一致（都 clamp [0,1]）；深度模式
+  判定启发式（StateUpdater.GetDepthMode）为上游共享逻辑。
+
+**v36（commit `1b64724c`，candidate `Ryujinx-metal-v36-depthmode-diag`）**：
+一次性日志 "Guest is using MinusOneToOne (OpenGL-style) depth clip
+mode."（StateUpdater 置位规格状态处）。决定性问题：TOTK（尤其深穴）
+是否使用该模式——用则审计补偿变换的覆盖面（顶点返回各路径、
+passthrough/模拟阶段、YNegate 交互）；不用则此线出局，转 Xcode 附加式
+GPU capture 看烘焙 pass（程序化捕获已证明不可行，见 0.9）。
+
 ## 1. 结论先行
 
 当前分支已经恢复并适配了实验性原生 Metal 后端，能够在 Apple M1 Max 上启动
