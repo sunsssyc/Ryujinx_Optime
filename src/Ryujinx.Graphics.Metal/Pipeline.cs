@@ -315,7 +315,13 @@ namespace Ryujinx.Graphics.Metal
                     }
                 case EncoderType.Compute:
                     {
-                        MTLBarrierScope scope = MTLBarrierScope.Buffers | MTLBarrierScope.Textures | MTLBarrierScope.RenderTargets;
+                        // RenderTargets scope is only valid on render encoders; passing
+                        // it to a compute encoder is rejected by the validation layer
+                        // ("scope has an invalid value for compute", 5500+ hits per
+                        // minute in TOTK's Depths) and leaves the barrier behaviour
+                        // undefined - compute results could be read before the writes
+                        // completed, freezing compute-driven effects.
+                        MTLBarrierScope scope = MTLBarrierScope.Buffers | MTLBarrierScope.Textures;
                         Encoders.ComputeEncoder.MemoryBarrier(scope);
                         break;
                     }

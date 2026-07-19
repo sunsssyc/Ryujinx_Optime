@@ -212,6 +212,19 @@ namespace Ryujinx.Graphics.Metal
                 int copyWidth = sizeInBlocks ? BitUtils.DivRoundUp(width, blockWidth) : width;
                 int copyHeight = sizeInBlocks ? BitUtils.DivRoundUp(height, blockHeight) : height;
 
+                // The per-level halving below starts from the level-0 region size, so
+                // when source and destination levels differ the halved size can
+                // exceed the smaller side's actual mip dimensions (validation:
+                // "destinationOrigin.x + sourceSize.width must be <= width").
+                // Clamp against both real mip sizes like the Vulkan backend does.
+                int srcMipW = Math.Max(1, srcInfo.Width >> (srcLevel + level));
+                int srcMipH = Math.Max(1, srcInfo.Height >> (srcLevel + level));
+                int dstMipW = Math.Max(1, dstInfo.Width >> (dstLevel + level));
+                int dstMipH = Math.Max(1, dstInfo.Height >> (dstLevel + level));
+
+                copyWidth = Math.Min(copyWidth, Math.Min(srcMipW, dstMipW));
+                copyHeight = Math.Min(copyHeight, Math.Min(srcMipH, dstMipH));
+
                 int layers = Math.Max(dstLayers - dstLayer, srcLayers);
 
                 for (int layer = 0; layer < layers; layer++)
