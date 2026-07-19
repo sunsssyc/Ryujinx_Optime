@@ -117,11 +117,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
         /// </summary>
         private static string GetDiskCachePath()
         {
-            // The native Metal backend uses its own cache directory: its shader codegen
-            // version differs from the stock Vulkan releases, so sharing one directory
-            // makes each build invalidate the other's host cache, and two emulator
-            // builds appending to the same files has corrupted them in the past.
-            string shaderDirName = GraphicsConfig.MetalBackendActive ? "shader-metal" : "shader";
+            // This build never shares a shader cache directory with stock releases:
+            // its shader codegen version differs, so sharing one directory makes
+            // each build invalidate the other's host cache, and two emulator builds
+            // appending to the same files has corrupted them in the past. Metal and
+            // Vulkan also get separate directories from each other.
+            string shaderDirName = GraphicsConfig.MetalBackendActive ? "shader-metal" : "shader-vulkan-local";
 
             return GraphicsConfig.EnableShaderCache && GraphicsConfig.TitleId != null
                 ? Path.Combine(AppDataManager.GamesDirPath, GraphicsConfig.TitleId.ToLower(), "cache", shaderDirName)
