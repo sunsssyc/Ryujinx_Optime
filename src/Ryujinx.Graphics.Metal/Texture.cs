@@ -21,7 +21,7 @@ namespace Ryujinx.Graphics.Metal
             MTLTextureDescriptor descriptor = new()
             {
                 PixelFormat = pixelFormat,
-                Usage = MTLTextureUsage.Unknown,
+                Usage = GetTextureUsage(Info, pixelFormat),
                 SampleCount = (ulong)Info.Samples,
                 TextureType = Info.Target.Convert(),
                 Width = (ulong)Info.Width,
@@ -61,6 +61,34 @@ namespace Ryujinx.Graphics.Metal
 
             MtlFormat = pixelFormat;
             descriptor.Dispose();
+        }
+
+        /// <summary>
+        /// Textures were previously created with MTLTextureUsage.Unknown, which the
+        /// validation layer rejects outright ("usage must be set", thousands of hits
+        /// per frame) and which leaves rendering into them, writing them as images
+        /// and reinterpreting them through views formally undefined - a systemic
+        /// source of intermittent empty/stale content. Declare every usage the
+        /// emulator can exercise; guest textures are freely reused as render
+        /// targets, storage images and reinterpreted views.
+        /// </summary>
+        private static MTLTextureUsage GetTextureUsage(TextureCreateInfo info, MTLPixelFormat pixelFormat)
+        {
+            MTLTextureUsage usage = MTLTextureUsage.ShaderRead | MTLTextureUsage.PixelFormatView;
+
+            if (info.Format.IsDepthOrStencil)
+            {
+                // Depth/stencil formats are renderable but not shader-writable.
+                usage |= MTLTextureUsage.RenderTarget;
+            }
+            else if (!info.IsCompressed)
+            {
+                // Compressed formats can be neither rendered to nor written from
+                // shaders on Metal; other color formats may be used both ways.
+                usage |= MTLTextureUsage.RenderTarget | MTLTextureUsage.ShaderWrite;
+            }
+
+            return usage;
         }
 
         public Texture(MTLDevice device, MetalRenderer renderer, Pipeline pipeline, TextureCreateInfo info, MTLTexture sourceTexture, int firstLayer, int firstLevel) : base(device, renderer, pipeline, info)

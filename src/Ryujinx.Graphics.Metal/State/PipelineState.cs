@@ -244,7 +244,13 @@ namespace Ryujinx.Graphics.Metal
             {
                 ComputeFunction = program.ComputeFunction,
                 MaxTotalThreadsPerThreadgroup = maxThreads,
-                ThreadGroupSizeIsMultipleOfThreadExecutionWidth = true,
+                // Promising this unconditionally while games dispatch local sizes
+                // like 1x1x1 breaks the promise (validation: "must be multiples of
+                // 32") and makes the compute results undefined - fatal for
+                // GPU-driven culling and page tables. Only promise it when the
+                // shader's local size really is SIMD-group aligned (Apple GPUs have
+                // a thread execution width of 32).
+                ThreadGroupSizeIsMultipleOfThreadExecutionWidth = (maxThreads % 32) == 0,
             };
 
             return descriptor;
