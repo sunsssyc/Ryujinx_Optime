@@ -1089,6 +1089,24 @@ namespace Ryujinx.Graphics.Metal
             renderCommandEncoder.SetDepthBias(_currentState.DepthBias, _currentState.SlopeScale, _currentState.Clamp);
         }
 
+        private readonly (ulong Width, ulong Height) GetRenderPassSize()
+        {
+            for (int i = 0; i < _currentState.RenderTargets.Length; i++)
+            {
+                if (_currentState.RenderTargets[i] is Texture tex)
+                {
+                    return ((ulong)tex.Width, (ulong)tex.Height);
+                }
+            }
+
+            if (_currentState.DepthStencil != null)
+            {
+                return ((ulong)_currentState.DepthStencil.Width, (ulong)_currentState.DepthStencil.Height);
+            }
+
+            return (ulong.MaxValue, ulong.MaxValue);
+        }
+
         private unsafe void SetScissors(MTLRenderCommandEncoder renderCommandEncoder)
         {
             bool isTriangles = (_currentState.Topology == PrimitiveTopology.Triangles) ||
@@ -1100,12 +1118,34 @@ namespace Ryujinx.Graphics.Metal
             }
             else
             {
-                if (_currentState.Scissors.Length > 0)
+                int count = _currentState.Scissors.Length;
+
+                if (count > 0)
                 {
-                    fixed (MTLScissorRect* pMtlScissors = _currentState.Scissors)
+                    // Metal requires every scissor rect to lie within the render pass
+                    // attachments. The guest freely uses full-surface sentinel values
+                    // (65535x65535); passing them through is an API violation and
+                    // undefined behaviour without the validation layer - observed as
+                    // randomly dropped rasterization in small passes (impostor atlas
+                    // bakes). Clamp at apply time against the current pass size; the
+                    // unclamped guest values stay in _currentState for the next pass.
+                    (ulong passWidth, ulong passHeight) = GetRenderPassSize();
+
+                    MTLScissorRect* clamped = stackalloc MTLScissorRect[count];
+
+                    for (int i = 0; i < count; i++)
                     {
-                        renderCommandEncoder.SetScissorRects((IntPtr)pMtlScissors, (ulong)_currentState.Scissors.Length);
+                        MTLScissorRect rect = _currentState.Scissors[i];
+
+                        rect.x = Math.Min(rect.x, passWidth);
+                        rect.y = Math.Min(rect.y, passHeight);
+                        rect.width = Math.Min(rect.width, passWidth - rect.x);
+                        rect.height = Math.Min(rect.height, passHeight - rect.y);
+
+                        clamped[i] = rect;
                     }
+
+                    renderCommandEncoder.SetScissorRects((IntPtr)clamped, (ulong)count);
                 }
             }
         }
