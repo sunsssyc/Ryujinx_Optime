@@ -394,6 +394,38 @@ Load/Store、`BufferHolder` 的 CPU 读/写路径与 Vulkan 逐行同构。
 后续离线：比对两态绘制的程序集合差异，审计公告板 vert/frag 与瘴气
 材质及其上游 compute kernel 的 MSL。
 
+**0.15 v41 取证大丰收与 v42（2026-07-19 深夜）**：v41 会话全部命中——
+capture 卡死但看门狗自动解卡（线程池饥饿延迟了 ~80s，无需强退），
+写出 1.5GB `/tmp/ryujinx-metal-20260719-202537.gputrace`；522 个着色器
+MSL 转储到 `/tmp/ryujinx-metal-shaders/`；两态 trace 齐活。分析结论：
+
+- 公告板程序 `a3dce5db`（4 顶点×可变实例，800x448 R16G16B16A16Float
+  半分辨率通道）；主通道发光 quad `025a90aa`（4 顶点×300-1900 实例，
+  1600x896）；烘焙通道=64x64 R11G11B10Float（~250 绘制/帧）。
+- 两态差分：远态公告板单绘制 1305 实例；近态四连绘制
+  （2655+338+7+162）——小段=玩家身边消失的植物。烘焙/发光/公告板
+  在两态**全部正常提交** → 死因在绘制消费的数据内容。
+- 消失机制定位：公告板顶点着色器开头
+  `int(inAttr0.w) <= 0 → 位置清零 + outAttr4.x=0`（逐实例自杀开关），
+  inAttr0-7 全部来自 instanced vertex attributes。
+- TMML/LOD 理论降级（SPIRV-Cross 与我们最终都落在
+  calculate_clamped_lod）；瘴气 350 实例网格家族顶点级无纹理采样
+  （位移图理论出局）；两 quad 家族角点数学都是 strip 序。
+- **真 BUG 抓获（v42 修复，commit `b2f08b2e`）**：非索引 Draw 的
+  不支持拓扑转换路径调 5 参 DrawIndexedPrimitives 重载，
+  **丢 instanceCount/firstVertex/firstInstance**——实例化 quad/fan
+  只画 1 个错顶点实例。已改用与 DrawIndexed 相同的完整重载。
+- v42 追踪再升级：draw 行加 firstInst= 与 topo=；实例化非索引绘制
+  额外转储逐实例顶点缓冲布局（stride/divisor/attr 映射）与首实例
+  记录的 CPU 可见字节（trace vb[...]/trace attr... 行）——下一轮
+  两态对照可直接看到 inAttr0.w 的实际值。
+
+candidate `Ryujinx-metal-v42-quadfix-vbdump`。用户流程：先看症状有无
+任何变化（quad 修复影响真实内容），再两态各 touch 一次
+`/tmp/ryujinx-metal-trace`，退出。gputrace 可用
+`open /tmp/ryujinx-metal-20260719-202537.gputrace` 在 Xcode 里点开
+公告板绘制直接看绑定的图集与实例缓冲。
+
 **（历史记录）当时排定的下一步**：
 
 1. **Xcode 附加式 GPU capture**（用户操作 ~10 分钟，信息量最大）：
