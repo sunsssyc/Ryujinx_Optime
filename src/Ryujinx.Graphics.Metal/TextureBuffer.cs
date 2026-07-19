@@ -21,10 +21,13 @@ namespace Ryujinx.Graphics.Metal
         {
             MTLPixelFormat pixelFormat = FormatTable.GetFormat(Info.Format);
 
+            // Texture buffers are sampled and, for image buffers, written from
+            // shaders; Unknown usage is rejected by the validation layer and leaves
+            // those accesses undefined.
             _descriptor = new MTLTextureDescriptor
             {
                 PixelFormat = pixelFormat,
-                Usage = MTLTextureUsage.Unknown,
+                Usage = MTLTextureUsage.ShaderRead | MTLTextureUsage.ShaderWrite,
                 TextureType = MTLTextureType.TextureBuffer,
                 Width = (ulong)Info.Width,
                 Height = (ulong)Info.Height,
