@@ -833,11 +833,32 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 Logger.Info?.PrintMsg(LogClass.Gpu, "Guest is using MinusOneToOne (OpenGL-style) depth clip mode.");
             }
 
+            // Diagnostic: count depth mode flips. If the viewport heuristic guesses
+            // differently for different passes of the same frame (for example bake
+            // passes versus the main scene), depth written under one convention gets
+            // tested under the other, which is exactly the depth-marginal flicker
+            // class under investigation. Log the first flips and then every 512th.
+            if (depthModeMinusOneToOne != _lastDepthModeMinusOneToOne)
+            {
+                _lastDepthModeMinusOneToOne = depthModeMinusOneToOne;
+
+                int flips = Interlocked.Increment(ref _depthModeFlipCount);
+
+                if (flips <= 8 || (flips & 511) == 0)
+                {
+                    Logger.Info?.PrintMsg(
+                        LogClass.Gpu,
+                        $"Depth clip mode flipped to {(depthModeMinusOneToOne ? "MinusOneToOne" : "ZeroToOne")} (flip #{flips}).");
+                }
+            }
+
             _currentSpecState.SetDepthMode(depthModeMinusOneToOne);
             _currentSpecState.SetYNegateEnabled(yNegate);
         }
 
         private static int _minusOneToOneDepthLogged;
+        private static int _depthModeFlipCount;
+        private bool _lastDepthModeMinusOneToOne;
 
         /// <summary>
         /// Updates the depth mode (0 to 1 or -1 to 1) based on the current viewport and depth mode register state.
