@@ -307,6 +307,30 @@ mode."（StateUpdater 置位规格状态处）。决定性问题：TOTK（尤其
 passthrough/模拟阶段、YNegate 交互）；不用则此线出局，转 Xcode 附加式
 GPU capture 看烘焙 pass（程序化捕获已证明不可行，见 0.9）。
 
+**v36/v37 实测裁决（用户确认，2026-07-19）**：
+
+1. TOTK **开机 ~7 秒即选择 MinusOneToOne 并全程使用**（v36 命中）。
+2. **深度模式零翻转**（v37 计数器整局只有启动时的 flip #1）——
+   "烘焙与主场景混合约定"理论出局。
+3. 解析对照结论：补偿变换 + 视口映射的复合与 MoltenVK 的
+   depth_clip_control 实现**窗口空间恒等**（连 slope bias 的输入都
+   相等）。因此深度线只剩一种可能成立的形态：**某条着色器翻译路径
+   漏掉了变换**（候选：tess eval、VertexA/B 拆分着色器的返回路径、
+   ViewportTransformDisable 分支的交互）。这属于逐路径代码审计 +
+   着色器级证据的工作。
+
+**下一步（依信息量排序）**：
+
+1. **Xcode 附加式 GPU capture**（用户操作 ~10 分钟，信息量最大）：
+   `METAL_CAPTURE_ENABLED=1` 启动任一候选 → Xcode → Debug →
+   Attach to Process → Metal 相机图标抓 1 帧。附加式捕获由 Xcode 管理
+   边界，不经过 FrameCapture 代码，不受 0.9 节卡死问题影响。看三点：
+   公告板绘制绑定的图集纹理内容、其 fragment 的深度测试结果、
+   烘焙 pass 的输出。
+2. 着色器转储：设置里"图形着色器转储路径"填一个目录，深穴玩一分钟，
+   转储的 guest 着色器可离线送进翻译器复现 MSL 输出，audit 变换覆盖。
+3. 深度变换逐路径审计（纯代码侧，无需用户）。
+
 ## 1. 结论先行
 
 当前分支已经恢复并适配了实验性原生 Metal 后端，能够在 Apple M1 Max 上启动
