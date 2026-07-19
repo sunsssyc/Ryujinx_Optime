@@ -37,8 +37,26 @@ namespace Ryujinx.Graphics.Metal
         }
 
         /// <summary>
+        /// Called at the start of presentation, before the drawable is touched.
+        /// Ends an active capture here so the capture window never includes drawable
+        /// acquisition or presentation: capturing across a present exhausted the
+        /// layer's drawable pool and wedged the frame pipeline (observed with both
+        /// device- and queue-scoped captures).
+        /// </summary>
+        public void OnPresentBegin()
+        {
+            if (_capturing)
+            {
+                MTLCaptureManager.SharedCaptureManager().StopCapture();
+                _capturing = false;
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"Metal frame capture finished: {_outputPath}");
+            }
+        }
+
+        /// <summary>
         /// Called once per presented frame, after the present was queued. Starts a
-        /// capture when the trigger file exists and stops it one full frame later.
+        /// capture when the trigger file exists; it ends at the next OnPresentBegin.
         /// The draw-trace trigger logs the draws of the next frames without touching
         /// MTLCaptureManager at all, so it cannot disturb the frame pipeline.
         /// </summary>
@@ -47,16 +65,6 @@ namespace Ryujinx.Graphics.Metal
             if (_traceFramesRemaining > 0 && --_traceFramesRemaining == 0)
             {
                 Logger.Warning?.PrintMsg(LogClass.Gpu, "Metal draw trace finished.");
-            }
-
-            if (_capturing)
-            {
-                MTLCaptureManager.SharedCaptureManager().StopCapture();
-                _capturing = false;
-
-                Logger.Warning?.PrintMsg(LogClass.Gpu, $"Metal frame capture finished: {_outputPath}");
-
-                return;
             }
 
             if (_traceFramesRemaining == 0 && TryConsumeTrigger(TraceTriggerPath))
