@@ -8,6 +8,7 @@ using Ryujinx.Graphics.Gpu.Shader;
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Texture;
 using System;
+using System.Threading;
 using System.Runtime.CompilerServices;
 
 namespace Ryujinx.Graphics.Gpu.Engine.Threed
@@ -819,9 +820,24 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             }
 
             _currentSpecState.SetViewportTransformDisable(disableTransform);
-            _currentSpecState.SetDepthMode(GetDepthMode() == DepthMode.MinusOneToOne);
+
+            bool depthModeMinusOneToOne = GetDepthMode() == DepthMode.MinusOneToOne;
+
+            if (depthModeMinusOneToOne && Interlocked.Exchange(ref _minusOneToOneDepthLogged, 1) == 0)
+            {
+                // One-shot diagnostic: backends without native depth clip control
+                // (Metal) compensate for this mode with a shader-side transform, so
+                // knowing whether the current game uses it at all decides whether the
+                // depth conversion path is a valid suspect for depth-marginal
+                // flicker. Remove once the Metal depth investigation concludes.
+                Logger.Info?.PrintMsg(LogClass.Gpu, "Guest is using MinusOneToOne (OpenGL-style) depth clip mode.");
+            }
+
+            _currentSpecState.SetDepthMode(depthModeMinusOneToOne);
             _currentSpecState.SetYNegateEnabled(yNegate);
         }
+
+        private static int _minusOneToOneDepthLogged;
 
         /// <summary>
         /// Updates the depth mode (0 to 1 or -1 to 1) based on the current viewport and depth mode register state.
