@@ -329,6 +329,29 @@ MoltenVK 内部钳制而免疫）。v38（commit `93c44024`，candidate
 `Ryujinx-metal-v38-scissor-clamp`）在应用时按当前 pass 尺寸钳制剪裁，
 guest 原值保留供各 pass 重新钳制。待用户验证蘑菇/瘴气/地面三症状。
 
+**0.12 验证层方法论与 v39（2026-07-19 傍晚）**：v38 剪裁修复后症状未消，
+但方法升级为**验证层全量清单**：`MTL_DEBUG_LAYER=1
+MTL_DEBUG_LAYER_ERROR_MODE=nslog MTL_DEBUG_LAYER_WARNING_MODE=nslog`
+启动即可拿到全部 API 违规而不在第一条断言处死亡（Xcode 附加反而会
+卡在首个断言）。标题画面即扫出两类系统性违规，v39（commits
+`161aa69c`+`ae5de72c`，candidate `Ryujinx-metal-v39-usage-simd`）修复：
+
+1. **所有纹理以 `MTLTextureUsage.Unknown` 创建**（"usage must be set"，
+   标题画面去重后 2414 条；TextureBuffer 补修后归零）。对 Unknown usage
+   纹理做渲染目标/着色器写/格式重解释 view 均为未定义行为——间歇性
+   空内容/旧内容的系统性来源。现按格式声明
+   ShaderRead|PixelFormatView（+RenderTarget，非压缩彩色再 +ShaderWrite，
+   texture buffer 为 ShaderRead|ShaderWrite）。
+2. **compute 管线无条件承诺 ThreadGroupSizeIsMultipleOfThreadExecutionWidth**
+   而游戏派发 1×1×1（"must be multiples of 32"）。违约=计算结果未定义
+   ——TOTK 的 GPU 剔除/页表 compute 直接中招，与蘑菇/瘴气症状因果直连。
+   现仅在 local size 为 32 倍数时承诺。
+
+复测（同验证层参数）：usage/threadgroup/scissor 三类全部归零、无其他
+断言类别。**教训入档：此类"硬件相关、间歇性、逐资源"的内容错误，
+应第一时间开验证层拿全量清单，而不是逐个理论探针排除。**
+待用户深穴实测 v39 的蘑菇/瘴气/地面三症状与整体回归。
+
 **（历史记录）当时排定的下一步**：
 
 1. **Xcode 附加式 GPU capture**（用户操作 ~10 分钟，信息量最大）：
