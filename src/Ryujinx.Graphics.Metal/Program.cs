@@ -1,3 +1,4 @@
+using Ryujinx.Common;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
@@ -6,8 +7,10 @@ using SharpMetal.Metal;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Text;
 using System.Threading;
 
 namespace Ryujinx.Graphics.Metal
@@ -31,6 +34,75 @@ namespace Ryujinx.Graphics.Metal
         private HashTableSlim<PipelineUid, MTLRenderPipelineState> _graphicsPipelineCache;
         private MTLComputePipelineState? _computePipelineCache;
         private bool _firstBackgroundUse;
+        private string _debugLabel;
+        private bool _sourcesDumped;
+
+        /// <summary>
+        /// Stable across runs: XXH3-128 of all stage sources, truncated to 16 hex
+        /// chars. Used by the draw/dispatch trace to identify shaders, and as the
+        /// file name prefix for <see cref="DumpSources"/>.
+        /// </summary>
+        public string DebugLabel
+        {
+            get
+            {
+                if (_debugLabel == null)
+                {
+                    int totalLength = 0;
+
+                    foreach (ShaderSource shader in _shaders)
+                    {
+                        totalLength += Encoding.UTF8.GetByteCount(shader.Code) + 1;
+                    }
+
+                    byte[] combined = new byte[totalLength];
+                    int position = 0;
+
+                    foreach (ShaderSource shader in _shaders)
+                    {
+                        position += Encoding.UTF8.GetBytes(shader.Code, combined.AsSpan(position));
+                        combined[position++] = 0;
+                    }
+
+                    _debugLabel = Hash128.ComputeHash(combined).ToString()[..16];
+                }
+
+                return _debugLabel;
+            }
+        }
+
+        /// <summary>
+        /// Writes the MSL source of every stage to <paramref name="directory"/> as
+        /// {DebugLabel}-{stage}.metal, once per program instance. Diagnostic only.
+        /// </summary>
+        public void DumpSources(string directory)
+        {
+            if (_sourcesDumped)
+            {
+                return;
+            }
+
+            _sourcesDumped = true;
+
+            try
+            {
+                Directory.CreateDirectory(directory);
+
+                foreach (ShaderSource shader in _shaders)
+                {
+                    string path = Path.Combine(directory, $"{DebugLabel}-{shader.Stage.ToString().ToLowerInvariant()}.metal");
+
+                    if (!File.Exists(path))
+                    {
+                        File.WriteAllText(path, shader.Code);
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"Failed to dump shader sources for {DebugLabel}: {exception.Message}");
+            }
+        }
 
         public ResourceBindingSegment[][] BindingSegments { get; }
         // Argument buffer sizes for Vertex or Compute stages

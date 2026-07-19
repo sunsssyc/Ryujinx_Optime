@@ -443,6 +443,8 @@ namespace Ryujinx.Graphics.Metal
 
             ComputeSize localSize = _encoderStateManager.ComputeLocalSize;
 
+            TraceDispatch(groupsX, groupsY, groupsZ, localSize);
+
             if (debugGroupName != String.Empty)
             {
                 PushDebugGroup(debugGroupName);
@@ -485,9 +487,37 @@ namespace Ryujinx.Graphics.Metal
                 Texture target = _encoderStateManager.RenderTargets[0];
                 string targetText = target != null ? $"{target.Width}x{target.Height}/{target.Info.Format}" : "none";
 
+                Program program = _encoderStateManager.RenderProgram;
+                string programText = "none";
+
+                if (program != null)
+                {
+                    programText = program.DebugLabel;
+                    program.DumpSources(FrameCapture.ShaderDumpDir);
+                }
+
                 Logger.Warning?.PrintMsg(
                     LogClass.Gpu,
-                    $"trace draw#{DrawCount} {kind} count={count} inst={instanceCount} first={firstIndexOrVertex} rt={targetText}");
+                    $"trace draw#{DrawCount} {kind} count={count} inst={instanceCount} first={firstIndexOrVertex} rt={targetText} prog={programText}");
+            }
+        }
+
+        private void TraceDispatch(int groupsX, int groupsY, int groupsZ, ComputeSize localSize)
+        {
+            if (_renderer.FrameCapture.DrawTraceActive)
+            {
+                Program program = _encoderStateManager.ComputeProgram;
+                string programText = "none";
+
+                if (program != null)
+                {
+                    programText = program.DebugLabel;
+                    program.DumpSources(FrameCapture.ShaderDumpDir);
+                }
+
+                Logger.Warning?.PrintMsg(
+                    LogClass.Gpu,
+                    $"trace dispatch groups={groupsX}x{groupsY}x{groupsZ} local={localSize.X}x{localSize.Y}x{localSize.Z} prog={programText}");
             }
         }
 
@@ -638,6 +668,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
+            TraceDraw("DrawIndexedIndirect", 0, 0, offset);
 
             MTLBuffer buffer = _renderer.BufferManager
                 .GetBuffer(indirectBuffer.Handle, indirectBuffer.Offset, indirectBuffer.Size, false)
@@ -685,6 +716,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
+            TraceDraw("DrawIndirect", 0, 0, offset);
 
             MTLBuffer buffer = _renderer.BufferManager
                 .GetBuffer(indirectBuffer.Handle, indirectBuffer.Offset, indirectBuffer.Size, false)

@@ -6,6 +6,7 @@ using SharpMetal.ObjectiveCCore;
 using System;
 using System.IO;
 using System.Runtime.Versioning;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Metal
 {
@@ -22,8 +23,22 @@ namespace Ryujinx.Graphics.Metal
         private const string TriggerPath = "/tmp/ryujinx-metal-capture";
         private const string TraceTriggerPath = "/tmp/ryujinx-metal-trace";
 
+        /// <summary>
+        /// Where the draw/dispatch trace dumps the MSL source of every program it
+        /// sees, named {DebugLabel}-{stage}.metal.
+        /// </summary>
+        public const string ShaderDumpDir = "/tmp/ryujinx-metal-shaders";
+
+        // Every prior capture attempt wedged the frame pipeline before reaching the
+        // next present, so the capture never ended and the app had to be killed.
+        // The watchdog force-stops the capture from a timer thread instead.
+        private const int WatchdogMilliseconds = 3000;
+
+        private readonly object _lock = new();
         private readonly MTLCommandQueue _queue;
         private bool _capturing;
+        private int _captureGeneration;
+        private Timer _watchdog;
         private int _traceFramesRemaining;
         private bool _supportChecked;
         private bool _supported;
@@ -45,12 +60,36 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         public void OnPresentBegin()
         {
-            if (_capturing)
+            lock (_lock)
             {
-                MTLCaptureManager.SharedCaptureManager().StopCapture();
-                _capturing = false;
+                if (_capturing)
+                {
+                    MTLCaptureManager.SharedCaptureManager().StopCapture();
+                    _capturing = false;
+                    _captureGeneration++;
 
-                Logger.Warning?.PrintMsg(LogClass.Gpu, $"Metal frame capture finished: {_outputPath}");
+                    _watchdog?.Dispose();
+                    _watchdog = null;
+
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"Metal frame capture finished: {_outputPath}");
+                }
+            }
+        }
+
+        private void WatchdogStop(int generation)
+        {
+            lock (_lock)
+            {
+                if (_capturing && generation == _captureGeneration)
+                {
+                    MTLCaptureManager.SharedCaptureManager().StopCapture();
+                    _capturing = false;
+                    _captureGeneration++;
+
+                    Logger.Warning?.PrintMsg(
+                        LogClass.Gpu,
+                        $"Metal frame capture watchdog fired after {WatchdogMilliseconds}ms without reaching the next present; capture stopped: {_outputPath}");
+                }
             }
         }
 
@@ -146,7 +185,15 @@ namespace Ryujinx.Graphics.Metal
 
             if (manager.StartCapture(descriptor, ref error))
             {
-                _capturing = true;
+                lock (_lock)
+                {
+                    _capturing = true;
+
+                    int generation = ++_captureGeneration;
+
+                    _watchdog?.Dispose();
+                    _watchdog = new Timer(_ => WatchdogStop(generation), null, WatchdogMilliseconds, Timeout.Infinite);
+                }
 
                 Logger.Warning?.PrintMsg(LogClass.Gpu, $"Metal frame capture started: {_outputPath}");
             }

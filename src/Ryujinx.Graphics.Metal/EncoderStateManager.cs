@@ -33,6 +33,8 @@ namespace Ryujinx.Graphics.Metal
         public readonly IndexBufferState IndexBuffer => _currentState.IndexBuffer;
         public readonly PrimitiveTopology Topology => _currentState.Topology;
         public readonly Texture[] RenderTargets => _currentState.RenderTargets;
+        public readonly Program RenderProgram => _currentState.RenderProgram;
+        public readonly Program ComputeProgram => _currentState.ComputeProgram;
         public readonly Texture DepthStencil => _currentState.DepthStencil;
         public readonly ComputeSize ComputeLocalSize => _currentState.ComputeProgram.ComputeLocalSize;
 
