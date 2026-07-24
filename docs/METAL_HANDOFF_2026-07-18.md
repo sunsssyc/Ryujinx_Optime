@@ -450,6 +450,30 @@ Vulkan 跑一次 touch 一次退出（**绝不同时开两个实例**）。离�
 两日志的 galdraw 程序集合：Vulkan 有而 Metal 无的绘制 = 缺失的近景
 表现。v42 症状裁决（quad 修复对瘴气/特效的影响）尚待用户回报。
 
+**0.17 瘴气画面根因修复 + 全自动测试链（2026-07-24）**：本轮解决了
+macOS 合成输入注入权限（辅助功能给 osascript 开开关 + Python Quartz
+CGEventPost），实现**全自动驱动游戏**（带 ROM 直启、按键过菜单/选存档/
+进瘴气、截图、Metal↔Vulkan 对比），无需用户操作。用它做同点位差分，
+先证伪多个假设（occlusion query 恒返 1——env 测 0/1/大值均掉血；
+常量缓冲——fp_c4 每帧在变；同步论），再用新加的 **TraceDumpTextures**
+（对瘴气程序 dump 每张绑定纹理的 target/format）一击命中根因：
+
+**瘴气材质采样 4 张 Bc4Unorm 的 3D 体积噪声纹理（64³/32³）。Metal 硬性
+不支持 3D 块压缩纹理（BC/ASTC/ETC 仅限 2D/2DArray/Cube）。** 但
+`GetCapabilities` 报 `supports3DTextureCompression: true`，Ryujinx 直接
+把 3D BC4 丢给 Metal → 解码垃圾 → 噪声驱动的 discard 过度剔除 → 稀疏
+红条纹。Vulkan 正常是因 MoltenVK 内部解压 3D 压缩纹理。**修复
+（commit 14c8533e，candidate v45-3dbc-gloomfix）：报 false**，触发
+TextureCompatibility 把 3D BC/ASTC 解压后上传。**实测：Metal 瘴气渲染
+成完整浓郁红色场，与 Vulkan 一致。**
+
+**仍未修：瘴气伤害**（独立 bug）。画面修好后同点位 Metal 仍扣死、
+Vulkan 4 心稳 14s。画面现两后端一致 → 伤害不读渲染出的瘴气，是另一份
+GPU 生成/回读数据。已排除 occlusion query 与 3D BC。下一步：instrument
+Metal GetData 回读路径（Texture.cs:525 / BufferManager.cs:190）看瘴气
+场景回读了什么、两后端差异。全自动测试链见记忆
+`ryujinx-config-drift-hazard`。
+
 **（历史记录）当时排定的下一步**：
 
 1. **Xcode 附加式 GPU capture**（用户操作 ~10 分钟，信息量最大）：
