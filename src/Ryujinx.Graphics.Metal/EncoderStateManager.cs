@@ -91,6 +91,32 @@ namespace Ryujinx.Graphics.Metal
         /// backend, or is frozen. All buffers are storageModeShared so Contents is
         /// the live value the shader will read.
         /// </summary>
+        /// <summary>
+        /// Diagnostic companion to the draw trace: for every bound texture, log its
+        /// target (2D/3D/Cube), format, dimensions and mip levels. The gloom material
+        /// samples four 3D volumetric-noise textures that drive its discard threshold;
+        /// a wrong target or format here would make the noise wrong and over-discard
+        /// the gloom (sparse coverage on Metal vs full field on Vulkan).
+        /// </summary>
+        public readonly void TraceDumpTextures(string tag)
+        {
+            for (int i = 0; i < _currentState.TextureRefs.Length; i++)
+            {
+                ref TextureRef texRef = ref _currentState.TextureRefs[i];
+
+                if (texRef.Storage == null)
+                {
+                    continue;
+                }
+
+                TextureCreateInfo info = texRef.Storage.Info;
+
+                Logger.Warning?.PrintMsg(
+                    LogClass.Gpu,
+                    $"trace tex[{i}] {tag} stage={texRef.Stage} target={info.Target} fmt={info.Format} {info.Width}x{info.Height}x{info.Depth} levels={info.Levels} imgFmt={texRef.ImageFormat}");
+            }
+        }
+
         public readonly unsafe void TraceDumpUniformBuffers(string tag)
         {
             for (int i = 0; i < _currentState.UniformBufferRefs.Length; i++)

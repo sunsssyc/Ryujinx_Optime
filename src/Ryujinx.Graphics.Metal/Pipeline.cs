@@ -530,6 +530,7 @@ namespace Ryujinx.Graphics.Metal
                 if (IsGloomTraceProgram(programText))
                 {
                     _encoderStateManager.TraceDumpUniformBuffers(programText);
+                    _encoderStateManager.TraceDumpTextures(programText);
                 }
             }
         }

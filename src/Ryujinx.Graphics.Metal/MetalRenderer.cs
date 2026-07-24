@@ -177,7 +177,16 @@ namespace Ryujinx.Graphics.Metal
                 // compatibility path decodes all ETC2 variants to RGBA8 instead of
                 // allowing unsupported RGBA ETC2 textures to reach the Metal backend.
                 supportsEtc2Compression: false,
-                supports3DTextureCompression: true,
+                // Metal only allows block-compressed (BC/ASTC/ETC) pixel formats on
+                // 2D, 2D array and cube textures - never on 3D textures. TOTK's Depths
+                // gloom samples BC4-compressed 3D volumetric-noise textures; reporting
+                // 3D compression as supported let those reach Metal, where the samples
+                // came back garbage, so the gloom's noise-driven discard over-culled
+                // the effect (sparse red streaks instead of a full field) and the
+                // gloom coverage the game reads back for damage was wrong too. Report
+                // it unsupported so the texture compatibility path decodes 3D BC/ASTC
+                // textures to an uncompressed format before upload.
+                supports3DTextureCompression: false,
                 supportsBgraFormat: true,
                 supportsR4G4Format: false,
                 supportsR4G4B4A4Format: true,
