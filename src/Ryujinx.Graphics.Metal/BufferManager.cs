@@ -187,11 +187,37 @@ namespace Ryujinx.Graphics.Metal
             return null;
         }
 
+        // Diagnostic: log small GPU->CPU buffer read-backs. TOTK's Depths gloom
+        // damage is backend-differential (Metal kills Link on ground Vulkan treats as
+        // safe) yet does not read the rendered gloom, so it reads some other
+        // GPU-produced coverage back to the CPU. Enable with RYUJINX_METAL_LOG_READBACK
+        // and diff the same scene against the Vulkan backend to find which read-back
+        // differs.
+        private static readonly bool _logReadback =
+            System.Environment.GetEnvironmentVariable("RYUJINX_METAL_LOG_READBACK") == "1";
+
         public PinnedSpan<byte> GetData(BufferHandle handle, int offset, int size)
         {
             if (TryGetBuffer(handle, out BufferHolder holder))
             {
-                return holder.GetData(offset, size);
+                PinnedSpan<byte> result = holder.GetData(offset, size);
+
+                if (_logReadback && size <= 64)
+                {
+                    System.Text.StringBuilder builder = new();
+                    builder.Append($"readback buf off={offset} size={size}:");
+
+                    ReadOnlySpan<byte> bytes = result.Get();
+
+                    for (int i = 0; i < bytes.Length && i < 64; i++)
+                    {
+                        builder.Append(bytes[i].ToString("x2"));
+                    }
+
+                    Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(Ryujinx.Common.Logging.LogClass.Gpu, builder.ToString());
+                }
+
+                return result;
             }
 
             return new PinnedSpan<byte>();
