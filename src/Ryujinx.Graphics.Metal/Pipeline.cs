@@ -480,6 +480,28 @@ namespace Ryujinx.Graphics.Metal
             DrawCount++;
         }
 
+        // Gloom (miasma) material programs identified from the v41/v43 shader dumps:
+        // their fragment shaders scroll volumetric noise by sin(fp_c4[9].z * PI), so
+        // dumping their constant buffers across the traced frames reveals whether that
+        // phase input advances per frame or is frozen. An extra label can be supplied
+        // via RYUJINX_METAL_DUMP_CBUF for programs whose hash shifts with spec state.
+        private static readonly string _extraCbufDumpLabel =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_CBUF");
+
+        private static bool IsGloomTraceProgram(string label)
+        {
+            switch (label)
+            {
+                case "ea7aeb577fe51e2f":
+                case "b82634558e8e193d":
+                case "6a81d5ed27684a34":
+                case "375f2adfe7dbc34b":
+                    return true;
+                default:
+                    return _extraCbufDumpLabel != null && label == _extraCbufDumpLabel;
+            }
+        }
+
         private void TraceDraw(string kind, int count, int instanceCount, int firstIndexOrVertex, int firstInstance)
         {
             if (_renderer.FrameCapture.DrawTraceActive)
@@ -503,6 +525,11 @@ namespace Ryujinx.Graphics.Metal
                 if (instanceCount > 1 && kind == "Draw")
                 {
                     _encoderStateManager.TraceDumpInstanceBuffers(firstInstance);
+                }
+
+                if (IsGloomTraceProgram(programText))
+                {
+                    _encoderStateManager.TraceDumpUniformBuffers(programText);
                 }
             }
         }

@@ -82,6 +82,56 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
         }
+
+        /// <summary>
+        /// Diagnostic companion to the draw trace: dump the CPU-visible contents of
+        /// every bound uniform (constant) buffer as vec4 floats. Comparing the same
+        /// draw across the three traced frames shows whether an animation input (e.g.
+        /// the gloom flow phase in fp_c4[9].z) actually advances per frame on this
+        /// backend, or is frozen. All buffers are storageModeShared so Contents is
+        /// the live value the shader will read.
+        /// </summary>
+        public readonly unsafe void TraceDumpUniformBuffers(string tag)
+        {
+            for (int i = 0; i < _currentState.UniformBufferRefs.Length; i++)
+            {
+                ref BufferRef bufferRef = ref _currentState.UniformBufferRefs[i];
+
+                if (bufferRef.Buffer == null)
+                {
+                    continue;
+                }
+
+                MTLBuffer mtlBuffer = bufferRef.Buffer.GetUnsafe().Value;
+
+                if (mtlBuffer.NativePtr == IntPtr.Zero || mtlBuffer.Contents == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                int offset = bufferRef.Range?.Offset ?? 0;
+                int size = bufferRef.Range?.Size ?? 256;
+
+                int vec4Count = Math.Min(16, size / 16);
+
+                if (vec4Count <= 0)
+                {
+                    continue;
+                }
+
+                float* data = (float*)((byte*)mtlBuffer.Contents + offset);
+
+                System.Text.StringBuilder builder = new();
+                builder.Append($"trace cbuf[{i}] {tag} off={offset} size={size}:");
+
+                for (int v = 0; v < vec4Count; v++)
+                {
+                    builder.Append($" [{v}]({data[v * 4].ToString("G6")},{data[v * 4 + 1].ToString("G6")},{data[v * 4 + 2].ToString("G6")},{data[v * 4 + 3].ToString("G6")})");
+                }
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu, builder.ToString());
+            }
+        }
         public readonly Texture DepthStencil => _currentState.DepthStencil;
         public readonly ComputeSize ComputeLocalSize => _currentState.ComputeProgram.ComputeLocalSize;
 
