@@ -120,7 +120,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         public bool FindAndFlush(ulong gpuVa)
         {
             int index = BinarySearch(gpuVa);
-            if (index > 0)
+            if (index >= 0)
             {
                 _items[index].Event?.Flush();
 
@@ -140,7 +140,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         public ICounterEvent FindEvent(ulong gpuVa)
         {
             int index = BinarySearch(gpuVa);
-            if (index > 0)
+            if (index >= 0)
             {
                 return _items[index].Event;
             }
