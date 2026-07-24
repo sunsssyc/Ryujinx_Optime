@@ -522,8 +522,18 @@ namespace Ryujinx.Graphics.Metal
             return GetDataFromBuffer(result, size, result);
         }
 
+        private static readonly bool _logTexReadback =
+            System.Environment.GetEnvironmentVariable("RYUJINX_METAL_LOG_READBACK") == "1";
+
         public PinnedSpan<byte> GetData()
         {
+            if (_logTexReadback)
+            {
+                Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(
+                    Ryujinx.Common.Logging.LogClass.Gpu,
+                    $"readback tex target={Info.Target} fmt={Info.Format} {Info.Width}x{Info.Height}x{Info.Depth} levels={Info.Levels}");
+            }
+
             BackgroundResource resources = Renderer.BackgroundResources.Get();
 
             if (Renderer.CommandBufferPool.OwnedByCurrentThread)
