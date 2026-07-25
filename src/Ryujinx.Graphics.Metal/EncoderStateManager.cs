@@ -49,8 +49,15 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _enabled =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_STATE_CACHE") != "0";
 
+        private const int BufferSlots = (int)Constants.MaximumBufferArgumentTableEntries;
+
         private IntPtr _encoder;
         private Field _known;
+
+        private readonly (IntPtr Buffer, ulong Offset)[] _vertexBuffers = new (IntPtr, ulong)[BufferSlots];
+        private readonly (IntPtr Buffer, ulong Offset)[] _fragmentBuffers = new (IntPtr, ulong)[BufferSlots];
+        private uint _vertexBound;
+        private uint _fragmentBound;
 
         public IntPtr PipelineState;
         public IntPtr DepthStencilState;
@@ -72,17 +79,59 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         public bool Knows(MTLRenderCommandEncoder encoder, Field field)
         {
-            if (_encoder != encoder.NativePtr)
-            {
-                _encoder = encoder.NativePtr;
-                _known = default;
-            }
+            Retarget(encoder);
 
             bool known = _enabled && (_known & field) != 0;
 
             _known |= field;
 
             return known;
+        }
+
+        /// <summary>
+        /// Whether <paramref name="buffer"/> is already bound at its own index for
+        /// the vertex or fragment stage of this encoder, in which case binding it
+        /// again would do nothing. Contents may of course have changed since - the
+        /// binding names the buffer, and the GPU reads it when the draw executes.
+        /// </summary>
+        public bool IsBound(MTLRenderCommandEncoder encoder, in BufferResource buffer, bool fragment)
+        {
+            Retarget(encoder);
+
+            if (buffer.Binding >= BufferSlots)
+            {
+                return false;
+            }
+
+            int slot = (int)buffer.Binding;
+
+            ref (IntPtr Buffer, ulong Offset) bound = ref (fragment ? ref _fragmentBuffers[slot] : ref _vertexBuffers[slot]);
+            ref uint mask = ref (fragment ? ref _fragmentBound : ref _vertexBound);
+
+            uint bit = 1u << slot;
+
+            bool same = _enabled &&
+                (mask & bit) != 0 &&
+                bound.Buffer == buffer.Buffer.NativePtr &&
+                bound.Offset == buffer.Offset;
+
+            mask |= bit;
+            bound = (buffer.Buffer.NativePtr, buffer.Offset);
+
+            return same;
+        }
+
+        private void Retarget(MTLRenderCommandEncoder encoder)
+        {
+            if (_encoder == encoder.NativePtr)
+            {
+                return;
+            }
+
+            _encoder = encoder.NativePtr;
+            _known = default;
+            _vertexBound = 0;
+            _fragmentBound = 0;
         }
     }
 
@@ -571,12 +620,18 @@ namespace Ryujinx.Graphics.Metal
 
             foreach (BufferResource buffer in _currentState.RenderEncoderBindings.VertexBuffers)
             {
-                renderCommandEncoder.SetVertexBuffer(buffer.Buffer, buffer.Offset, buffer.Binding);
+                if (!_applied.IsBound(renderCommandEncoder, buffer, fragment: false))
+                {
+                    renderCommandEncoder.SetVertexBuffer(buffer.Buffer, buffer.Offset, buffer.Binding);
+                }
             }
 
             foreach (BufferResource buffer in _currentState.RenderEncoderBindings.FragmentBuffers)
             {
-                renderCommandEncoder.SetFragmentBuffer(buffer.Buffer, buffer.Offset, buffer.Binding);
+                if (!_applied.IsBound(renderCommandEncoder, buffer, fragment: true))
+                {
+                    renderCommandEncoder.SetFragmentBuffer(buffer.Buffer, buffer.Offset, buffer.Binding);
+                }
             }
 
             _currentState.Dirty &= ~DirtyFlags.RenderAll;
