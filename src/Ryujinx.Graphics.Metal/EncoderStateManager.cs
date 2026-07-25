@@ -1587,7 +1587,12 @@ namespace Ryujinx.Graphics.Metal
                                 renderStages |= MTLRenderStages.RenderStageFragment;
                             }
 
-                            AddResource(nativePtr, MTLResourceUsage.Read, renderStages, in bindings);
+                            // Storage buffers are writable from graphics stages too, so
+                            // the residency declaration must include Write - writing to a
+                            // resource declared read-only is undefined behaviour. The
+                            // compute path and the image case below already declare
+                            // Read | Write; only this one was left read-only.
+                            AddResource(nativePtr, MTLResourceUsage.Read | MTLResourceUsage.Write, renderStages, in bindings);
                         }
                         break;
                     case Constants.TexturesSetIndex:
