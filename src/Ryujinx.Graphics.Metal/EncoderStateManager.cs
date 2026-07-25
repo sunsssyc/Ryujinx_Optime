@@ -15,6 +15,77 @@ using BufferAssignment = Ryujinx.Graphics.GAL.BufferAssignment;
 
 namespace Ryujinx.Graphics.Metal
 {
+    /// <summary>
+    /// What a render command encoder has actually been told, as opposed to what the
+    /// next draw wants. The dirty flags describe changes to the desired state, and
+    /// several of them - the pipeline flag above all - are raised by updates that
+    /// leave the encoder level state identical, so applying them unconditionally
+    /// repeats the same call over and over within a pass.
+    ///
+    /// Held by reference so the readonly setters can update it, and keyed on the
+    /// encoder itself: Metal starts every encoder from default state rather than
+    /// from the previous encoder's, so a different encoder invalidates everything
+    /// here without any dirty flag bookkeeping having to be right.
+    /// </summary>
+    [SupportedOSPlatform("macos")]
+    sealed class AppliedRenderState
+    {
+        [Flags]
+        public enum Field
+        {
+            Pipeline = 1 << 0,
+            BlendColor = 1 << 1,
+            DepthStencil = 1 << 2,
+            DepthClip = 1 << 3,
+            DepthBias = 1 << 4,
+            Cull = 1 << 5,
+            Winding = 1 << 6,
+            StencilRef = 1 << 7,
+        }
+
+        // A/B switch: RYUJINX_METAL_STATE_CACHE=0 reports every field as unknown, so
+        // each setter applies unconditionally the way it did before this cache
+        // existed. Lets the same binary measure both sides in one sitting.
+        private static readonly bool _enabled =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_STATE_CACHE") != "0";
+
+        private IntPtr _encoder;
+        private Field _known;
+
+        public IntPtr PipelineState;
+        public IntPtr DepthStencilState;
+        public ColorF BlendColor;
+        public MTLDepthClipMode DepthClipMode;
+        public float DepthBias;
+        public float SlopeScale;
+        public float Clamp;
+        public MTLCullMode CullMode;
+        public MTLWinding Winding;
+        public int FrontRefValue;
+        public int BackRefValue;
+
+        /// <summary>
+        /// Whether this cache already holds the value <paramref name="field"/> was
+        /// last set to on <paramref name="encoder"/>. False means the caller must
+        /// apply it; the field is marked known either way, because every caller
+        /// applies when this returns false.
+        /// </summary>
+        public bool Knows(MTLRenderCommandEncoder encoder, Field field)
+        {
+            if (_encoder != encoder.NativePtr)
+            {
+                _encoder = encoder.NativePtr;
+                _known = default;
+            }
+
+            bool known = _enabled && (_known & field) != 0;
+
+            _known |= field;
+
+            return known;
+        }
+    }
+
     [SupportedOSPlatform("macos")]
     struct EncoderStateManager : IDisposable
     {
@@ -26,6 +97,7 @@ namespace Ryujinx.Graphics.Metal
 
         private readonly DepthStencilCache _depthStencilCache;
         private readonly MTLDepthStencilState _defaultState;
+        private readonly AppliedRenderState _applied = new();
 
         private readonly EncoderState _mainState = new();
         private EncoderState _currentState;
@@ -606,13 +678,28 @@ namespace Ryujinx.Graphics.Metal
         {
             MTLRenderPipelineState pipelineState = _currentState.Pipeline.CreateRenderPipeline(_device, _currentState.RenderProgram);
 
-            renderCommandEncoder.SetRenderPipelineState(pipelineState);
+            if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.Pipeline) ||
+                _applied.PipelineState != pipelineState.NativePtr)
+            {
+                _applied.PipelineState = pipelineState.NativePtr;
 
-            renderCommandEncoder.SetBlendColor(
-                _currentState.BlendColor.Red,
-                _currentState.BlendColor.Green,
-                _currentState.BlendColor.Blue,
-                _currentState.BlendColor.Alpha);
+                renderCommandEncoder.SetRenderPipelineState(pipelineState);
+            }
+
+            // The blend colour is not part of the pipeline object, but every dirty
+            // flag that rebuilds the pipeline used to resend it too - by far the most
+            // repeated redundant encoder call in a frame.
+            if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.BlendColor) ||
+                _applied.BlendColor != _currentState.BlendColor)
+            {
+                _applied.BlendColor = _currentState.BlendColor;
+
+                renderCommandEncoder.SetBlendColor(
+                    _currentState.BlendColor.Red,
+                    _currentState.BlendColor.Green,
+                    _currentState.BlendColor.Blue,
+                    _currentState.BlendColor.Alpha);
+            }
         }
 
         private readonly void SetComputePipelineState(MTLComputeCommandEncoder computeCommandEncoder)
@@ -1257,26 +1344,43 @@ namespace Ryujinx.Graphics.Metal
 
         private readonly void SetDepthStencilState(MTLRenderCommandEncoder renderCommandEncoder)
         {
-            if (DepthStencil != null)
+            MTLDepthStencilState state = DepthStencil != null
+                ? _depthStencilCache.GetOrCreate(_currentState.DepthStencilUid)
+                : _defaultState;
+
+            if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.DepthStencil) ||
+                _applied.DepthStencilState != state.NativePtr)
             {
-                MTLDepthStencilState state = _depthStencilCache.GetOrCreate(_currentState.DepthStencilUid);
+                _applied.DepthStencilState = state.NativePtr;
 
                 renderCommandEncoder.SetDepthStencilState(state);
-            }
-            else
-            {
-                renderCommandEncoder.SetDepthStencilState(_defaultState);
             }
         }
 
         private readonly void SetDepthClamp(MTLRenderCommandEncoder renderCommandEncoder)
         {
-            renderCommandEncoder.SetDepthClipMode(_currentState.DepthClipMode);
+            if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.DepthClip) ||
+                _applied.DepthClipMode != _currentState.DepthClipMode)
+            {
+                _applied.DepthClipMode = _currentState.DepthClipMode;
+
+                renderCommandEncoder.SetDepthClipMode(_currentState.DepthClipMode);
+            }
         }
 
         private readonly void SetDepthBias(MTLRenderCommandEncoder renderCommandEncoder)
         {
-            renderCommandEncoder.SetDepthBias(_currentState.DepthBias, _currentState.SlopeScale, _currentState.Clamp);
+            if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.DepthBias) ||
+                _applied.DepthBias != _currentState.DepthBias ||
+                _applied.SlopeScale != _currentState.SlopeScale ||
+                _applied.Clamp != _currentState.Clamp)
+            {
+                _applied.DepthBias = _currentState.DepthBias;
+                _applied.SlopeScale = _currentState.SlopeScale;
+                _applied.Clamp = _currentState.Clamp;
+
+                renderCommandEncoder.SetDepthBias(_currentState.DepthBias, _currentState.SlopeScale, _currentState.Clamp);
+            }
         }
 
         private readonly (ulong Width, ulong Height) GetRenderPassSize()
@@ -2165,17 +2269,37 @@ namespace Ryujinx.Graphics.Metal
 
         private readonly void SetCullMode(MTLRenderCommandEncoder renderCommandEncoder)
         {
-            renderCommandEncoder.SetCullMode(_currentState.CullMode);
+            if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.Cull) ||
+                _applied.CullMode != _currentState.CullMode)
+            {
+                _applied.CullMode = _currentState.CullMode;
+
+                renderCommandEncoder.SetCullMode(_currentState.CullMode);
+            }
         }
 
         private readonly void SetFrontFace(MTLRenderCommandEncoder renderCommandEncoder)
         {
-            renderCommandEncoder.SetFrontFacingWinding(_currentState.Winding);
+            if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.Winding) ||
+                _applied.Winding != _currentState.Winding)
+            {
+                _applied.Winding = _currentState.Winding;
+
+                renderCommandEncoder.SetFrontFacingWinding(_currentState.Winding);
+            }
         }
 
         private readonly void SetStencilRefValue(MTLRenderCommandEncoder renderCommandEncoder)
         {
-            renderCommandEncoder.SetStencilReferenceValues((uint)_currentState.FrontRefValue, (uint)_currentState.BackRefValue);
+            if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.StencilRef) ||
+                _applied.FrontRefValue != _currentState.FrontRefValue ||
+                _applied.BackRefValue != _currentState.BackRefValue)
+            {
+                _applied.FrontRefValue = _currentState.FrontRefValue;
+                _applied.BackRefValue = _currentState.BackRefValue;
+
+                renderCommandEncoder.SetStencilReferenceValues((uint)_currentState.FrontRefValue, (uint)_currentState.BackRefValue);
+            }
         }
     }
 }
