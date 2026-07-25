@@ -57,9 +57,48 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         // guest-shader hash (the same label the draw trace prints) is listed. Running
         // the backend that renders a feature correctly and bisecting over the program
         // list identifies which shader draws that feature, without a GPU capture.
-        private static readonly System.Collections.Generic.HashSet<string> _skipProgs =
+        private static System.Collections.Generic.HashSet<string> _skipProgs =
             new(((System.Environment.GetEnvironmentVariable("RYUJINX_SKIP_PROGS") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries)));
+
+        // The skip list is also reloadable at runtime from /tmp/ryujinx-skip-progs
+        // (comma or newline separated hashes). Bisecting a feature otherwise needs one
+        // process launch per candidate set, and each launch has to be focused by hand
+        // before input can be injected.
+        private const string SkipListPath = "/tmp/ryujinx-skip-progs";
+        private static long _skipListStamp = -1;
+        private static int _skipCheckCounter;
+
+        private static void ReloadSkipListIfChanged()
+        {
+            if ((++_skipCheckCounter & 0xFF) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                long stamp = File.Exists(SkipListPath) ? File.GetLastWriteTimeUtc(SkipListPath).Ticks : 0;
+
+                if (stamp == _skipListStamp)
+                {
+                    return;
+                }
+
+                _skipListStamp = stamp;
+
+                _skipProgs = stamp == 0
+                    ? []
+                    : new System.Collections.Generic.HashSet<string>(File.ReadAllText(SkipListPath)
+                        .Split([',', '\n', '\r', ' '], StringSplitOptions.RemoveEmptyEntries));
+
+                Logger.Warning?.Print(LogClass.Gpu, $"Draw skip list reloaded: {_skipProgs.Count} programs.");
+            }
+            catch (IOException)
+            {
+                // Keep the previous list if the file is mid-write.
+            }
+        }
         private const int TraceDrawBudget = 15000;
 
         private static int _traceRemaining;
@@ -695,6 +734,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             // Skip-list check sits here, next to the trace, so it sees exactly the
             // program the trace labels (the current shader is only valid after the
             // engine state update that precedes this call).
+            ReloadSkipListIfChanged();
+
             if (_skipProgs.Count != 0 &&
                 _skipProgs.Contains(GetTraceProgramLabel(_currentSpecState.CurrentGraphicsShader)))
             {
