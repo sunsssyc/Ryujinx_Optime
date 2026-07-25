@@ -1088,10 +1088,17 @@ namespace Ryujinx.Graphics.Metal
 
         public void UpdateCullMode(bool enable, Face face)
         {
-            bool dirtyScissor = (face == Face.FrontAndBack) != _currentState.CullBoth;
+            // Metal has no "cull everything" mode, so culling both faces is emulated
+            // with an empty scissor rect. The guest's cull face register keeps its
+            // value while culling is disabled, so that emulation must only kick in
+            // when culling is actually enabled - otherwise geometry drawn double
+            // sided (foliage, in particular) is silently scissored away entirely.
+            bool cullBoth = enable && face == Face.FrontAndBack;
+
+            bool dirtyScissor = cullBoth != _currentState.CullBoth;
 
             _currentState.CullMode = enable ? face.Convert() : MTLCullMode.None;
-            _currentState.CullBoth = face == Face.FrontAndBack;
+            _currentState.CullBoth = cullBoth;
 
             // Inline update
             if (_pipeline.Encoders.TryGetRenderEncoder(out MTLRenderCommandEncoder renderCommandEncoder))
