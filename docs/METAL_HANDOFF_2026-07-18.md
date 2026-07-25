@@ -911,3 +911,55 @@ TOTK 深穴灌木由两遍渲染：深度预通道（alpha 测试镂空，只写
 - `RYUJINX_METAL_CAPTURE_FROM/TO=<MSL标签>`：用 capture scope 圈定 GPU 捕获范围。
 - `MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog MTL_DEBUG_LAYER_WARNING_MODE=nslog`：
   验证层全量清单（本轮靠它找到空附件 render pass）。
+
+## 0.19 灌木消失已修复：CullBoth 与陈旧的剔除面寄存器（2026-07-25 深夜）
+
+**根因**（提交 `ab451955`）：`EncoderStateManager.UpdateCullMode` 里
+
+```csharp
+_currentState.CullBoth = face == Face.FrontAndBack;   // 无视 enable
+```
+
+Metal 没有 "两面都剔除"，本后端用**空剪裁矩形 `0×0`** 模拟它（`SetScissors` 里
+`if (_currentState.CullBoth && isTriangles)`）。但客户机在**关闭面剔除**时
+`CullFace` 寄存器仍保留上一次的值，`StateUpdater` 原样透传
+`SetFaceCulling(face.CullEnable, face.CullFace)`。于是任何在寄存器还停在
+`FrontAndBack` 时提交的**双面几何**被整块剪掉——草木卡片正是双面绘制的那一类。
+
+后果正好解释了全部现象：深度预通道（`b19dc452cdf13a61`）和随后 `Equal` 深度测试的
+着色通道（`dd882311dd18be88`）**都产生不了任何片元**，所以深穴里灌木与草整株消失，
+而它们的顶点着色器输出的位置完全正常。
+
+修法：`bool cullBoth = enable && face == Face.FrontAndBack;`
+
+**这条 bug 只在 Metal 上存在**：Vulkan 有原生 `VK_CULL_MODE_FRONT_AND_BACK`，
+不需要剪裁矩形这套模拟，所以同一存档在 Vulkan 上一直是好的。
+
+### 是怎么切开的
+
+三个互不依赖的 A/B，每一刀砍掉一整片假设空间：
+
+1. `RYUJINX_METAL_NO_DISCARD=b19dc452cdf13a61` 去掉 alpha 测试的 `discard_fragment()`
+   → 灌木仍不出现，**排除 alpha 测试丢片元**。
+2. `RYUJINX_METAL_RELAX_DEPTH_EQUAL=lessequal` 放宽着色通道的 `Equal` 深度比较
+   → 灌木仍不出现，**排除深度值不匹配**。
+3. Xcode GPU 调试器的 **Post Vertex Transform** 表（GPU 实测真值）显示顶点
+   `position = (-12.63, -4.027, 12.58, 13.58)`，即 `z/w = 0.926`、`x/w = -0.93`，
+   **全部落在裁剪体积内**，**排除裁剪/变换**。
+
+三条合起来只剩光栅化阶段，剪裁矩形就在那里。
+
+### 一并作废：0.18 里"预通道一个深度像素都没写"的结论
+
+那个深度读回探针从 `Pipeline.TraceDraw` 调用，而 `TraceDraw` 在**图元被编码之前**
+执行（`Draw()` 里 `TraceDraw` 在 line ~652、`DrawPrimitives` 在 ~688），它的
+`EndCurrentPass()` 还会在绘制前把 pass 切开。**它历来的每一次读数都描述的是这笔绘制
+尚未参与的状态**，包括那句被六次加固后写下的"它是硬事实"。探针已在 `69fcc9db` 改成
+围绕编码的 before/after 双采样——一个不动的 before 本身就是探针有效性的自检。
+
+### 诊断工具（本轮新增，均 env 门控、默认惰性）
+
+- `RYUJINX_METAL_NO_DISCARD=<MSL标签,...>`：这些片元阶段编译时删掉全部 `discard_fragment()`。
+- `RYUJINX_METAL_PAINT=<MSL标签,...>`：这些片元阶段编译成向 color0 写死洋红，
+  凡是被光栅化的几何都会显出剪影。
+- `RYUJINX_METAL_RELAX_DEPTH_EQUAL=always|lessequal`：把 `Equal` 深度比较放宽。
