@@ -213,7 +213,7 @@ namespace Ryujinx.Graphics.Metal
                 supportsShaderNonUniformIndexing: false,
                 supportsTextureGatherOffsets: false,
                 supportsTextureShadowLod: false,
-                supportsVertexStoreAndAtomics: false,
+                supportsVertexStoreAndAtomics: true,
                 supportsViewportIndexVertexTessellation: false,
                 supportsViewportMask: false,
                 supportsViewportSwizzle: false,
