@@ -308,9 +308,15 @@ namespace Ryujinx.Graphics.Metal
             {
                 case EncoderType.Render:
                     {
+                        // afterStages may only name stages that can be waited on, which
+                        // on Apple GPUs excludes fragment and tile: passing them makes
+                        // the barrier illegal and its behaviour undefined, so writes it
+                        // was meant to order can be read before they land.
                         MTLBarrierScope scope = MTLBarrierScope.Buffers | MTLBarrierScope.Textures | MTLBarrierScope.RenderTargets;
-                        MTLRenderStages stages = MTLRenderStages.RenderStageVertex | MTLRenderStages.RenderStageFragment;
-                        Encoders.RenderEncoder.MemoryBarrier(scope, stages, stages);
+                        Encoders.RenderEncoder.MemoryBarrier(
+                            scope,
+                            MTLRenderStages.RenderStageVertex,
+                            MTLRenderStages.RenderStageVertex | MTLRenderStages.RenderStageFragment);
                         break;
                     }
                 case EncoderType.Compute:
@@ -1018,7 +1024,11 @@ namespace Ryujinx.Graphics.Metal
         {
             if (CurrentEncoderType == EncoderType.Render)
             {
-                Encoders.RenderEncoder.MemoryBarrier(MTLBarrierScope.Textures, MTLRenderStages.RenderStageFragment, MTLRenderStages.RenderStageFragment);
+                // A fragment-writes-then-fragment-reads dependency cannot be expressed
+                // as a render encoder barrier on Apple GPUs (afterStages must not name
+                // fragment). Ending the pass is the only construct that actually orders
+                // the two, and an illegal barrier here orders nothing at all.
+                EndCurrentPass();
             }
         }
 
