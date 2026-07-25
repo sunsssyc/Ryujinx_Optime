@@ -46,6 +46,39 @@ namespace Ryujinx.Graphics.Metal
 
         public bool DrawTraceActive => _capturing || _traceFramesRemaining > 0;
 
+        /// <summary>
+        /// Command buffer the capture should be scoped to, set by the pipeline before
+        /// the capture starts. Zero falls back to queue scope.
+        /// </summary>
+        public MTLCommandBuffer CurrentCommandBuffer;
+
+        private MTLCaptureScope _scope;
+
+        /// <summary>
+        /// True while a scoped capture is running and its scope has not been used yet.
+        /// </summary>
+        public bool ScopeReady => _capturing && _scope.NativePtr != IntPtr.Zero;
+
+        /// <summary>
+        /// Opens the capture scope, if a scoped capture is running. Draws encoded
+        /// between this and <see cref="EndScope"/> are what the trace contains.
+        /// </summary>
+        public void BeginScope()
+        {
+            if (_capturing && _scope.NativePtr != IntPtr.Zero)
+            {
+                _scope.BeginScope();
+            }
+        }
+
+        public void EndScope()
+        {
+            if (_capturing && _scope.NativePtr != IntPtr.Zero)
+            {
+                _scope.EndScope();
+            }
+        }
+
         public FrameCapture(MTLCommandQueue queue)
         {
             _queue = queue;
@@ -171,12 +204,28 @@ namespace Ryujinx.Graphics.Metal
             NSString outputString = StringHelper.NSString(_outputPath);
             NSURL outputUrl = new(ObjectiveCRuntime.IntPtr_objc_msgSend(new ObjectiveCClass("NSURL"), (Selector)"fileURLWithPath:", outputString.NativePtr));
 
+            // Queue-scope captures record every command buffer submitted until the
+            // capture stops. This backend encodes hundreds of thousands of render
+            // passes per frame, so a whole-frame capture produces hundreds of MB and
+            // the GPU tools have been observed to crash while finalising it (leaving
+            // an "unsorted-capture" bundle Xcode refuses to open). Capturing a single
+            // command buffer keeps the trace small enough to finalise.
+            // RYUJINX_METAL_CAPTURE_QUEUE=1 restores queue scope.
+            bool queueScope = Environment.GetEnvironmentVariable("RYUJINX_METAL_CAPTURE_QUEUE") == "1";
+
+            // A capture scope lets the trace cover just the draws of interest instead of
+            // a whole frame. This backend encodes hundreds of thousands of render
+            // passes per frame, and a whole-frame trace is large enough that the GPU
+            // tools crash while finalising it. RYUJINX_METAL_CAPTURE_QUEUE=1 restores
+            // the old queue-wide behaviour.
+            if (!queueScope)
+            {
+                _scope = manager.NewCaptureScope(_queue);
+            }
+
             MTLCaptureDescriptor descriptor = new()
             {
-                // Capture only the main command queue: a whole-device capture also
-                // records the background queue and has been observed to wedge the
-                // frame pipeline entirely.
-                CaptureObject = _queue,
+                CaptureObject = queueScope ? _queue : _scope,
                 Destination = MTLCaptureDestination.GPUTraceDocument,
                 OutputURL = outputUrl,
             };

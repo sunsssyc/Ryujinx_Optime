@@ -157,6 +157,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void Present(CAMetalDrawable drawable, Texture src, Extents2D srcRegion, Extents2D dstRegion, bool isLinear, bool useFsrSharpener, float scalingFilterLevel)
         {
+            _renderer.FrameCapture.CurrentCommandBuffer = CommandBuffer;
             _renderer.FrameCapture.OnPresentBegin();
 
             // TODO: Clean this up
@@ -511,6 +512,67 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        private static readonly string _dumpDepthAfter =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_DEPTH_AFTER");
+
+        private static readonly int _dumpDepthNth =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_DEPTH_NTH"), out int n) ? n : 1;
+
+        private bool _depthDumped;
+        private int _depthDumpSeen;
+
+        private void DumpDepthAfterDraw(string label)
+        {
+            if (_dumpDepthAfter == null || _depthDumped || label != _dumpDepthAfter)
+            {
+                return;
+            }
+
+            if (++_depthDumpSeen < _dumpDepthNth)
+            {
+                return;
+            }
+
+            Texture depth = _encoderStateManager.DepthStencil;
+
+            if (depth == null)
+            {
+                return;
+            }
+
+            _depthDumped = true;
+
+            EndCurrentPass();
+            _renderer.FlushAllCommands();
+
+            using PinnedSpan<byte> data = depth.GetData();
+            ReadOnlySpan<byte> bytes = data.Get();
+
+            int total = bytes.Length / sizeof(float);
+            int cleared = 0;
+
+            for (int i = 0; i < total; i++)
+            {
+                if (BitConverter.ToSingle(bytes.Slice(i * sizeof(float), sizeof(float))) >= 0.99999f)
+                {
+                    cleared++;
+                }
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu, $"depthdump after {label}: written={total - cleared}");
+        }
+
+        // Diagnostic: RYUJINX_METAL_CAPTURE_FROM / _TO name the programs whose draws
+        // open and close the GPU capture scope, so a trace covers only them.
+        private static readonly string _captureFromLabel =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_CAPTURE_FROM");
+
+        private static readonly string _captureToLabel =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_CAPTURE_TO");
+
+        private bool _scopeOpen;
+        private bool _scopeClosed;
+
         private void TraceDraw(string kind, int count, int instanceCount, int firstIndexOrVertex, int firstInstance)
         {
             if (_renderer.FrameCapture.DrawTraceActive)
@@ -534,6 +596,22 @@ namespace Ryujinx.Graphics.Metal
                 if (instanceCount > 1 && kind == "Draw")
                 {
                     _encoderStateManager.TraceDumpInstanceBuffers(firstInstance);
+                }
+
+                DumpDepthAfterDraw(programText);
+
+                if (_captureFromLabel != null && programText == _captureFromLabel && !_scopeOpen &&
+                    _renderer.FrameCapture.ScopeReady)
+                {
+                    _scopeOpen = true;
+                    _renderer.FrameCapture.BeginScope();
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"capture scope opened at {programText}");
+                }
+                else if (_captureToLabel != null && programText == _captureToLabel && _scopeOpen && !_scopeClosed)
+                {
+                    _scopeClosed = true;
+                    _renderer.FrameCapture.EndScope();
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"capture scope closed at {programText}");
                 }
 
                 if (IsGloomTraceProgram(programText))
