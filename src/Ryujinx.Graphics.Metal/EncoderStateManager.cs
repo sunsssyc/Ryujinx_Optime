@@ -294,14 +294,19 @@ namespace Ryujinx.Graphics.Metal
                     // Depth Only Attachment
                     case MTLPixelFormat.Depth16Unorm:
                     case MTLPixelFormat.Depth32Float:
-                        depthAttachment.Texture = _currentState.DepthStencil.GetHandle();
+                        // Must be the identity handle, not the swizzled view: a Metal
+                        // texture view created with a swizzle does not carry
+                        // MTLTextureUsageRenderTarget, and binding one as an attachment
+                        // is undefined behaviour - depth writes are silently dropped.
+                        // Colour attachments already use the identity handle.
+                        depthAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle();
                         depthAttachment.LoadAction = MTLLoadAction.Load;
                         depthAttachment.StoreAction = MTLStoreAction.Store;
                         break;
 
                     // Stencil Only Attachment
                     case MTLPixelFormat.Stencil8:
-                        stencilAttachment.Texture = _currentState.DepthStencil.GetHandle();
+                        stencilAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle();
                         stencilAttachment.LoadAction = MTLLoadAction.Load;
                         stencilAttachment.StoreAction = MTLStoreAction.Store;
                         break;
@@ -309,11 +314,11 @@ namespace Ryujinx.Graphics.Metal
                     // Combined Attachment
                     case MTLPixelFormat.Depth24UnormStencil8:
                     case MTLPixelFormat.Depth32FloatStencil8:
-                        depthAttachment.Texture = _currentState.DepthStencil.GetHandle();
+                        depthAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle();
                         depthAttachment.LoadAction = MTLLoadAction.Load;
                         depthAttachment.StoreAction = MTLStoreAction.Store;
 
-                        stencilAttachment.Texture = _currentState.DepthStencil.GetHandle();
+                        stencilAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle();
                         stencilAttachment.LoadAction = MTLLoadAction.Load;
                         stencilAttachment.StoreAction = MTLStoreAction.Store;
                         break;
