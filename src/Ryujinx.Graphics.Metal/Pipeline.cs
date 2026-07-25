@@ -312,7 +312,10 @@ namespace Ryujinx.Graphics.Metal
                         // on Apple GPUs excludes fragment and tile: passing them makes
                         // the barrier illegal and its behaviour undefined, so writes it
                         // was meant to order can be read before they land.
-                        MTLBarrierScope scope = MTLBarrierScope.Buffers | MTLBarrierScope.Textures | MTLBarrierScope.RenderTargets;
+                        // MTLBarrierScopeRenderTargets is not accepted by a render
+                        // encoder barrier on this device either, and including it makes
+                        // the whole barrier illegal.
+                        MTLBarrierScope scope = MTLBarrierScope.Buffers | MTLBarrierScope.Textures;
                         Encoders.RenderEncoder.MemoryBarrier(
                             scope,
                             MTLRenderStages.RenderStageVertex,
