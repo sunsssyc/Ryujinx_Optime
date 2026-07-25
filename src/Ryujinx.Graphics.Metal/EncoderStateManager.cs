@@ -50,6 +50,7 @@ namespace Ryujinx.Graphics.Metal
             Environment.GetEnvironmentVariable("RYUJINX_METAL_STATE_CACHE") != "0";
 
         private const int BufferSlots = (int)Constants.MaximumBufferArgumentTableEntries;
+        private const int MaxResidentTracked = 8192;
 
         private IntPtr _encoder;
         private Field _known;
@@ -58,6 +59,8 @@ namespace Ryujinx.Graphics.Metal
         private readonly (IntPtr Buffer, ulong Offset)[] _fragmentBuffers = new (IntPtr, ulong)[BufferSlots];
         private uint _vertexBound;
         private uint _fragmentBound;
+
+        private readonly HashSet<(IntPtr Resource, MTLResourceUsage Usage, MTLRenderStages Stages)> _resident = [];
 
         public IntPtr PipelineState;
         public IntPtr DepthStencilState;
@@ -121,6 +124,29 @@ namespace Ryujinx.Graphics.Metal
             return same;
         }
 
+        /// <summary>
+        /// Whether <paramref name="resource"/> has already been declared resident on
+        /// this encoder for the same usage and stages, which lasts until the encoder
+        /// ends and so does not need repeating. The encoder retains what it has been
+        /// given, so a live declaration's pointer cannot be recycled underneath this.
+        /// </summary>
+        public bool IsResident(MTLRenderCommandEncoder encoder, IntPtr resource, MTLResourceUsage usage, MTLRenderStages stages)
+        {
+            Retarget(encoder);
+
+            // A single pass can hold an unbounded number of draws, so stop growing the
+            // set rather than trade a call rate for a memory leak. Declaring a
+            // resource again is wasteful, never wrong.
+            if (_resident.Count >= MaxResidentTracked)
+            {
+                return false;
+            }
+
+            bool already = !_resident.Add((resource, usage, stages));
+
+            return _enabled && already;
+        }
+
         private void Retarget(MTLRenderCommandEncoder encoder)
         {
             if (_encoder == encoder.NativePtr)
@@ -132,6 +158,7 @@ namespace Ryujinx.Graphics.Metal
             _known = default;
             _vertexBound = 0;
             _fragmentBound = 0;
+            _resident.Clear();
         }
     }
 
@@ -654,7 +681,7 @@ namespace Ryujinx.Graphics.Metal
             _currentState.Dirty &= ~DirtyFlags.ComputeAll;
         }
 
-        private static void UseRenderResources(MTLRenderCommandEncoder renderCommandEncoder, ref RenderEncoderBindings bindings)
+        private readonly void UseRenderResources(MTLRenderCommandEncoder renderCommandEncoder, ref RenderEncoderBindings bindings)
         {
             if (bindings.Resources.Count == 0)
             {
@@ -671,7 +698,7 @@ namespace Ryujinx.Graphics.Metal
             UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read | MTLResourceUsage.Write, MTLRenderStages.RenderStageVertex | MTLRenderStages.RenderStageFragment);
         }
 
-        private static void UseRenderResources(
+        private readonly void UseRenderResources(
             MTLRenderCommandEncoder renderCommandEncoder,
             List<Resource> bindings,
             MTLResource[] resources,
@@ -682,7 +709,10 @@ namespace Ryujinx.Graphics.Metal
 
             foreach (Resource binding in bindings)
             {
-                if (binding.ResourceUsage == usage && binding.Stages == stages)
+                // Residency lasts for the life of the encoder, so a resource already
+                // declared under this usage and stages does not need declaring again.
+                if (binding.ResourceUsage == usage && binding.Stages == stages &&
+                    !_applied.IsResident(renderCommandEncoder, binding.MtlResource.NativePtr, usage, stages))
                 {
                     resources[count++] = binding.MtlResource;
                 }
