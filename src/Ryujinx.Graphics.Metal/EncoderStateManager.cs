@@ -899,11 +899,33 @@ namespace Ryujinx.Graphics.Metal
             SignalDirty(DirtyFlags.DepthStencil);
         }
 
+        /// <summary>
+        /// Diagnostic: RYUJINX_METAL_RELAX_DEPTH_EQUAL replaces the Equal depth
+        /// comparison with the named one (Always / LessEqual). Geometry drawn with
+        /// Equal is shaded in a second pass that must match a depth prepass exactly;
+        /// relaxing the comparison tells "the prepass never wrote this depth" apart
+        /// from "the geometry never reached the rasteriser".
+        /// </summary>
+        private static readonly MTLCompareFunction? _relaxDepthEqual =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_RELAX_DEPTH_EQUAL") switch
+            {
+                "always" or "1" => MTLCompareFunction.Always,
+                "lessequal" or "lequal" => MTLCompareFunction.LessEqual,
+                _ => null,
+            };
+
         public readonly void UpdateDepthState(DepthTestDescriptor depthTest)
         {
             ref DepthStencilUid uid = ref _currentState.DepthStencilUid;
 
-            uid.DepthCompareFunction = depthTest.TestEnable ? depthTest.Func.Convert() : MTLCompareFunction.Always;
+            MTLCompareFunction compare = depthTest.TestEnable ? depthTest.Func.Convert() : MTLCompareFunction.Always;
+
+            if (_relaxDepthEqual.HasValue && compare == MTLCompareFunction.Equal)
+            {
+                compare = _relaxDepthEqual.Value;
+            }
+
+            uid.DepthCompareFunction = compare;
             uid.DepthWriteEnabled = depthTest.TestEnable && depthTest.WriteEnable;
 
             SignalDirty(DirtyFlags.DepthStencil);

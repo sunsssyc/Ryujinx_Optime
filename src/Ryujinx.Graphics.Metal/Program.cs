@@ -104,6 +104,58 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        /// <summary>
+        /// Diagnostic: comma separated <see cref="DebugLabel"/> values whose fragment
+        /// stage is compiled with every <c>discard_fragment()</c> removed. An alpha
+        /// tested depth prepass that discards every fragment writes no depth at all,
+        /// which makes the Equal tested shading pass that follows it draw nothing;
+        /// dropping the discard tells that apart from the depth write itself failing.
+        /// </summary>
+        private static readonly string[] _noDiscardLabels =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_NO_DISCARD") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        /// <summary>
+        /// Diagnostic: comma separated <see cref="DebugLabel"/> values whose fragment
+        /// stage is compiled to write solid magenta to colour attachment 0, ignoring
+        /// everything it computed. Geometry that is rasterised at all then shows up
+        /// as a magenta silhouette, which separates "no fragments were produced" from
+        /// "fragments were produced but their colour or depth went nowhere".
+        /// </summary>
+        private static readonly string[] _paintLabels =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_PAINT") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        private string PatchSourceForDiagnostics(ShaderSource shader)
+        {
+            if (shader.Stage != ShaderStage.Fragment)
+            {
+                return shader.Code;
+            }
+
+            string code = shader.Code;
+
+            if (_noDiscardLabels.Length != 0 &&
+                Array.IndexOf(_noDiscardLabels, DebugLabel) >= 0 &&
+                code.Contains("discard_fragment();"))
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: compiling {DebugLabel} fragment without discard_fragment()");
+
+                code = code.Replace("discard_fragment();", "{}");
+            }
+
+            if (_paintLabels.Length != 0 &&
+                Array.IndexOf(_paintLabels, DebugLabel) >= 0 &&
+                code.Contains("return out;"))
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: compiling {DebugLabel} fragment painting solid magenta");
+
+                code = code.Replace("return out;", "out.color0 = float4(1.0f, 0.0f, 1.0f, 1.0f);\n    return out;");
+            }
+
+            return code;
+        }
+
         public ResourceBindingSegment[][] BindingSegments { get; }
         // Argument buffer sizes for Vertex or Compute stages
         public int[] ArgumentBufferSizes { get; }
@@ -137,7 +189,7 @@ namespace Ryujinx.Graphics.Metal
                 };
                 int index = i;
 
-                _handles[i] = device.NewLibrary(StringHelper.NSString(shader.Code), compileOptions, (library, error) => CompilationResultHandler(library, error, index));
+                _handles[i] = device.NewLibrary(StringHelper.NSString(PatchSourceForDiagnostics(shader)), compileOptions, (library, error) => CompilationResultHandler(library, error, index));
             }
 
             (BindingSegments, ArgumentBufferSizes, FragArgumentBufferSizes) = BuildBindingSegments(resourceLayout.SetUsages);

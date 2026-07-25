@@ -520,8 +520,58 @@ namespace Ryujinx.Graphics.Metal
 
         private bool _depthDumped;
         private int _depthDumpSeen;
+        private bool _depthDumpPending;
 
-        private void DumpDepthAfterDraw(string label)
+        /// <summary>
+        /// Reads the bound depth attachment back and reports how many pixels left the
+        /// cleared value. <paramref name="when"/> tells the sample taken before the
+        /// draw is encoded apart from the one taken after it.
+        /// </summary>
+        private void SampleDepth(string label, string when)
+        {
+            Texture depth = _encoderStateManager.DepthStencil;
+
+            if (depth == null)
+            {
+                return;
+            }
+
+            EndCurrentPass();
+            _renderer.FlushAllCommands();
+
+            using PinnedSpan<byte> data = depth.GetData();
+            ReadOnlySpan<byte> bytes = data.Get();
+
+            int total = bytes.Length / sizeof(float);
+            int written = 0;
+            float min = float.MaxValue;
+            float max = float.MinValue;
+
+            for (int i = 0; i < total; i++)
+            {
+                float value = BitConverter.ToSingle(bytes.Slice(i * sizeof(float), sizeof(float)));
+
+                if (value < 0.99999f)
+                {
+                    written++;
+                    min = Math.Min(min, value);
+                    max = Math.Max(max, value);
+                }
+            }
+
+            string range = written != 0 ? $" min={min:F6} max={max:F6}" : string.Empty;
+
+            Logger.Warning?.PrintMsg(
+                LogClass.Gpu,
+                $"depthdump {when} {label} draw#{_depthDumpSeen}: written={written}/{total}{range}");
+        }
+
+        /// <summary>
+        /// Takes the "before" depth sample and arms the "after" one. The trace hook
+        /// runs before the primitive is encoded, so a readback done from there alone
+        /// reports the state the draw has not contributed to yet.
+        /// </summary>
+        private void DumpDepthAroundDraw(string label)
         {
             if (_dumpDepthAfter == null || _depthDumped || label != _dumpDepthAfter)
             {
@@ -533,33 +583,30 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            Texture depth = _encoderStateManager.DepthStencil;
-
-            if (depth == null)
+            if (_encoderStateManager.DepthStencil == null)
             {
                 return;
             }
 
             _depthDumped = true;
+            _depthDumpPending = true;
 
-            EndCurrentPass();
-            _renderer.FlushAllCommands();
+            SampleDepth(label, "before");
+        }
 
-            using PinnedSpan<byte> data = depth.GetData();
-            ReadOnlySpan<byte> bytes = data.Get();
-
-            int total = bytes.Length / sizeof(float);
-            int cleared = 0;
-
-            for (int i = 0; i < total; i++)
+        /// <summary>
+        /// Called once the primitive has been encoded, to take the "after" sample.
+        /// </summary>
+        private void TraceDrawPost()
+        {
+            if (!_depthDumpPending)
             {
-                if (BitConverter.ToSingle(bytes.Slice(i * sizeof(float), sizeof(float))) >= 0.99999f)
-                {
-                    cleared++;
-                }
+                return;
             }
 
-            Logger.Warning?.PrintMsg(LogClass.Gpu, $"depthdump after {label}: written={total - cleared}");
+            _depthDumpPending = false;
+
+            SampleDepth(_dumpDepthAfter, "after ");
         }
 
         // Diagnostic: RYUJINX_METAL_CAPTURE_FROM / _TO name the programs whose draws
@@ -598,7 +645,7 @@ namespace Ryujinx.Graphics.Metal
                     _encoderStateManager.TraceDumpInstanceBuffers(firstInstance);
                 }
 
-                DumpDepthAfterDraw(programText);
+                DumpDepthAroundDraw(programText);
 
                 if (_captureFromLabel != null && programText == _captureFromLabel && !_scopeOpen &&
                     _renderer.FrameCapture.ScopeReady)
@@ -699,6 +746,8 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _encoderStateManager.DisposeRenderTemporaryBuffers();
+
+            TraceDrawPost();
         }
 
         private IndexBufferPattern GetIndexBufferPattern()
@@ -778,6 +827,8 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _encoderStateManager.DisposeRenderTemporaryBuffers();
+
+            TraceDrawPost();
         }
 
         public void DrawIndexedIndirect(BufferRange indirectBuffer)
