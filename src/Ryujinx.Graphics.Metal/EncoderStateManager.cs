@@ -328,6 +328,37 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
+            // A render pass with no attachments at all is invalid: Metal's validation
+            // layer reports "No output textures defined for the render pass" and the
+            // encoder's output is undefined. Ryujinx creates these whenever the guest
+            // has neither a colour target nor a depth/stencil target bound. Configure
+            // targetless rasterization instead, which is the supported way to encode
+            // draws that only have side effects.
+            bool hasAttachment = _currentState.DepthStencil != null;
+
+            if (!hasAttachment)
+            {
+                for (int i = 0; i < Constants.MaxColorAttachments; i++)
+                {
+                    if (_currentState.RenderTargets[i] != null)
+                    {
+                        hasAttachment = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!hasAttachment)
+            {
+                // The wrapper is a struct over the same native object, so a local copy
+                // still configures the descriptor being built.
+                MTLRenderPassDescriptor targetless = renderPassDescriptor;
+
+                targetless.RenderTargetWidth = (ulong)Math.Max(1, _currentState.Viewports.Length > 0 ? (int)_currentState.Viewports[0].width : 1);
+                targetless.RenderTargetHeight = (ulong)Math.Max(1, _currentState.Viewports.Length > 0 ? (int)_currentState.Viewports[0].height : 1);
+                targetless.DefaultRasterSampleCount = 1;
+            }
+
             // Initialise Encoder
             MTLRenderCommandEncoder renderCommandEncoder = _pipeline.CommandBuffer.RenderCommandEncoder(renderPassDescriptor);
 
