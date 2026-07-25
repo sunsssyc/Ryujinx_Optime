@@ -52,6 +52,14 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         // program hash, so inventories from different backends (same spot, same
         // save) can be diffed directly.
         private const string TraceTriggerPath = "/tmp/ryujinx-gal-trace";
+
+        // Diagnostic: RYUJINX_SKIP_PROGS=<hash>[,<hash>...] drops every draw whose
+        // guest-shader hash (the same label the draw trace prints) is listed. Running
+        // the backend that renders a feature correctly and bisecting over the program
+        // list identifies which shader draws that feature, without a GPU capture.
+        private static readonly System.Collections.Generic.HashSet<string> _skipProgs =
+            new(((System.Environment.GetEnvironmentVariable("RYUJINX_SKIP_PROGS") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)));
         private const int TraceDrawBudget = 15000;
 
         private static int _traceRemaining;
@@ -683,6 +691,15 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             bool indexed)
         {
             TraceDrawIfActive(count, instanceCount, firstIndex, firstVertex, firstInstance, indexed);
+
+            // Skip-list check sits here, next to the trace, so it sees exactly the
+            // program the trace labels (the current shader is only valid after the
+            // engine state update that precedes this call).
+            if (_skipProgs.Count != 0 &&
+                _skipProgs.Contains(GetTraceProgramLabel(_currentSpecState.CurrentGraphicsShader)))
+            {
+                return;
+            }
 
             if (instanceCount > 1)
             {
