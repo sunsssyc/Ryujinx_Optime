@@ -866,3 +866,48 @@ Apphost：
 - 尚未把 v27 封装成新的 Finder `.app`。
 - 用户要求暂时停止优化并准备交接。
 
+
+## 0.18 深穴瘴气伤害修复 + 灌木未解（2026-07-25）
+
+本轮修复并验证了 5 个问题，灌木仍未解决但已压缩到单点异常。
+
+### 已提交的修复
+
+| 提交 | 问题 | 验证 |
+| --- | --- | --- |
+| `45cc9d87` | **瘴气伤害**（gameplay-breaking）：`supportsVertexStoreAndAtomics: false` 谎报，导致含存储写的顶点着色器改走 VtgAsCompute 模拟，写入没落到 buffer；游戏回读判定伤害读到全 0 → 误判深陷瘴气 | 全 0 的 64B buffer 1281→2；Link 站瘴气 15 秒满血（修复前 6 秒 Game Over）。**改能力位后必须清 Metal 着色器缓存** |
+| `ec44740c` | `CounterCache.FindEvent/FindAndFlush` 用 `index > 0`，命中第 0 项时误判找不到 → 条件渲染静默跳过绘制 | 同相机下绘制程序数 253→283 |
+| `18de65af` | 渲染路径把 storage buffer 的驻留声明成 `Read`，而 compute 路径与同一 switch 里的 image 都是 `Read \| Write`；图形着色器确实会写 storage buffer | 写只读声明的资源属未定义行为 |
+| `d04b323a` | 创建了既无颜色也无深度附件的 render pass（验证层：`No output textures defined for the render pass` ×5962） | 改为 targetless rasterization 后违规 5962→0，画面不变 |
+| `111ed55b` | GPU 帧捕获不可用：队列级捕获要抓整帧，而本后端一帧编码 30 万+ render pass，trace 大到 GPU 工具收尾崩溃 | 改用 `MTLCaptureScope` 圈定目标绘制，产出带 index、`captured_frames_count=1` 的可打开 trace |
+
+### 灌木问题的现状
+
+TOTK 深穴灌木由两遍渲染：深度预通道（alpha 测试镂空，只写深度）+ `Equal` 深度测试的着色通道。
+在 Vulkan 上跳掉预通道，灌木同样消失 → 链条确认。
+
+**核心异常（六重加固过）**：预通道在 Metal 上写不出任何深度，尽管
+①在光栅化 ②深度附件绑定为 `Load | Store`（Xcode 帧捕获独立确认）③管线深度格式 `Depth32Float`
+④`depthWrite=True`、`depthFunc=Less` ⑤目标缓冲全 1.0（`Less` 不可能失败）。
+排除了：读回竞态（显式 flush）、alpha discard、颜色写掩码、深度状态未重绑、pass 无附件、
+读回句柄错误、深度补偿（Vulkan 强制用同样补偿也正常）、FastMath、invariance、面剔除、
+视口剪裁、渲染通道按写掩码切分、多纹理视图（是合法共享存储视图，`PixelFormatView` 用途已设）。
+
+**下一步**：在帧捕获里选中真正的 draw call，看 Depth 附件的 Before/After，判定是
+"深度从未写入" 还是 "写入后被抹掉"——两者修法完全相反。
+
+### 顺带发现（未修，值得单独立项）
+
+- 一次运行创建 **30 万+ render pass**，其中 159037 个完全没有附件。
+- 冗余状态设置：`setFrontFacingWinding` 无用 8.3 万次、`redundant setBlendColorRed` 78 万次、
+  `unused binding in encoder` 70 万次。以上两条是 Metal 后端帧率落后 Vulkan 的重要嫌疑。
+- `PersistentFlushBuffer.GetTextureData` 与 `Texture.cs` 两处 blit 用 `GetHandle()`/`MtlTexture`，
+  违反 `TextureBase.GetIdentityHandle` 注释写明的 "copies 必须用 identity 视图" 不变式。
+
+### 诊断工具（本轮新增，均 env 门控）
+
+- `RYUJINX_SKIP_PROGS=<guest哈希>` + `/tmp/ryujinx-skip-progs`（热重载）：按着色器跳过绘制，
+  用于二分定位某个特征由哪个着色器绘制。
+- `RYUJINX_METAL_CAPTURE_FROM/TO=<MSL标签>`：用 capture scope 圈定 GPU 捕获范围。
+- `MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog MTL_DEBUG_LAYER_WARNING_MODE=nslog`：
+  验证层全量清单（本轮靠它找到空附件 render pass）。
