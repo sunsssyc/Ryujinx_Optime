@@ -1015,3 +1015,76 @@ Metal 没有 "两面都剔除"，本后端用**空剪裁矩形 `0×0`** 模拟�
 4. 必须 A/B/A，且**改了协议就把对照组也用新协议重跑**——热身时长会显著改变绝对值
    （同一构建长热身 41.6 FPS、短热身 37.8 FPS）。
 5. 锁屏时 Avalonia 起不来，整个测量会失败。
+
+## 0.21 帧率翻倍：缓冲上传不再打断渲染通道（2026-07-26）
+
+### 先砍掉两条错误方向
+
+**同步等待不是瓶颈。** 日志"每帧等 22.6 ms / 帧时间 24 ms"读起来像全帧都在等，其实
+`_waitTicks` 是**多线程求和**。按线程归因后是三个客户机线程各约 6.8 ms
+（`<MainThread>`/`<ModuleSystemWorker1>`/`<ModuleSystemWorker2>`），关键路径代价是 6.8 ms。
+
+**提交粒度也不是。** `RYUJINX_METAL_DEFERRED_SYNC_BATCH=1`（每帧多 2 次提交）实测：
+主线程等待 816→1059 ms、帧时间 23.8→25.7 ms，而 blit 切分数**一次没少**（192 vs 191）。
+原因是阻塞条件看的是**当前命令缓冲里已记录的绘制**，窗口由 GPU 执行延迟决定，与提交节奏无关。
+
+### 真根因：pass 数量
+
+加了 pass/draw 计数与**切分归因**（并把账目做闭合，用 `IEncoderFactory.OnRenderPassEnded`
+兜住所有绕过 `Pipeline.EndCurrentPass` 的路径）：
+
+```
+每帧 374 个 render pass / 1400 笔绘制 = 每 pass 只摊 3.7 笔
+BlitEncoder=191 (51%)  RenderTargets=92  ColorMask=43  FragmentDependency=27
+```
+
+blit 调用方压倒性是一个：`StagingBuffer.PushDataImpl`，每帧 209 次。
+再往下用 `RYUJINX_METAL_UPLOAD_TRACE=1` 定位到具体的门：
+
+```
+direct=209/帧   rangeInUse=329/帧（被挡）   preloaded=36/帧
+被挡的尺寸分布：≤256B 76%、≤4K 95%
+```
+
+机制：缓冲是持久映射的本可直写，但目标区间正被在飞命令缓冲读取时只能走 staging，
+而 Metal 的 blit 编码器**不能在渲染通道内**，于是每次上传都切一次 pass。
+
+### 修法：移植 Vulkan 的 buffer mirror（提交 `9c1e7aac` + `be066677`）
+
+Vulkan 后端本来就有这套，而且**正是为 TBDR 开的**（`_useMirrors = gd.IsTBDR`），Metal 从未移植。
+写入先留在 CPU 侧 pending 范围表；**绑定时**从 staging 预留一块，填「基础数据 + 待定修改」，
+绑这块镜像。原缓冲在使用期间从不被写 → 无需排序 → 不需要 blit → 不切 pass。
+
+移植内容：`BufferMirrorRangeList`（照搬）、`Auto<T>` 的 `IMirrorable` 钩子、
+`BufferHolder` 的 pending/mirror 逻辑与 `SetData` 分支、`Pipeline.RegisterActiveMirror`/
+`ClearActiveMirrors`（命令缓冲退役时丢弃镜像）/`RebindBufferRange`（把 Uniforms|Storages 标脏，
+Metal 会整套重建参数缓冲，不必点名单个绑定）、`AddressForBuffer` 里只读绑定改走 `GetMirrorable`。
+**比 Vulkan 多补一处**：`GetData` 前先 `FlushPendingData`，否则回读会读到旧值。
+
+### 实测
+
+不受运行间漂移影响的量：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 每帧 render pass | 374 | **189** |
+| blit 切分 | 191 | **2** |
+| draws/pass | 3.7 | **7.9** |
+| 30 帧上限下每 120 帧同步等待 | 2341 ms | **123 ms** |
+
+解掉上限：**41.3 → 82.7 FPS，24.2 → 12.1 ms**（本机运行间漂移约 11%，远小于此；
+且与不安全天花板探针的 69.9 FPS 吻合）。
+
+**正确性验证**：①上限模式两种配置都精确 30.00 FPS，游戏内时钟推进完全一致
+（1:55 PM → 3:55 PM / 120.4 真实秒），**游戏速度未变**；②机位由存档决定时，
+与关闭镜像的画面差 2.92/255，**低于同一构建相邻两帧的动画底噪 3.45/255**。
+
+`RYUJINX_METAL_BUFFER_MIRRORS=0` 可回到 staging 路径做对照。
+
+### 测量教训（补充 0.20 的勘误）
+
+- **画面比对前必须先确认机位一致**。第一次跨会话比对得到"平均差 31.9/255、72% 像素不同"，
+  看着像严重损坏；实际是两次会话机位完全不同（载入期间多按的 Z 让角色转了向）。
+  去掉一切改变机位的按键后差异降到 2.92。**结论前先验仪器。**
+- 天花板探针要选**不会死锁**的形式：第一版强行跳过危险检查，直写路径里仍会
+  `WaitForFences`，游戏 0 FPS 黑屏挂死；改成强制走 preload 才测到有效数字。
