@@ -949,13 +949,26 @@ namespace Ryujinx.Graphics.Metal
             }
             else
             {
-                // Requires recreating pipeline
-                if (_pipeline.CurrentEncoderType == EncoderType.Render)
+                // The write mask lives in the render pipeline descriptor, not the render
+                // pass descriptor, and it is part of PipelineUid, so a new pipeline object
+                // is all a change needs. Ending the pass was only a roundabout way of
+                // forcing that rebuild, and it cost a full attachment store and reload
+                // every time the guest changed a mask - 43 render passes a frame.
+                if (_endPassOnColorMask && _pipeline.CurrentEncoderType == EncoderType.Render)
                 {
                     _pipeline.EndCurrentPass(PassEndReason.ColorMask);
                 }
+                else
+                {
+                    SignalDirty(DirtyFlags.RenderPipeline);
+                }
             }
         }
+
+        // A/B switch for the above: RYUJINX_METAL_END_PASS_ON_COLOR_MASK=1 restores the
+        // pass split.
+        private static readonly bool _endPassOnColorMask =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_END_PASS_ON_COLOR_MASK") == "1";
 
         private readonly void UpdateRenderTargetsInternal(Span<ITexture> colors, ITexture depthStencil)
         {
@@ -1031,7 +1044,8 @@ namespace Ryujinx.Graphics.Metal
                 _currentState.DepthStencil = null;
             }
 
-            // Requires recreating pipeline
+            // Measured: the attachment set really does change on all 116 of these a
+            // frame, so there is no redundant case here to skip.
             if (_pipeline.CurrentEncoderType == EncoderType.Render)
             {
                 _pipeline.EndCurrentPass(PassEndReason.RenderTargets);
