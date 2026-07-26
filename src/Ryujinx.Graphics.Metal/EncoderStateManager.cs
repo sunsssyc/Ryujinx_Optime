@@ -7,6 +7,7 @@ using Ryujinx.Graphics.Shader;
 using SharpMetal.Metal;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -43,11 +44,45 @@ namespace Ryujinx.Graphics.Metal
             StencilRef = 1 << 7,
         }
 
-        // A/B switch: RYUJINX_METAL_STATE_CACHE=0 reports every field as unknown, so
-        // each setter applies unconditionally the way it did before this cache
-        // existed. Lets the same binary measure both sides in one sitting.
-        private static readonly bool _enabled =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_STATE_CACHE") != "0";
+        // A/B switch: RYUJINX_METAL_STATE_CACHE=0, or a 0 in the toggle file, reports
+        // every field as unknown, so each setter applies unconditionally the way it
+        // did before this cache existed.
+        //
+        // The toggle is re-read once a frame because this machine's frame rate drifts
+        // by ~10% over the twenty minutes three separate runs take, which is several
+        // times the effect being measured. Alternating both behaviours inside one
+        // session cancels that drift. Flipping is safe at any moment: the cache is
+        // updated whether or not it is being consulted, so it never goes stale.
+        // Levels, so a measurement can attribute the effect to one part at a time:
+        // 0 nothing, 1 state fields, 2 also buffer binds, 3 also residency.
+        public const int LevelOff = 0;
+        public const int LevelFields = 1;
+        public const int LevelBuffers = 2;
+        public const int LevelResidency = 3;
+
+        private const string ToggleFile = "/tmp/ryujinx-metal-state-cache";
+
+        private static int _level = ParseLevel(Environment.GetEnvironmentVariable("RYUJINX_METAL_STATE_CACHE"), LevelResidency);
+
+        private static int ParseLevel(string text, int fallback)
+        {
+            return int.TryParse(text, out int level) ? Math.Clamp(level, LevelOff, LevelResidency) : fallback;
+        }
+
+        public static void RefreshToggle()
+        {
+            try
+            {
+                if (File.Exists(ToggleFile))
+                {
+                    _level = ParseLevel(File.ReadAllText(ToggleFile).Trim(), _level);
+                }
+            }
+            catch (IOException)
+            {
+                // Raced with the writer; the next frame will pick it up.
+            }
+        }
 
         private const int BufferSlots = (int)Constants.MaximumBufferArgumentTableEntries;
         private const int MaxResidentTracked = 8192;
@@ -84,7 +119,7 @@ namespace Ryujinx.Graphics.Metal
         {
             Retarget(encoder);
 
-            bool known = _enabled && (_known & field) != 0;
+            bool known = _level >= LevelFields && (_known & field) != 0;
 
             _known |= field;
 
@@ -113,7 +148,7 @@ namespace Ryujinx.Graphics.Metal
 
             uint bit = 1u << slot;
 
-            bool same = _enabled &&
+            bool same = _level >= LevelBuffers &&
                 (mask & bit) != 0 &&
                 bound.Buffer == buffer.Buffer.NativePtr &&
                 bound.Offset == buffer.Offset;
@@ -144,7 +179,7 @@ namespace Ryujinx.Graphics.Metal
 
             bool already = !_resident.Add((resource, usage, stages));
 
-            return _enabled && already;
+            return _level >= LevelResidency && already;
         }
 
         private void Retarget(MTLRenderCommandEncoder encoder)
