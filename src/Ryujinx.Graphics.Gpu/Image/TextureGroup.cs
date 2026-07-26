@@ -1712,6 +1712,10 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <param name="size">The size of the flushing memory access</param>
         public void FlushAction(TextureGroupHandle handle, ulong address, ulong size)
         {
+            // There is a small gap here where the action is removed but _actionRegistered is still 1.
+            // In this case it will skip registering the action, but here we are already handling it,
+            // so there shouldn't be any issue as it's the same handler for all actions.
+
             handle.ClearActionRegistered();
 
             if (!handle.Modified)
@@ -1721,9 +1725,15 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             bool isGpuThread = _context.IsGpuThread();
 
+            if (isGpuThread)
+            {
+                // No need to wait if we're on the GPU thread, we can just clear the modified flag immediately.
+                handle.Modified = false;
+            }
+
             _context.Renderer.BackgroundContextAction(() =>
             {
-                bool inBuffer = !isGpuThread && handle.Sync(_context, clearModified: false);
+                bool inBuffer = !isGpuThread && handle.Sync(_context);
 
                 Storage.SignalModifiedDirty();
 

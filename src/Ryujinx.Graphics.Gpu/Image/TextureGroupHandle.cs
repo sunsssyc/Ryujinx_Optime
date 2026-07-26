@@ -366,9 +366,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// removing the modified flag if it was reached, or leaving it set if it has not yet been created.
         /// </summary>
         /// <param name="context">The GPU context used to wait for sync</param>
-        /// <param name="clearModified">Whether to clear the Modified flag after sync completes</param>
         /// <returns>True if the texture data can be read from the flush buffer</returns>
-        public bool Sync(GpuContext context, bool clearModified = true)
+        public bool Sync(GpuContext context)
         {
             // Currently assumes the calling thread is a guest thread.
 
@@ -389,10 +388,7 @@ namespace Ryujinx.Graphics.Gpu.Image
                     return inBuffer;
                 }
 
-                if (clearModified)
-                {
-                    Modified = false;
-                }
+                Modified = false;
 
                 return inBuffer;
             }
