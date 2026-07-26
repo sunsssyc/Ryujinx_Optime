@@ -943,7 +943,7 @@ namespace Ryujinx.Graphics.Metal
                 // Requires recreating pipeline
                 if (_pipeline.CurrentEncoderType == EncoderType.Render)
                 {
-                    _pipeline.EndCurrentPass();
+                    _pipeline.EndCurrentPass(PassEndReason.ColorMask);
                 }
             }
         }
@@ -1025,7 +1025,7 @@ namespace Ryujinx.Graphics.Metal
             // Requires recreating pipeline
             if (_pipeline.CurrentEncoderType == EncoderType.Render)
             {
-                _pipeline.EndCurrentPass();
+                _pipeline.EndCurrentPass(PassEndReason.RenderTargets);
             }
         }
 

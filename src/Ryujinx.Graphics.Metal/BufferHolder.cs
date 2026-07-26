@@ -162,6 +162,9 @@ namespace Ryujinx.Graphics.Metal
             throw new InvalidOperationException("The buffer is not mapped.");
         }
 
+        private static readonly bool _unsafePreload =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_UNSAFE_PRELOAD") == "1";
+
         public unsafe void SetData(int offset, ReadOnlySpan<byte> data, CommandBufferScoped? cbs = null, bool allowCbsWait = true)
         {
             int dataSize = Math.Min(data.Length, Size - offset);
@@ -190,10 +193,15 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
+            // Ceiling probe, NOT correct: RYUJINX_METAL_UNSAFE_PRELOAD=1 preloads even
+            // when the destination range is already in use by the current command
+            // buffer, to measure what removing the staging path's render pass splits
+            // would be worth before building a safe way to remove them.
             if (cbs != null &&
                 cbs.Value.Encoders.CurrentEncoderType == EncoderType.Render &&
-                !(_buffer.HasCommandBufferDependency(cbs.Value) &&
-                  _waitable.IsBufferRangeInUse(cbs.Value.CommandBufferIndex, offset, dataSize)))
+                (_unsafePreload ||
+                 !(_buffer.HasCommandBufferDependency(cbs.Value) &&
+                   _waitable.IsBufferRangeInUse(cbs.Value.CommandBufferIndex, offset, dataSize))))
             {
                 // If the buffer hasn't been used on the command buffer yet, try to preload the data.
                 // This avoids ending and beginning render passes on each buffer data upload.

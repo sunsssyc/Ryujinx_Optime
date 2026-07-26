@@ -6,10 +6,31 @@ using SharpMetal.Metal;
 using SharpMetal.QuartzCore;
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.Versioning;
 
 namespace Ryujinx.Graphics.Metal
 {
+    /// <summary>
+    /// Why a render pass was ended. Passes are the expensive unit on a tile based
+    /// GPU, so the stats line attributes them to whatever forced the split.
+    /// </summary>
+    public enum PassEndReason
+    {
+        Unspecified,
+        SwapState,
+        FragmentDependencySkipped,
+        Present,
+        Flush,
+        DepthDump,
+        FragmentDependency,
+        ColorMask,
+        RenderTargets,
+        BlitEncoder,
+        ComputeEncoder,
+        Dispose,
+    }
+
     public enum EncoderType
     {
         Blit,
@@ -33,6 +54,15 @@ namespace Ryujinx.Graphics.Metal
         private int _presentCount;
         private int _autoFlushDrawCount;
         private int _autoFlushAttachmentCount;
+
+        // Render passes are the expensive unit on a tile based GPU: each one loads and
+        // stores every attachment. Counted here against draws so the stats line says
+        // how many draws a pass is actually amortised over.
+        private ulong _renderPassCount;
+        private ulong _lastStatsDrawCount;
+        private ulong _lastStatsRenderPassCount;
+        private readonly int[] _passEndReasons = new int[Enum.GetValues<PassEndReason>().Length];
+        private ulong _drawCountAtPassStart;
 
         public ulong DrawCount { get; private set; }
 
@@ -68,7 +98,7 @@ namespace Ryujinx.Graphics.Metal
         {
             if (endRenderPass && CurrentEncoderType == EncoderType.Render)
             {
-                EndCurrentPass();
+                EndCurrentPass(PassEndReason.SwapState);
             }
 
             return _encoderStateManager.SwapState(state, flags);
@@ -119,6 +149,7 @@ namespace Ryujinx.Graphics.Metal
 
         public MTLComputeCommandEncoder GetOrCreateComputeEncoder(bool forDispatch = false)
         {
+
             // Mark all state as dirty to ensure it is set on the new encoder
             if (Cbs.Encoders.CurrentEncoderType != EncoderType.Compute)
             {
@@ -140,13 +171,34 @@ namespace Ryujinx.Graphics.Metal
             return computeCommandEncoder;
         }
 
-        public void EndCurrentPass()
+        private PassEndReason _pendingPassEndReason = PassEndReason.Unspecified;
+
+        public void EndCurrentPass(PassEndReason reason = PassEndReason.Unspecified)
         {
+            _pendingPassEndReason = reason;
+
             Cbs.Encoders.EndCurrentPass();
+
+            _pendingPassEndReason = PassEndReason.Unspecified;
+        }
+
+        public void OnRenderPassEnded(EncoderType startingType)
+        {
+            PassEndReason reason = startingType switch
+            {
+                EncoderType.Blit => PassEndReason.BlitEncoder,
+                EncoderType.Compute => PassEndReason.ComputeEncoder,
+                _ => _pendingPassEndReason,
+            };
+
+            _passEndReasons[(int)reason]++;
         }
 
         public MTLRenderCommandEncoder CreateRenderCommandEncoder()
         {
+            _renderPassCount++;
+            _drawCountAtPassStart = DrawCount;
+
             return _encoderStateManager.CreateRenderCommandEncoder();
         }
 
@@ -175,7 +227,7 @@ namespace Ryujinx.Graphics.Metal
                 _renderer.HelperShader.BlitColor(Cbs, src, dst, srcRegion, dstRegion, isLinear, true);
             }
 
-            EndCurrentPass();
+            EndCurrentPass(PassEndReason.Present);
 
             Cbs.CommandBuffer.PresentDrawable(drawable);
 
@@ -195,7 +247,8 @@ namespace Ryujinx.Graphics.Metal
                     out int coalescedSyncSignalCount,
                     out string waitBreakdown,
                     out string createBreakdown,
-                    out string waitDurations);
+                    out string waitDurations,
+                    out string threadBreakdown);
 
                 int autoFlushDrawCount = _autoFlushDrawCount;
                 int autoFlushAttachmentCount = _autoFlushAttachmentCount;
@@ -209,6 +262,27 @@ namespace Ryujinx.Graphics.Metal
                     string sourceText = string.IsNullOrEmpty(waitBreakdown) ? string.Empty : $" wait: {waitBreakdown}.";
                     string createText = string.IsNullOrEmpty(createBreakdown) ? string.Empty : $" created: {createBreakdown}.";
                     string durationText = string.IsNullOrEmpty(waitDurations) ? string.Empty : $" durations: {waitDurations}.";
+                    string threadText = string.IsNullOrEmpty(threadBreakdown) ? string.Empty : $" threads: {threadBreakdown}.";
+
+                    ulong draws = DrawCount - _lastStatsDrawCount;
+                    ulong passes = _renderPassCount - _lastStatsRenderPassCount;
+                    _lastStatsDrawCount = DrawCount;
+                    _lastStatsRenderPassCount = _renderPassCount;
+
+                    string passText =
+                        $" per frame: {passes / (ulong)SyncStatsLogFrameInterval} passes, " +
+                        $"{draws / (ulong)SyncStatsLogFrameInterval} draws " +
+                        $"({(passes != 0 ? (double)draws / passes : 0):F1} draws/pass).";
+
+                    string reasonText = " pass ends: " + string.Join(", ", Enum.GetValues<PassEndReason>()
+                        .Where(r => _passEndReasons[(int)r] != 0)
+                        .OrderByDescending(r => _passEndReasons[(int)r])
+                        .Select(r => $"{r}={_passEndReasons[(int)r] / SyncStatsLogFrameInterval}"));
+
+                    Array.Clear(_passEndReasons);
+
+                    string blitCallers = CommandBufferEncoder.TakeBlitCallers();
+                    string blitText = blitCallers == null ? string.Empty : $" blit callers: {blitCallers}.";
 
                     Logger.Info?.PrintMsg(
                         LogClass.Gpu,
@@ -216,7 +290,7 @@ namespace Ryujinx.Graphics.Metal
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
-                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}");
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{reasonText}{blitText}");
                 }
             }
 
@@ -262,7 +336,7 @@ namespace Ryujinx.Graphics.Metal
         public void FlushCommandsImpl()
         {
             _renderer.AutoFlush.RegisterFlush(DrawCount);
-            EndCurrentPass();
+            EndCurrentPass(PassEndReason.Flush);
 
             _byteWeight = 0;
             _disposedResourceCount = 0;
@@ -538,7 +612,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            EndCurrentPass();
+            EndCurrentPass(PassEndReason.DepthDump);
             _renderer.FlushAllCommands();
 
             using PinnedSpan<byte> data = depth.GetData();
@@ -1156,14 +1230,28 @@ namespace Ryujinx.Graphics.Metal
 
         public void TextureBarrier()
         {
-            if (CurrentEncoderType == EncoderType.Render)
+            if (CurrentEncoderType != EncoderType.Render)
             {
-                // A fragment-writes-then-fragment-reads dependency cannot be expressed
-                // as a render encoder barrier on Apple GPUs (afterStages must not name
-                // fragment). Ending the pass is the only construct that actually orders
-                // the two, and an illegal barrier here orders nothing at all.
-                EndCurrentPass();
+                return;
             }
+
+            // The barrier orders fragment writes before later fragment reads. Writes
+            // made by earlier passes are already ordered by the boundary that ended
+            // them, so with no draw encoded since this pass began there is nothing
+            // for it to order - and splitting anyway costs a full attachment store
+            // and reload. The guest issues these in the hundreds per frame.
+            if (DrawCount == _drawCountAtPassStart)
+            {
+                _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
+
+                return;
+            }
+
+            // A fragment-writes-then-fragment-reads dependency cannot be expressed
+            // as a render encoder barrier on Apple GPUs (afterStages must not name
+            // fragment). Ending the pass is the only construct that actually orders
+            // the two, and an illegal barrier here orders nothing at all.
+            EndCurrentPass(PassEndReason.FragmentDependency);
         }
 
         public void TextureBarrierTiled()
@@ -1205,7 +1293,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void Dispose()
         {
-            EndCurrentPass();
+            EndCurrentPass(PassEndReason.Dispose);
             _encoderStateManager.Dispose();
         }
     }

@@ -58,6 +58,12 @@ namespace Ryujinx.Graphics.Metal
         private readonly long[] _waitTicksByCreateSource = new long[Enum.GetValues<HostSyncCreateSource>().Length];
         private readonly int[] _waitCountByCreateSource = new int[Enum.GetValues<HostSyncCreateSource>().Length];
 
+        // Wait time is summed across every thread that waits, so it can exceed wall
+        // clock and says nothing on its own about what the frame rate is losing.
+        // Attribute it per thread instead: only the thread that feeds the command
+        // stream stalls the frame.
+        private readonly Dictionary<string, (long Ticks, int Count)> _waitByThread = [];
+
         public SyncManager(MetalRenderer renderer)
         {
             _renderer = renderer;
@@ -251,6 +257,7 @@ namespace Ryujinx.Graphics.Metal
                         Interlocked.Increment(ref _waitCount);
                         AddBucket(_waitTicksByWaitSource, _waitCountByWaitSource, source, elapsedTicks);
                         AddBucket(_waitTicksByCreateSource, _waitCountByCreateSource, result.Source, elapsedTicks);
+                        AddThreadWait(elapsedTicks);
                         AddWaitDurationSample(elapsedTicks);
                         result.Signalled = true;
                     }
@@ -346,7 +353,7 @@ namespace Ryujinx.Graphics.Metal
 
         public long GetAndResetWaitStats(out int waitCount, out int forcedFlushCount, out int proactiveFlushCount)
         {
-            return GetAndResetWaitStats(out waitCount, out forcedFlushCount, out proactiveFlushCount, out _, out _, out _, out _);
+            return GetAndResetWaitStats(out waitCount, out forcedFlushCount, out proactiveFlushCount, out _, out _, out _, out _, out _);
         }
 
         public long GetAndResetAutoFlushWaitTicks()
@@ -361,7 +368,8 @@ namespace Ryujinx.Graphics.Metal
             out int coalescedSignalCount,
             out string waitBreakdown,
             out string createBreakdown,
-            out string waitDurations)
+            out string waitDurations,
+            out string threadBreakdown)
         {
             long result = Interlocked.Exchange(ref _waitTicks, 0);
             waitCount = Interlocked.Exchange(ref _waitCount, 0);
@@ -371,8 +379,40 @@ namespace Ryujinx.Graphics.Metal
             waitBreakdown = FormatAndResetWaitBuckets(_waitTicksByWaitSource, _waitCountByWaitSource);
             createBreakdown = FormatAndResetCreateBuckets(_waitTicksByCreateSource, _waitCountByCreateSource);
             waitDurations = FormatAndResetWaitDurations();
+            threadBreakdown = FormatAndResetThreadWaits();
 
             return result;
+        }
+
+        private void AddThreadWait(long elapsedTicks)
+        {
+            string name = Thread.CurrentThread.Name ?? $"tid{Environment.CurrentManagedThreadId}";
+
+            lock (_waitByThread)
+            {
+                _waitByThread.TryGetValue(name, out (long Ticks, int Count) entry);
+                _waitByThread[name] = (entry.Ticks + elapsedTicks, entry.Count + 1);
+            }
+        }
+
+        private string FormatAndResetThreadWaits()
+        {
+            lock (_waitByThread)
+            {
+                if (_waitByThread.Count == 0)
+                {
+                    return "none";
+                }
+
+                string text = string.Join(", ", _waitByThread
+                    .OrderByDescending(entry => entry.Value.Ticks)
+                    .Take(6)
+                    .Select(entry => $"{entry.Key}={entry.Value.Ticks * 1000.0 / Stopwatch.Frequency:F0}ms/{entry.Value.Count}"));
+
+                _waitByThread.Clear();
+
+                return text;
+            }
         }
 
         private void AddWaitDurationSample(long elapsedTicks)
