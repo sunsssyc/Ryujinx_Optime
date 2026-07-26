@@ -396,6 +396,15 @@ namespace Ryujinx.Graphics.Metal
             _currentState.Dirty |= flags;
         }
 
+        /// <summary>
+        /// A bound buffer range changed identity - it gained or lost a mirror - so the
+        /// argument buffers that name it have to be rebuilt.
+        /// </summary>
+        public readonly void SignalBufferRebind()
+        {
+            SignalDirty(DirtyFlags.Uniforms | DirtyFlags.Storages);
+        }
+
         public readonly void SignalRenderDirty()
         {
             SignalDirty(DirtyFlags.RenderAll);
@@ -1693,7 +1702,18 @@ namespace Ryujinx.Graphics.Metal
                 if (range.HasValue)
                 {
                     offset = range.Value.Offset;
-                    mtlBuffer = autoBuffer.Get(_pipeline.Cbs, offset, range.Value.Size, range.Value.Write).Value;
+
+                    if (range.Value.Write)
+                    {
+                        mtlBuffer = autoBuffer.Get(_pipeline.Cbs, offset, range.Value.Size, true).Value;
+                    }
+                    else
+                    {
+                        // A read only binding may be served from a mirror holding writes
+                        // that have not been put into the buffer itself, which is what
+                        // keeps those writes from needing a blit inside the render pass.
+                        mtlBuffer = autoBuffer.GetMirrorable(_pipeline.Cbs, ref offset, range.Value.Size, out _).Value;
+                    }
                 }
                 else
                 {

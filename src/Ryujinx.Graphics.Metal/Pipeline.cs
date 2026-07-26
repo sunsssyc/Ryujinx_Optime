@@ -5,6 +5,7 @@ using SharpMetal.Foundation;
 using SharpMetal.Metal;
 using SharpMetal.QuartzCore;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.Versioning;
@@ -172,6 +173,37 @@ namespace Ryujinx.Graphics.Metal
         }
 
         private PassEndReason _pendingPassEndReason = PassEndReason.Unspecified;
+
+        private readonly List<BufferHolder> _activeBufferMirrors = [];
+
+        /// <summary>
+        /// Remembers a buffer that has live mirrors, so they can all be dropped when the
+        /// command buffer changes and their staging reservations go with it.
+        /// </summary>
+        public void RegisterActiveMirror(BufferHolder buffer)
+        {
+            _activeBufferMirrors.Add(buffer);
+        }
+
+        public void ClearActiveMirrors()
+        {
+            foreach (BufferHolder buffer in _activeBufferMirrors)
+            {
+                buffer.ClearMirrors();
+            }
+
+            _activeBufferMirrors.Clear();
+        }
+
+        /// <summary>
+        /// Marks bound buffer sets dirty so the next draw resolves the range again and
+        /// picks up, or stops using, a mirror. Metal rebuilds the argument buffers for a
+        /// dirty set wholesale, so this does not need to name the individual binding.
+        /// </summary>
+        public void RebindBufferRange(Auto<DisposableBuffer> buffer, int offset, int size)
+        {
+            _encoderStateManager.SignalBufferRebind();
+        }
 
         public void EndCurrentPass(PassEndReason reason = PassEndReason.Unspecified)
         {
@@ -350,6 +382,10 @@ namespace Ryujinx.Graphics.Metal
             }
 
             CommandBuffer = (Cbs = _renderer.CommandBufferPool.ReturnAndRent(Cbs)).CommandBuffer;
+
+            // Mirrors live in staging reservations owned by the command buffer that is
+            // being retired, so none of them survive the swap.
+            ClearActiveMirrors();
             _renderer.RegisterFlush();
         }
 
