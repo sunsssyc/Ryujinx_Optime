@@ -205,6 +205,13 @@ namespace Ryujinx.Graphics.Metal
 
                 int middle = left + (range >> 1);
 
+                int count = list.Count;
+                if ((uint)middle >= (uint)count)
+                {
+                    right = count - 1;
+                    continue;
+                }
+
                 Range item = list[middle];
 
                 if (item.OverlapsWith(offset, size))
