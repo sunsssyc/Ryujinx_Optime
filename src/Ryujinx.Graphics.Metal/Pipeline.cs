@@ -281,6 +281,8 @@ namespace Ryujinx.Graphics.Metal
 
                     Array.Clear(_passEndReasons);
 
+                    string uploadGates = BufferHolder.TakeUploadGates();
+                    string gateText = uploadGates == null ? string.Empty : $" upload gates: {uploadGates}.";
                     string blitCallers = CommandBufferEncoder.TakeBlitCallers();
                     string blitText = blitCallers == null ? string.Empty : $" blit callers: {blitCallers}.";
 
@@ -290,7 +292,7 @@ namespace Ryujinx.Graphics.Metal
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
-                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{reasonText}{blitText}");
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{reasonText}{gateText}{blitText}");
                 }
             }
 

@@ -19,6 +19,17 @@ namespace Ryujinx.Graphics.Metal
         void AddCommandBufferDependencies(CommandBufferScoped cbs);
     }
 
+    /// <summary>
+    /// Something that can hand out a stand-in for a range of itself, so that data
+    /// written while the real resource is still being read by the GPU lands somewhere
+    /// else instead of forcing the write to be ordered against those reads.
+    /// </summary>
+    interface IMirrorable<T> where T : IDisposable
+    {
+        Auto<T> GetMirrorable(CommandBufferScoped cbs, ref int offset, int size, out bool mirrored);
+        void ClearMirrors(CommandBufferScoped cbs, int offset, int size);
+    }
+
     [SupportedOSPlatform("macos")]
     class Auto<T> : IAutoPrivate, IDisposable where T : IDisposable
     {
@@ -27,6 +38,7 @@ namespace Ryujinx.Graphics.Metal
 
         private readonly BitMap _cbOwnership;
         private readonly MultiFenceHolder _waitable;
+        private readonly IMirrorable<T> _mirrorable;
 
         private bool _disposed;
         private bool _destroyed;
@@ -43,8 +55,23 @@ namespace Ryujinx.Graphics.Metal
             _waitable = waitable;
         }
 
+        public Auto(T value, IMirrorable<T> mirrorable, MultiFenceHolder waitable) : this(value, waitable)
+        {
+            _mirrorable = mirrorable;
+        }
+
+        public T GetMirrorable(CommandBufferScoped cbs, ref int offset, int size, out bool mirrored)
+        {
+            Auto<T> mirror = _mirrorable.GetMirrorable(cbs, ref offset, size, out mirrored);
+
+            mirror._waitable?.AddBufferUse(cbs.CommandBufferIndex, offset, size, false);
+
+            return mirror.Get(cbs);
+        }
+
         public T Get(CommandBufferScoped cbs, int offset, int size, bool write = false)
         {
+            _mirrorable?.ClearMirrors(cbs, offset, size);
             _waitable?.AddBufferUse(cbs.CommandBufferIndex, offset, size, write);
             return Get(cbs);
         }

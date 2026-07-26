@@ -1,6 +1,7 @@
 using Ryujinx.Graphics.GAL;
 using SharpMetal.Metal;
 using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Threading;
@@ -165,12 +166,43 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _unsafePreload =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_UNSAFE_PRELOAD") == "1";
 
+        // Diagnostic: which gate sends an upload down the staging path, where it needs
+        // a blit encoder and therefore splits whatever render pass is open.
+        private static readonly bool _uploadTrace =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_UPLOAD_TRACE") == "1";
+
+        private static readonly int[] _uploadGates = new int[4];
+
+        // Size histogram of the uploads that are forced onto the staging path, since
+        // what can replace it depends on how big they are.
+        private static readonly int[] _blockedSizes = new int[6];
+        private static readonly string[] _blockedSizeNames = ["<=256B", "<=1K", "<=4K", "<=16K", "<=64K", ">64K"];
+
+        public static string TakeUploadGates()
+        {
+            if (!_uploadTrace)
+            {
+                return null;
+            }
+
+            string[] names = ["direct", "unmapped", "rangeInUse", "preloaded"];
+            string text = string.Join(", ", names.Select((n, i) => $"{n}={Interlocked.Exchange(ref _uploadGates[i], 0)}"));
+            string sizes = string.Join(" ", _blockedSizeNames.Select((n, i) => $"{n}:{Interlocked.Exchange(ref _blockedSizes[i], 0)}"));
+
+            return $"{text}; blocked sizes {sizes}";
+        }
+
         public unsafe void SetData(int offset, ReadOnlySpan<byte> data, CommandBufferScoped? cbs = null, bool allowCbsWait = true)
         {
             int dataSize = Math.Min(data.Length, Size - offset);
             if (dataSize == 0)
             {
                 return;
+            }
+
+            if (_map == IntPtr.Zero && _uploadTrace)
+            {
+                Interlocked.Increment(ref _uploadGates[1]);
             }
 
             if (_map != IntPtr.Zero)
@@ -180,6 +212,19 @@ namespace Ryujinx.Graphics.Metal
 
                 // If the buffer is rented, take a little more time and check if the use overlaps this handle.
                 bool needsFlush = isRented && _waitable.IsBufferRangeInUse(offset, dataSize, false);
+
+                if (_uploadTrace)
+                {
+                    Interlocked.Increment(ref _uploadGates[needsFlush ? 2 : 0]);
+
+                    if (needsFlush)
+                    {
+                        int bucket = dataSize <= 256 ? 0 : dataSize <= 1024 ? 1 : dataSize <= 4096 ? 2 :
+                            dataSize <= 16384 ? 3 : dataSize <= 65536 ? 4 : 5;
+
+                        Interlocked.Increment(ref _blockedSizes[bucket]);
+                    }
+                }
 
                 if (!needsFlush)
                 {
@@ -205,6 +250,11 @@ namespace Ryujinx.Graphics.Metal
             {
                 // If the buffer hasn't been used on the command buffer yet, try to preload the data.
                 // This avoids ending and beginning render passes on each buffer data upload.
+
+                if (_uploadTrace)
+                {
+                    Interlocked.Increment(ref _uploadGates[3]);
+                }
 
                 cbs = _pipeline.GetPreloadCommandBuffer();
             }
