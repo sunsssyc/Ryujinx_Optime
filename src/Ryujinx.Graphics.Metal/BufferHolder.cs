@@ -348,12 +348,17 @@ namespace Ryujinx.Graphics.Metal
             _flushLock.EnterReadLock();
         }
 
-        public PinnedSpan<byte> GetData(int offset, int size)
+        public unsafe PinnedSpan<byte> GetData(int offset, int size)
         {
             // A read has to see writes that are still only in the pending ranges, so put
             // them into the buffer before handing out a view of it. Nothing is left in a
             // mirror that the caller could miss.
             FlushPendingData(offset, size);
+
+            if (DrawRing.Enabled && size <= 512 && _map != IntPtr.Zero && offset + 8 <= Size)
+            {
+                DrawRing.RecordReadback(offset, size, *(ulong*)((byte*)_map + offset));
+            }
 
             _flushLock.EnterReadLock();
 

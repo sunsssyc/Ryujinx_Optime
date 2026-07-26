@@ -153,8 +153,15 @@ namespace Ryujinx.Graphics.Gpu
         /// Creates a new GPU channel.
         /// </summary>
         /// <returns>The GPU channel</returns>
+        private int _channelCount;
+
         public GpuChannel CreateChannel()
         {
+            int count = System.Threading.Interlocked.Increment(ref _channelCount);
+
+            Ryujinx.Common.Logging.Logger.Info?.PrintMsg(
+                Ryujinx.Common.Logging.LogClass.Gpu, $"GPU channel created: total={count}");
+
             return new GpuChannel(this);
         }
 

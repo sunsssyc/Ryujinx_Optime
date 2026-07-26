@@ -213,6 +213,8 @@ namespace Ryujinx.Graphics.Metal
         private readonly EncoderState _mainState = new();
         private EncoderState _currentState;
 
+        internal readonly EncoderState CurrentEncoderState => _currentState;
+
         public readonly IndexBufferState IndexBuffer => _currentState.IndexBuffer;
         public readonly PrimitiveTopology Topology => _currentState.Topology;
         public readonly Texture[] RenderTargets => _currentState.RenderTargets;

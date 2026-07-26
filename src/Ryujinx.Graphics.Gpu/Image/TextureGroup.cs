@@ -40,6 +40,40 @@ namespace Ryujinx.Graphics.Gpu.Image
     /// </summary>
     class TextureGroup : IDisposable
     {
+        private static readonly bool _logReloads =
+            System.Environment.GetEnvironmentVariable("RYUJINX_LOG_TEXRELOAD") == "1";
+
+        private static readonly System.Collections.Concurrent.ConcurrentQueue<string> _reloadRecords = new();
+        private static System.Threading.Timer _reloadDrainTimer;
+
+        private static void RecordReload(string entry)
+        {
+            _reloadRecords.Enqueue(entry);
+
+            if (_reloadDrainTimer == null)
+            {
+                System.Threading.Timer timer = new(_ =>
+                {
+                    System.Text.StringBuilder batch = null;
+
+                    while (_reloadRecords.TryDequeue(out string line))
+                    {
+                        (batch ??= new System.Text.StringBuilder("texreload batch: ")).Append(line).Append("; ");
+                    }
+
+                    if (batch != null)
+                    {
+                        Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(Ryujinx.Common.Logging.LogClass.Gpu, batch.ToString());
+                    }
+                }, null, 5000, 5000);
+
+                if (System.Threading.Interlocked.CompareExchange(ref _reloadDrainTimer, timer, null) != null)
+                {
+                    timer.Dispose();
+                }
+            }
+        }
+
         /// <summary>
         /// Threshold of layers to force granular handles (and thus partial loading) on array/3D textures.
         /// </summary>
@@ -386,6 +420,19 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 if (dirty)
                 {
+                    // Diagnostic: RYUJINX_LOG_TEXRELOAD=1 records every CPU-to-texture
+                    // reload of a large texture. Logging at the event itself perturbs the
+                    // very race under study (a delayed copy start lets the guest finish
+                    // its write, hiding the artefact), so entries go into a queue that a
+                    // separate timer thread drains - zero I/O on this thread.
+                    if (_logReloads)
+                    {
+                        RecordReload(
+                            $"texreload {texture.Info.Width}x{texture.Info.Height} {texture.Info.FormatInfo.Format} " +
+                            $"partial={anyNotDirty || (_handles.Length > 1 && (anyModified || split))} " +
+                            $"wall={System.DateTime.Now:HH:mm:ss.fff}");
+                    }
+
                     if (anyNotDirty || (_handles.Length > 1 && (anyModified || split)))
                     {
                         // Partial texture invalidation. Only update the layers/levels with dirty flags of the storage.

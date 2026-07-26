@@ -10,6 +10,19 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
     /// </summary>
     static class ConditionalRendering
     {
+        // Diagnostic: RYUJINX_LOG_CONDR=1 logs every conditional render decision, to
+        // see whether verdicts for the same address flip from frame to frame.
+        private static readonly bool _logDecisions =
+            System.Environment.GetEnvironmentVariable("RYUJINX_LOG_CONDR") == "1";
+
+        private static void LogDecision(ulong gpuVa, string kind, string detail, ConditionalRenderEnabled verdict)
+        {
+            if (_logDecisions)
+            {
+                Logger.Warning?.Print(LogClass.Gpu, $"condr {kind} va=0x{gpuVa:X} {detail} -> {verdict}");
+            }
+        }
+
         /// <summary>
         /// Checks if draws and clears should be performed, according
         /// to currently set conditional rendering conditions.
@@ -53,6 +66,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
 
             if (evt == null)
             {
+                LogDecision(gpuVa, "nonzero", "evt=null", ConditionalRenderEnabled.False);
+
                 return ConditionalRenderEnabled.False;
             }
 
@@ -63,7 +78,14 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             else
             {
                 evt.Flush();
-                return (memoryManager.Read<ulong>(gpuVa, true) != 0) ? ConditionalRenderEnabled.True : ConditionalRenderEnabled.False;
+
+                ConditionalRenderEnabled verdict = (memoryManager.Read<ulong>(gpuVa, true) != 0)
+                    ? ConditionalRenderEnabled.True
+                    : ConditionalRenderEnabled.False;
+
+                LogDecision(gpuVa, "nonzero", "evt=found", verdict);
+
+                return verdict;
             }
         }
 
@@ -111,7 +133,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 ulong x = memoryManager.Read<ulong>(gpuVa, true);
                 ulong y = memoryManager.Read<ulong>(gpuVa + 16, true);
 
-                return (isEqual ? x == y : x != y) ? ConditionalRenderEnabled.True : ConditionalRenderEnabled.False;
+                ConditionalRenderEnabled verdict = (isEqual ? x == y : x != y)
+                    ? ConditionalRenderEnabled.True
+                    : ConditionalRenderEnabled.False;
+
+                LogDecision(gpuVa, isEqual ? "eq" : "neq", $"evt={(evt != null ? 1 : 0)}{(evt2 != null ? 1 : 0)} x={x} y={y}", verdict);
+
+                return verdict;
             }
         }
 

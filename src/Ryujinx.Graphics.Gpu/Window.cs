@@ -197,6 +197,8 @@ namespace Ryujinx.Graphics.Gpu
         {
             _context.AdvanceSequence();
 
+            Image.TextureBindRing.DumpIfRequested();
+
             if (_frameQueue.TryDequeue(out PresentationTexture pt))
             {
                 pt.AcquireCallback(_context, pt.UserObj);

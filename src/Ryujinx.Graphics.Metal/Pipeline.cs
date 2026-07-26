@@ -285,12 +285,41 @@ namespace Ryujinx.Graphics.Metal
             return _encoderStateManager.CreateComputeCommandEncoder();
         }
 
+        // Diagnostic: RYUJINX_METAL_LOG_PRESENT=1 logs the source texture of every
+        // presented frame with a wall clock stamp, so single-frame artefacts caught on
+        // a screen recording can be correlated with dynamic resolution switches.
+        private static readonly bool _logPresent =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_LOG_PRESENT") == "1";
+
+        private (IntPtr Handle, int W, int H) _lastPresented;
+
         public void Present(CAMetalDrawable drawable, Texture src, Extents2D srcRegion, Extents2D dstRegion, bool isLinear, bool useFsrSharpener, float scalingFilterLevel)
         {
+            if (_logPresent)
+            {
+                // Log only when the presented texture changes identity or size; a line
+                // per frame perturbs timing enough to mask the very race under study.
+                (IntPtr Handle, int W, int H) now = (src.GetHandle().NativePtr, src.Width, src.Height);
+
+                if (now != _lastPresented)
+                {
+                    _lastPresented = now;
+
+                    Logger.Warning?.PrintMsg(
+                        LogClass.Gpu,
+                        $"present-change {now.W}x{now.H} handle=0x{now.Handle:X} wall={DateTime.Now:HH:mm:ss.fff}");
+                }
+            }
+
             _renderer.FrameCapture.CurrentCommandBuffer = CommandBuffer;
             _renderer.FrameCapture.OnPresentBegin();
 
             AppliedRenderState.RefreshToggle();
+
+            if (DrawRing.Enabled)
+            {
+                DrawRing.OnPresent();
+            }
 
             // TODO: Clean this up
             TextureCreateInfo textureInfo = new((int)drawable.Texture.Width, (int)drawable.Texture.Height, (int)drawable.Texture.Depth, (int)drawable.Texture.MipmapLevelCount, (int)drawable.Texture.SampleCount, 0, 0, 0, Format.B8G8R8A8Unorm, 0, Target.Texture2D, SwizzleComponent.Red, SwizzleComponent.Green, SwizzleComponent.Blue, SwizzleComponent.Alpha);
@@ -861,6 +890,12 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
+
+            if (DrawRing.Enabled)
+            {
+                DrawRing.Record(_encoderStateManager.CurrentEncoderState, _encoderStateManager.Topology, vertexCount, instanceCount);
+            }
+
             TraceDraw("Draw", vertexCount, instanceCount, firstVertex, firstInstance);
 
             MTLPrimitiveType primitiveType = TopologyRemap(_encoderStateManager.Topology).Convert();
@@ -953,6 +988,12 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
+
+            if (DrawRing.Enabled)
+            {
+                DrawRing.Record(_encoderStateManager.CurrentEncoderState, _encoderStateManager.Topology, indexCount, instanceCount);
+            }
+
             TraceDraw("DrawIndexed", indexCount, instanceCount, firstIndex, firstInstance);
 
             MTLBuffer mtlBuffer;

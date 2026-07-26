@@ -13,6 +13,83 @@ namespace Ryujinx.Graphics.Gpu.Image
     /// <summary>
     /// Texture bindings manager.
     /// </summary>
+    /// <summary>
+    /// Rolling record of texture binding resolutions, capturing for each change the
+    /// guest handle word, the unpacked TIC id and the resolved texture identity, so a
+    /// one frame cross wiring can be attributed to either the guest data (handle word
+    /// changed) or the pool resolution (same word, different texture). Entries are
+    /// only written when a binding actually changes, so steady state cost is nil.
+    /// </summary>
+    static class TextureBindRing
+    {
+        private const string TriggerPath = "/tmp/ryujinx-texbind-dump";
+        private const int Capacity = 1 << 15;
+
+        public static readonly bool Enabled =
+            System.Environment.GetEnvironmentVariable("RYUJINX_LOG_TEXBIND") == "1";
+
+        private struct Entry
+        {
+            public ulong Seq;
+            public long Ticks;
+            public byte Stage;
+            public short Binding;
+            public int PackedId;
+            public int TextureId;
+            public int TextureHash;
+        }
+
+        private static readonly Entry[] _entries = new Entry[Capacity];
+        private static int _cursor;
+
+        public static void Record(int stageIndex, int binding, int packedId, int textureId, object texture)
+        {
+            ref Entry entry = ref _entries[System.Threading.Interlocked.Increment(ref _cursor) & (Capacity - 1)];
+
+            entry.Seq = Ryujinx.Graphics.GAL.DrawDiagnostics.BindSequence;
+            entry.Ticks = System.DateTime.Now.Ticks;
+            entry.Stage = (byte)stageIndex;
+            entry.Binding = (short)binding;
+            entry.PackedId = packedId;
+            entry.TextureId = textureId;
+            entry.TextureHash = texture?.GetHashCode() ?? 0;
+        }
+
+        public static void DumpIfRequested()
+        {
+            if (!System.IO.File.Exists(TriggerPath))
+            {
+                return;
+            }
+
+            try
+            {
+                System.IO.File.Delete(TriggerPath);
+            }
+            catch (System.IO.IOException)
+            {
+                return;
+            }
+
+            string path = $"/tmp/ryujinx-texbind-{System.DateTime.Now:HHmmss}.txt";
+            System.Text.StringBuilder text = new();
+            int cursor = _cursor;
+            int start = System.Math.Max(0, cursor - Capacity);
+
+            for (int i = start; i < cursor; i++)
+            {
+                ref Entry entry = ref _entries[i & (Capacity - 1)];
+
+                text.AppendLine(
+                    $"tb seq={entry.Seq} wall={new System.DateTime(entry.Ticks):HH:mm:ss.fff} stage={entry.Stage} bind={entry.Binding} " +
+                    $"packed=0x{entry.PackedId:X8} tic={entry.TextureId} texhash={entry.TextureHash:X8}");
+            }
+
+            System.IO.File.WriteAllText(path, text.ToString());
+            Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(Ryujinx.Common.Logging.LogClass.Gpu, $"texbind ring dumped: {path}");
+        }
+    }
+
     class TextureBindingsManager
     {
         private const int InitialTextureStateSize = 32;
@@ -313,6 +390,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <returns>True if all bound textures match the current shader specialiation state, false otherwise</returns>
         public bool CommitBindings(ShaderSpecializationState specState)
         {
+            Ryujinx.Graphics.GAL.DrawDiagnostics.BindSequence++;
+
             (TexturePool texturePool, SamplerPool samplerPool) = GetPools();
 
             // Check if the texture pool has been modified since bindings were last committed.
@@ -513,6 +592,11 @@ namespace Ryujinx.Graphics.Gpu.Image
                 Sampler sampler = samplerPool?.Get(samplerId);
 
                 ref readonly TextureDescriptor descriptor = ref texturePool.GetForBinding(textureId, sampler?.IsSrgb ?? true, out Texture texture);
+
+                if (TextureBindRing.Enabled)
+                {
+                    TextureBindRing.Record(stageIndex, bindingInfo.Binding, packedId, textureId, texture);
+                }
 
                 specStateMatches &= specState.MatchesTexture(stage, index, descriptor);
 
