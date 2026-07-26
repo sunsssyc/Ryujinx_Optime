@@ -226,10 +226,56 @@ namespace Ryujinx.Graphics.Metal
             _passEndReasons[(int)reason]++;
         }
 
+        // Diagnostic: how often a new pass uses an attachment set seen among the
+        // last few passes. same = identical to the previous pass (mergeable with no
+        // reordering at all); aba = identical to two passes back (mergeable only by
+        // reordering across one intervening pass). Bounds what pass merging is worth
+        // before anything is built.
+        private readonly ulong[] _passSignatureRing = new ulong[4];
+        private int _passSignatureCount;
+        private int _passRevisitSame;
+        private int _passRevisitAba;
+
+        private ulong ComputePassSignature()
+        {
+            ulong hash = 17;
+
+            Texture[] targets = _encoderStateManager.RenderTargets;
+
+            for (int i = 0; i < targets.Length; i++)
+            {
+                if (targets[i] != null)
+                {
+                    hash = hash * 31 + (ulong)targets[i].GetHandle().NativePtr + (ulong)i;
+                }
+            }
+
+            if (_encoderStateManager.DepthStencil != null)
+            {
+                hash = hash * 31 + (ulong)_encoderStateManager.DepthStencil.GetHandle().NativePtr;
+            }
+
+            return hash;
+        }
+
         public MTLRenderCommandEncoder CreateRenderCommandEncoder()
         {
             _renderPassCount++;
             _drawCountAtPassStart = DrawCount;
+
+            ulong signature = ComputePassSignature();
+
+            if (_passSignatureCount > 0 && signature == _passSignatureRing[(_passSignatureCount - 1) & 3])
+            {
+                _passRevisitSame++;
+            }
+            else if (_passSignatureCount > 1 && signature == _passSignatureRing[(_passSignatureCount - 2) & 3])
+            {
+                _passRevisitAba++;
+            }
+
+            _passSignatureRing[_passSignatureCount & 3] = signature;
+            _passSignatureCount++;
 
             return _encoderStateManager.CreateRenderCommandEncoder();
         }
@@ -313,6 +359,11 @@ namespace Ryujinx.Graphics.Metal
 
                     Array.Clear(_passEndReasons);
 
+                    string revisitText =
+                        $" pass revisits: same={_passRevisitSame / SyncStatsLogFrameInterval}, aba={_passRevisitAba / SyncStatsLogFrameInterval} per frame.";
+                    _passRevisitSame = 0;
+                    _passRevisitAba = 0;
+
                     string uploadGates = BufferHolder.TakeUploadGates();
                     string gateText = uploadGates == null ? string.Empty : $" upload gates: {uploadGates}.";
                     string blitCallers = CommandBufferEncoder.TakeBlitCallers();
@@ -324,7 +375,7 @@ namespace Ryujinx.Graphics.Metal
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
-                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{reasonText}{gateText}{blitText}");
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{reasonText}{revisitText}{gateText}{blitText}");
                 }
             }
 
