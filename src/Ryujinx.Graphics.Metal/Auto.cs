@@ -38,6 +38,7 @@ namespace Ryujinx.Graphics.Metal
 
         private readonly BitMap _cbOwnership;
         private readonly MultiFenceHolder _waitable;
+        private readonly IAutoPrivate[] _referencedObjs;
         private readonly IMirrorable<T> _mirrorable;
 
         private bool _disposed;
@@ -50,12 +51,18 @@ namespace Ryujinx.Graphics.Metal
             _cbOwnership = new BitMap(CommandBufferPool.MaxCommandBuffers);
         }
 
-        public Auto(T value, MultiFenceHolder waitable) : this(value)
+        public Auto(T value, MultiFenceHolder waitable, params IAutoPrivate[] referencedObjs) : this(value)
         {
             _waitable = waitable;
+            _referencedObjs = referencedObjs;
+
+            for (int i = 0; i < referencedObjs.Length; i++)
+            {
+                referencedObjs[i].IncrementReferenceCount();
+            }
         }
 
-        public Auto(T value, IMirrorable<T> mirrorable, MultiFenceHolder waitable) : this(value, waitable)
+        public Auto(T value, IMirrorable<T> mirrorable, MultiFenceHolder waitable, params IAutoPrivate[] referencedObjs) : this(value, waitable, referencedObjs)
         {
             _mirrorable = mirrorable;
         }
@@ -114,6 +121,18 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 cbs.AddDependant(this);
+
+                // A Metal texture view does not make command-buffer lifetime
+                // tracking automatic for the texture or buffer that owns its
+                // storage. Propagate the dependency so that backing resources
+                // cannot be released before the GPU has finished using the view.
+                if (_referencedObjs != null)
+                {
+                    for (int i = 0; i < _referencedObjs.Length; i++)
+                    {
+                        _referencedObjs[i].AddCommandBufferDependencies(cbs);
+                    }
+                }
             }
         }
 
@@ -156,6 +175,14 @@ namespace Ryujinx.Graphics.Metal
                 _value.Dispose();
                 _value = default;
                 _destroyed = true;
+
+                if (_referencedObjs != null)
+                {
+                    for (int i = 0; i < _referencedObjs.Length; i++)
+                    {
+                        _referencedObjs[i].DecrementReferenceCount();
+                    }
+                }
             }
 
             Debug.Assert(_referenceCount >= 0);

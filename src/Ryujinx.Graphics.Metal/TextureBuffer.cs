@@ -38,21 +38,16 @@ namespace Ryujinx.Graphics.Metal
 
         public void RebuildStorage(bool write)
         {
-            if (MtlTexture != IntPtr.Zero)
-            {
-                MtlTexture.Dispose();
-            }
-
             if (_buffer == null)
             {
-                MtlTexture = default;
+                ReplaceHandle(default);
             }
             else
             {
                 DisposableBuffer buffer = _buffer.Get(Pipeline.Cbs, _offset, _size, write);
 
                 _descriptor.Width = (uint)(_size / Info.BytesPerPixel);
-                MtlTexture = buffer.Value.NewTexture(_descriptor, (ulong)_offset, (ulong)_size);
+                ReplaceHandle(buffer.Value.NewTexture(_descriptor, (ulong)_offset, (ulong)_size), _buffer);
             }
         }
 
@@ -127,9 +122,12 @@ namespace Ryujinx.Graphics.Metal
 
         public override void Release()
         {
-            _descriptor.Dispose();
+            if (TryInvalidate())
+            {
+                _descriptor.Dispose();
 
-            base.Release();
+                DisposeHandle();
+            }
         }
     }
 }

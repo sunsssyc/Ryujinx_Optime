@@ -35,7 +35,18 @@
 - 如果需要临时单独构建 DLL，必须显式传入当前候选包所需版本参数（例如 `-p:AssemblyVersion=1.3.3.0 -p:FileVersion=1.3.3.0 -p:Version=1.3.3 -p:InformationalVersion=...`），并用 `strings <dll>`、哈希和一次实际游戏加载验证，不得只凭编译通过交付。
 - 对 .NET universal single-file App 做 bundle 分析前，先使用 `lipo -thin arm64` 或 `lipo -thin x86_64` 提取对应架构；bundle 内偏移通常相对于单架构切片，不能直接按 universal 文件偏移解析。
 - 如果 File Provider 路径中的 publish 长时间停在项目图计算，优先把构建输出、中间目录和 NuGet 缓存放到本地临时磁盘；不要反复启动多个挂起的 publish 进程。
+- 如果普通 `build` 已通过，但 single-file publish 在裁剪/打包阶段长时间没有输出且目标目录没有增长，说明只把输出目录放到临时盘还不够。中止该轮，将 Git 已跟踪源码完整快照到 `/private/tmp`，再叠加当前修改、使用本机 NuGet 缓存 restore/publish。一次停滞后就切换方案，不要用不同打包参数重复发布来碰运气。
 - Git 提交只代表已跟踪源码。交付 App、临时 DLL 和 `artifacts/` 中的未跟踪文件不能被描述成“已随 commit 保存”。交付时明确记录分支、基线提交、修复提交和产物路径。
+
+## Metal 纹理生命周期与单帧闪烁
+
+- Metal 的 argument buffer、`useResource(s)` 和资源驻留声明只告诉驱动资源会被 GPU 访问，不会替应用保留 Objective-C 资源对象。把纹理地址写入 argument buffer 后，如果 CPU 侧在命令缓冲区完成前调用 `MTLTexture.Dispose()`，GPU 仍可能读到已释放或被复用的显存。
+- “HUD 始终正常、只有场景出现单帧整屏红/白/黄/黑或错误纹理、下一帧恢复”应优先按纹理内容或生命周期问题调查，而不是先调整 present、锐化或跳过 draw。编码时绑定地址正确也不能排除纹理在真正执行前被释放。
+- Metal 纹理必须像 Vulkan 的 image/image-view 一样使用命令缓冲区依赖管理：采样纹理、storage image、颜色/深度附件、纹理缓冲区、上传、blit、copy 和 readback 每条 GPU 路径都必须通过带 `CommandBufferScoped` 的获取接口登记依赖，完成后才能真正释放。
+- 纹理视图必须持有底层纹理；buffer-backed texture 必须持有底层 buffer。视图的命令缓冲区依赖也要传播到底层资源，不能只延迟释放最外层 view。
+- 替换或重建纹理时，立即切换逻辑句柄，但旧 Metal 对象只能释放其 CPU 所有权；若仍被在途命令引用，应由命令缓冲区完成回调释放最后一个引用。不得重新启用 `RYUJINX_KEEP_ALIASED_RTS=1` 之类的全局保留方案，它会把有界的在途生命周期变成持续内存增长。
+- 生命周期修复必须同时验证两项：在原高发场景连续运行至少 10–15 分钟观察闪烁频率，并在活动监视器中确认内存经过缓存预热后趋于稳定。只证明闪烁减少但内存持续上涨，不能视为修复完成。
+- 如果同类白闪在原 Vulkan 后端也能复现，应把共同问题与 Metal 特有的彩色/错纹理闪烁分开记录；Metal 生命周期修复不能被宣称为已经解决所有上游纹理或游戏模拟问题。
 
 ## Metal 修复的验证标准
 

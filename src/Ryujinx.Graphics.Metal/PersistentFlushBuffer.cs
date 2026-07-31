@@ -67,7 +67,7 @@ namespace Ryujinx.Graphics.Metal
             using (CommandBufferScoped cbs = cbp.Rent())
             {
                 MTLBuffer buffer = flushStorage.GetBuffer().Get(cbs).Value;
-                MTLTexture image = view.GetHandle();
+                MTLTexture image = view.GetIdentityHandle(cbs);
 
                 view.CopyFromOrToBuffer(cbs, buffer, image, size, true, 0, 0, info.GetLayers(), info.Levels, singleSlice: false);
             }
@@ -83,7 +83,7 @@ namespace Ryujinx.Graphics.Metal
             using (CommandBufferScoped cbs = cbp.Rent())
             {
                 MTLBuffer buffer = flushStorage.GetBuffer().Get(cbs).Value;
-                MTLTexture image = view.GetHandle();
+                MTLTexture image = view.GetIdentityHandle(cbs);
 
                 view.CopyFromOrToBuffer(cbs, buffer, image, size, true, layer, level, 1, 1, singleSlice: true);
             }

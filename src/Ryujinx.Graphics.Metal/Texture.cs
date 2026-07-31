@@ -11,7 +11,7 @@ namespace Ryujinx.Graphics.Metal
     [SupportedOSPlatform("macos")]
     class Texture : TextureBase, ITexture
     {
-        private MTLTexture _identitySwizzleHandle;
+        private Auto<DisposableTexture> _identitySwizzleHandle;
         private readonly bool _identityIsDifferent;
 
         public Texture(MTLDevice device, MetalRenderer renderer, Pipeline pipeline, TextureCreateInfo info) : base(device, renderer, pipeline, info)
@@ -47,15 +47,16 @@ namespace Ryujinx.Graphics.Metal
 
             MTLTextureSwizzleChannels swizzle = GetSwizzle(info, descriptor.PixelFormat);
 
-            _identitySwizzleHandle = Device.NewTexture(descriptor);
+            _identitySwizzleHandle = new Auto<DisposableTexture>(new DisposableTexture(Device.NewTexture(descriptor)));
 
             if (SwizzleIsIdentity(swizzle))
             {
-                MtlTexture = _identitySwizzleHandle;
+                MtlTextureAuto = _identitySwizzleHandle;
             }
             else
             {
-                MtlTexture = CreateDefaultView(_identitySwizzleHandle, swizzle, descriptor);
+                MTLTexture identityTexture = _identitySwizzleHandle.GetUnsafe().Value;
+                SetHandle(CreateDefaultView(identityTexture, swizzle, descriptor), _identitySwizzleHandle);
                 _identityIsDifferent = true;
             }
 
@@ -91,7 +92,32 @@ namespace Ryujinx.Graphics.Metal
             return usage;
         }
 
-        public Texture(MTLDevice device, MetalRenderer renderer, Pipeline pipeline, TextureCreateInfo info, MTLTexture sourceTexture, int firstLayer, int firstLevel) : base(device, renderer, pipeline, info)
+        public Texture(MTLDevice device, MetalRenderer renderer, Pipeline pipeline, TextureCreateInfo info, MTLTexture sourceTexture, int firstLayer, int firstLevel) :
+            this(device, renderer, pipeline, info, sourceTexture, null, firstLayer, firstLevel)
+        {
+        }
+
+        private Texture(
+            MTLDevice device,
+            MetalRenderer renderer,
+            Pipeline pipeline,
+            TextureCreateInfo info,
+            Auto<DisposableTexture> sourceTexture,
+            int firstLayer,
+            int firstLevel) :
+            this(device, renderer, pipeline, info, sourceTexture.GetUnsafe().Value, sourceTexture, firstLayer, firstLevel)
+        {
+        }
+
+        private Texture(
+            MTLDevice device,
+            MetalRenderer renderer,
+            Pipeline pipeline,
+            TextureCreateInfo info,
+            MTLTexture sourceTexture,
+            Auto<DisposableTexture> sourceTextureAuto,
+            int firstLayer,
+            int firstLevel) : base(device, renderer, pipeline, info)
         {
             MTLPixelFormat pixelFormat = FormatTable.GetFormat(Info.Format);
 
@@ -115,15 +141,28 @@ namespace Ryujinx.Graphics.Metal
 
             MTLTextureSwizzleChannels swizzle = GetSwizzle(info, pixelFormat);
 
-            _identitySwizzleHandle = sourceTexture.NewTextureView(pixelFormat, textureType, levels, slices);
+            MTLTexture identityTexture = sourceTexture.NewTextureView(pixelFormat, textureType, levels, slices);
+            _identitySwizzleHandle = sourceTextureAuto != null
+                ? new Auto<DisposableTexture>(new DisposableTexture(identityTexture), null, sourceTextureAuto)
+                : new Auto<DisposableTexture>(new DisposableTexture(identityTexture));
 
             if (SwizzleIsIdentity(swizzle))
             {
-                MtlTexture = _identitySwizzleHandle;
+                MtlTextureAuto = _identitySwizzleHandle;
             }
             else
             {
-                MtlTexture = sourceTexture.NewTextureView(pixelFormat, textureType, levels, slices, swizzle);
+                MTLTexture swizzledTexture = sourceTexture.NewTextureView(pixelFormat, textureType, levels, slices, swizzle);
+
+                if (sourceTextureAuto != null)
+                {
+                    SetHandle(swizzledTexture, sourceTextureAuto);
+                }
+                else
+                {
+                    SetHandle(swizzledTexture);
+                }
+
                 _identityIsDifferent = true;
             }
 
@@ -132,14 +171,19 @@ namespace Ryujinx.Graphics.Metal
             FirstLevel = firstLevel;
         }
 
-        public void PopulateRenderPassAttachment(MTLRenderPassColorAttachmentDescriptor descriptor)
+        public void PopulateRenderPassAttachment(MTLRenderPassColorAttachmentDescriptor descriptor, CommandBufferScoped cbs)
         {
-            descriptor.Texture = _identitySwizzleHandle;
+            descriptor.Texture = GetIdentityHandle(cbs);
         }
 
         public override MTLTexture GetIdentityHandle()
         {
-            return Valid ? _identitySwizzleHandle : new MTLTexture(IntPtr.Zero);
+            return Valid ? _identitySwizzleHandle.GetUnsafe().Value : new MTLTexture(IntPtr.Zero);
+        }
+
+        public override MTLTexture GetIdentityHandle(CommandBufferScoped cbs)
+        {
+            return Valid ? _identitySwizzleHandle.Get(cbs).Value : new MTLTexture(IntPtr.Zero);
         }
 
         private MTLTexture CreateDefaultView(MTLTexture texture, MTLTextureSwizzleChannels swizzle, MTLTextureDescriptor descriptor)
@@ -226,8 +270,8 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            MTLTexture srcImage = GetIdentityHandle();
-            MTLTexture dstImage = dst.GetIdentityHandle();
+            MTLTexture srcImage = GetIdentityHandle(cbs);
+            MTLTexture dstImage = dst.GetIdentityHandle(cbs);
 
             if (!dst.Info.Target.IsMultisample && Info.Target.IsMultisample)
             {
@@ -272,8 +316,8 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            MTLTexture srcImage = GetIdentityHandle();
-            MTLTexture dstImage = dst.GetIdentityHandle();
+            MTLTexture srcImage = GetIdentityHandle(cbs);
+            MTLTexture dstImage = dst.GetIdentityHandle(cbs);
 
             if (!dst.Info.Target.IsMultisample && Info.Target.IsMultisample)
             {
@@ -341,7 +385,7 @@ namespace Ryujinx.Graphics.Metal
                 offset = 0;
             }
 
-            CopyFromOrToBuffer(cbs, copyToBuffer, MtlTexture, hostSize, true, layer, level, 1, 1, singleSlice: true, offset, stride);
+            CopyFromOrToBuffer(cbs, copyToBuffer, GetIdentityHandle(cbs), hostSize, true, layer, level, 1, 1, singleSlice: true, offset, stride);
 
             if (tempCopyHolder != null)
             {
@@ -562,13 +606,15 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data)
         {
+            CommandBufferScoped cbs = Pipeline.Cbs;
             MTLBlitCommandEncoder blitCommandEncoder = Pipeline.GetOrCreateBlitEncoder();
 
             Span<byte> dataSpan = data.Memory.Span;
 
             BufferHolder buffer = Renderer.BufferManager.Create(dataSpan.Length);
             buffer.SetDataUnchecked(0, dataSpan);
-            MTLBuffer mtlBuffer = buffer.GetBuffer(false).Get(Pipeline.Cbs).Value;
+            MTLBuffer mtlBuffer = buffer.GetBuffer(false).Get(cbs).Value;
+            MTLTexture image = GetIdentityHandle(cbs);
 
             int width = Info.Width;
             int height = Info.Height;
@@ -597,7 +643,7 @@ namespace Ryujinx.Graphics.Metal
                         (ulong)Info.GetMipStride(level),
                         (ulong)mipSize,
                         new MTLSize { width = (ulong)width, height = (ulong)height, depth = is3D ? (ulong)depth : 1 },
-                        MtlTexture,
+                        image,
                         (ulong)layer,
                         (ulong)level,
                         new MTLOrigin()
@@ -632,7 +678,7 @@ namespace Ryujinx.Graphics.Metal
             CopyDataToBuffer(bufferHolder.GetDataStorage(0, bufferDataLength), data);
 
             MTLBuffer buffer = bufferHolder.GetBuffer().Get(cbs).Value;
-            MTLTexture image = GetHandle();
+            MTLTexture image = GetIdentityHandle(cbs);
 
             CopyFromOrToBuffer(cbs, buffer, image, bufferDataLength, false, layer, level, layers, levels, singleSlice);
         }
@@ -646,11 +692,14 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data, int layer, int level, Rectangle<int> region)
         {
+            CommandBufferScoped cbs = Pipeline.Cbs;
             MTLBlitCommandEncoder blitCommandEncoder = Pipeline.GetOrCreateBlitEncoder();
 
             ulong bytesPerRow = (ulong)Info.GetMipStride(level);
             ulong bytesPerImage = 0;
-            if (MtlTexture.TextureType == MTLTextureType.Type3D)
+            MTLTexture image = GetIdentityHandle(cbs);
+
+            if (image.TextureType == MTLTextureType.Type3D)
             {
                 bytesPerImage = bytesPerRow * (ulong)Info.Height;
             }
@@ -659,7 +708,7 @@ namespace Ryujinx.Graphics.Metal
 
             BufferHolder buffer = Renderer.BufferManager.Create(dataSpan.Length);
             buffer.SetDataUnchecked(0, dataSpan);
-            MTLBuffer mtlBuffer = buffer.GetBuffer(false).Get(Pipeline.Cbs).Value;
+            MTLBuffer mtlBuffer = buffer.GetBuffer(false).Get(cbs).Value;
 
             blitCommandEncoder.CopyFromBuffer(
                 mtlBuffer,
@@ -667,7 +716,7 @@ namespace Ryujinx.Graphics.Metal
                 bytesPerRow,
                 bytesPerImage,
                 new MTLSize { width = (ulong)region.Width, height = (ulong)region.Height, depth = 1 },
-                MtlTexture,
+                image,
                 (ulong)layer,
                 (ulong)level,
                 new MTLOrigin { x = (ulong)region.X, y = (ulong)region.Y }
@@ -694,12 +743,15 @@ namespace Ryujinx.Graphics.Metal
 
         public override void Release()
         {
-            if (_identityIsDifferent)
+            if (TryInvalidate())
             {
-                _identitySwizzleHandle.Dispose();
-            }
+                if (_identityIsDifferent)
+                {
+                    _identitySwizzleHandle.Dispose();
+                }
 
-            base.Release();
+                DisposeHandle();
+            }
         }
     }
 }

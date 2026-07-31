@@ -17,7 +17,9 @@ namespace Ryujinx.Graphics.Metal
         protected readonly MTLDevice Device;
         protected readonly MetalRenderer Renderer;
 
-        protected MTLTexture MtlTexture;
+        protected Auto<DisposableTexture> MtlTextureAuto;
+
+        protected MTLTexture MtlTexture => MtlTextureAuto?.GetUnsafe().Value ?? new MTLTexture(IntPtr.Zero);
 
         public readonly TextureCreateInfo Info;
         public int Width => Info.Width;
@@ -46,6 +48,16 @@ namespace Ryujinx.Graphics.Metal
             return MtlTexture;
         }
 
+        public MTLTexture GetHandle(CommandBufferScoped cbs)
+        {
+            if (_isValid == 0 || MtlTextureAuto == null)
+            {
+                return new MTLTexture(IntPtr.Zero);
+            }
+
+            return MtlTextureAuto.Get(cbs).Value;
+        }
+
         /// <summary>
         /// Handle for blit/copy operations. Metal does not allow copying through a
         /// swizzled texture view, and copies move raw texel data anyway, so they
@@ -56,22 +68,50 @@ namespace Ryujinx.Graphics.Metal
             return GetHandle();
         }
 
+        public virtual MTLTexture GetIdentityHandle(CommandBufferScoped cbs)
+        {
+            return GetHandle(cbs);
+        }
+
+        protected void SetHandle(MTLTexture texture, params IAutoPrivate[] referencedObjs)
+        {
+            MtlTextureAuto = new Auto<DisposableTexture>(new DisposableTexture(texture), null, referencedObjs);
+        }
+
+        protected void ReplaceHandle(MTLTexture texture, params IAutoPrivate[] referencedObjs)
+        {
+            Auto<DisposableTexture> oldTexture = MtlTextureAuto;
+
+            MtlTextureAuto = texture != IntPtr.Zero
+                ? new Auto<DisposableTexture>(new DisposableTexture(texture), null, referencedObjs)
+                : null;
+
+            oldTexture?.Dispose();
+        }
+
+        protected bool TryInvalidate()
+        {
+            return Interlocked.Exchange(ref _isValid, 0) != 0;
+        }
+
+        protected void DisposeHandle()
+        {
+            Auto<DisposableTexture> texture = MtlTextureAuto;
+            MtlTextureAuto = null;
+            texture?.Dispose();
+        }
+
         public virtual void Release()
         {
-            Dispose();
+            if (TryInvalidate())
+            {
+                DisposeHandle();
+            }
         }
 
         public void Dispose()
         {
-            bool wasValid = Interlocked.Exchange(ref _isValid, 0) != 0;
-
-            if (wasValid)
-            {
-                if (MtlTexture != IntPtr.Zero)
-                {
-                    MtlTexture.Dispose();
-                }
-            }
+            Release();
         }
     }
 }

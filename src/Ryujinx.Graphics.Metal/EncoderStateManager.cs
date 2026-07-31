@@ -472,7 +472,7 @@ namespace Ryujinx.Graphics.Metal
                 if (_currentState.RenderTargets[i] is Texture tex)
                 {
                     MTLRenderPassColorAttachmentDescriptor passAttachment = renderPassDescriptor.ColorAttachments.Object((ulong)i);
-                    tex.PopulateRenderPassAttachment(passAttachment);
+                    tex.PopulateRenderPassAttachment(passAttachment, _pipeline.Cbs);
                     passAttachment.LoadAction = _currentState.ClearLoadAction ? MTLLoadAction.Clear : MTLLoadAction.Load;
                     passAttachment.StoreAction = MTLStoreAction.Store;
                 }
@@ -493,14 +493,14 @@ namespace Ryujinx.Graphics.Metal
                         // MTLTextureUsageRenderTarget, and binding one as an attachment
                         // is undefined behaviour - depth writes are silently dropped.
                         // Colour attachments already use the identity handle.
-                        depthAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle();
+                        depthAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle(_pipeline.Cbs);
                         depthAttachment.LoadAction = MTLLoadAction.Load;
                         depthAttachment.StoreAction = MTLStoreAction.Store;
                         break;
 
                     // Stencil Only Attachment
                     case MTLPixelFormat.Stencil8:
-                        stencilAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle();
+                        stencilAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle(_pipeline.Cbs);
                         stencilAttachment.LoadAction = MTLLoadAction.Load;
                         stencilAttachment.StoreAction = MTLStoreAction.Store;
                         break;
@@ -508,11 +508,11 @@ namespace Ryujinx.Graphics.Metal
                     // Combined Attachment
                     case MTLPixelFormat.Depth24UnormStencil8:
                     case MTLPixelFormat.Depth32FloatStencil8:
-                        depthAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle();
+                        depthAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle(_pipeline.Cbs);
                         depthAttachment.LoadAction = MTLLoadAction.Load;
                         depthAttachment.StoreAction = MTLStoreAction.Store;
 
-                        stencilAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle();
+                        stencilAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle(_pipeline.Cbs);
                         stencilAttachment.LoadAction = MTLLoadAction.Load;
                         stencilAttachment.StoreAction = MTLStoreAction.Store;
                         break;
@@ -1757,7 +1757,7 @@ namespace Ryujinx.Graphics.Metal
                     textureBuffer.RebuildStorage(false);
                 }
 
-                MTLTexture mtlTexture = storage.GetHandle();
+                MTLTexture mtlTexture = storage.GetHandle(_pipeline.Cbs);
 
                 gpuAddress = mtlTexture.GpuResourceID._impl;
                 nativePtr = mtlTexture.NativePtr;
@@ -1775,7 +1775,7 @@ namespace Ryujinx.Graphics.Metal
 
             if (storage != null)
             {
-                MTLTexture mtlTexture = storage.GetHandle();
+                MTLTexture mtlTexture = storage.GetHandle(_pipeline.Cbs);
 
                 gpuAddress = mtlTexture.GpuResourceID._impl;
                 nativePtr = mtlTexture.NativePtr;
@@ -1793,7 +1793,7 @@ namespace Ryujinx.Graphics.Metal
             {
                 bufferTexture.RebuildStorage(false);
 
-                MTLTexture mtlTexture = bufferTexture.GetHandle();
+                MTLTexture mtlTexture = bufferTexture.GetHandle(_pipeline.Cbs);
 
                 gpuAddress = mtlTexture.GpuResourceID._impl;
                 nativePtr = mtlTexture.NativePtr;
