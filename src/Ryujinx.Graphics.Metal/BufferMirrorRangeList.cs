@@ -241,6 +241,8 @@ namespace Ryujinx.Graphics.Metal
             if (list == null)
             {
                 baseData.CopyTo(result);
+
+                return;
             }
 
             int srcOffset = offset;
