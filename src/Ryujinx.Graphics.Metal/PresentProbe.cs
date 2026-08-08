@@ -29,7 +29,7 @@ namespace Ryujinx.Graphics.Metal
             Environment.GetEnvironmentVariable("RYUJINX_PRESENT_PROBE") == "1";
 
         private const int BytesPerPixel = 4; // RGBA8/BGRA8 - channel order is irrelevant to luma here
-        private const int GridSide = 3;
+        private const int GridSide = 5;
         private const int PixelsPerFrame = GridSide * GridSide;
         private const int SlotBytes = PixelsPerFrame * BytesPerPixel;
 
@@ -37,7 +37,12 @@ namespace Ryujinx.Graphics.Metal
         // so the blit that filled it has long since completed.
         private const int Slots = 4;
 
-        // A white frame is one whose samples are all bright and all but identical.
+        // A white frame is one where most samples are saturated - not one where they are
+        // all equal. The HUD is composited into the present source and survives the
+        // fault, so a uniformity test is decided by whether a sample lands on the
+        // minimap; that made the same scene report anywhere from 0% to 42%. Thresholds
+        // from 300 captured frames: flat frames have >= 8 of 25 saturated, ordinary
+        // frames at most 4.
         // Counting that directly, rather than as a spike above both neighbours, is what
         // makes runs visible: a run of white frames has white neighbours, so a spike
         // test scores every frame inside it as normal and only ever sees the isolated
@@ -242,7 +247,7 @@ namespace Ryujinx.Graphics.Metal
                 float neighbour = MathF.Max(lumaPrev, lumaNext);
                 float spike = lumaMid - neighbour;
                 float spread = midMax - midMin;
-                bool uniformWhite = spread <= UniformSpread && lumaMid >= WhiteLuma;
+                bool uniformWhite = ReadSaturatedCount(mid % Slots) >= 6;
                 bool uniformGreen = ReadIsGreen(mid % Slots);
 
                 TallySweep(mid % Slots, uniformGreen);
@@ -385,6 +390,24 @@ namespace Ryujinx.Graphics.Metal
         /// All nine samples green: the stain survived to Present, so nothing wrote the
         /// source after the draw this frame was stained at.
         /// </summary>
+        private static unsafe int ReadSaturatedCount(int slot)
+        {
+            byte* ptr = (byte*)_buf.Contents + slot * SlotBytes;
+            int saturated = 0;
+
+            for (int i = 0; i < PixelsPerFrame; i++)
+            {
+                byte* px = ptr + i * BytesPerPixel;
+
+                if ((px[0] + px[1] + px[1] + px[2]) * 0.25f >= 235f)
+                {
+                    saturated++;
+                }
+            }
+
+            return saturated;
+        }
+
         private static unsafe bool ReadIsGreen(int slot)
         {
             byte* ptr = (byte*)_buf.Contents + slot * SlotBytes;

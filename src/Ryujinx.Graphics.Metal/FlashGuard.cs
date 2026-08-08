@@ -20,8 +20,14 @@ namespace Ryujinx.Graphics.Metal
     /// - one GPU sync per frame, to have the samples on the CPU before deciding
     /// - a repeated frame whenever it fires, so motion stutters instead of flashing
     ///
-    /// On unless RYUJINX_METAL_FLASHGUARD=0. /tmp/ryujinx-metal-flashguard overrides it
+    /// Off unless RYUJINX_METAL_FLASHGUARD=1. /tmp/ryujinx-metal-flashguard overrides it
     /// with 0 or 1, re-read once a frame, so both arms can be measured in one session.
+    ///
+    /// Known bad: with this on, a render encoder faulted inside the driver while its
+    /// descriptor was being built (EXC_BAD_ACCESS in AGX FramebufferGen3, reached from
+    /// renderCommandEncoderWithDescriptor), and the flash was still reported in play.
+    /// The keep target this pass renders into is the only new attachment in the present
+    /// path, so it is the first thing to suspect.
     ///
     /// Verified: 42.5% of sampled frames were flat white with it off, 0% with it on,
     /// judged from macOS compositor screenshots rather than the emulator's own probe,
@@ -82,12 +88,12 @@ namespace Ryujinx.Graphics.Metal
             _buf = device.NewBuffer(Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
         }
 
-        // On by default: it removes a visible artefact and measured no frame rate cost
-        // (30.0 fps either way, vsync-capped, in the scene it was verified in). Set
-        // RYUJINX_METAL_FLASHGUARD=0 to turn it off, or write 0/1 to the toggle file to
-        // A/B it inside one session.
+        // Off by default. It measured clean in one scene, but in ordinary play the flash
+        // was still reported and the render encoder faulted inside the driver while
+        // building this pass's descriptor - so it is not fit to be on for anyone until
+        // both are understood. RYUJINX_METAL_FLASHGUARD=1 opts in.
         private static readonly bool _defaultEnabled =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_FLASHGUARD") != "0";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FLASHGUARD") == "1";
 
         public static void RefreshToggle()
         {

@@ -2075,6 +2075,15 @@ namespace Ryujinx.Graphics.Metal
                                     HdrPassProbe.NoteSampledUnderWatchedTarget(
                                         index, texture.Storage, _currentState.RenderTargets[0]);
 
+                                    if (_currentState.RenderTargets[0] is Texture spanRt &&
+                                        texture.Storage != null)
+                                    {
+                                        HdrPassProbe.NoteSpan(
+                                            program.DebugLabel,
+                                            texture.Storage.Width, texture.Storage.Height,
+                                            spanRt.Width, spanRt.Height);
+                                    }
+
                                     if (program.DebugLabel == "3ebc3a8f6b77cc8f")
                                     {
                                         HdrPassProbe.NoteToneMapSlotId(index, gpuAddress, texture.Storage);

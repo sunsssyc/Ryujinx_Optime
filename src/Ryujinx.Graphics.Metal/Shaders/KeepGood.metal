@@ -52,23 +52,26 @@ vertex CopyVertexOut vertexMain(uint vid [[vertex_id]],
 fragment KeepOut fragmentMain(CopyVertexOut in [[stage_in]],
                               constant Textures &textures [[buffer(TEXTURES_INDEX)]],
                               float4 stored [[color(0)]]) {
-    float minLuma = 1e30f;
-    float maxLuma = -1e30f;
-    float total = 0.0f;
+    // Count saturated taps rather than asking the frame to be uniform. The HUD is
+    // composited into this image and survives the fault intact, so a uniformity test is
+    // decided by whether a tap happens to land on the minimap - which is why an earlier
+    // version of this fired on some camera angles and not others. Measured over 300
+    // captured frames: a flat frame has at least 8 of 25 taps saturated (median 24),
+    // an ordinary one at most 4 (median 2).
+    int saturated = 0;
 
-    for (int y = 1; y <= 3; ++y) {
-        for (int x = 1; x <= 3; ++x) {
+    for (int y = 1; y <= 5; ++y) {
+        for (int x = 1; x <= 5; ++x) {
             float3 c = textures.texture.sample(textures.sampler,
-                                               float2(float(x) * 0.25f, float(y) * 0.25f)).rgb;
-            float luma = dot(c, float3(0.25f, 0.5f, 0.25f));
+                                               float2(float(x) / 6.0f, float(y) / 6.0f)).rgb;
 
-            minLuma = min(minLuma, luma);
-            maxLuma = max(maxLuma, luma);
-            total += luma;
+            if (dot(c, float3(0.25f, 0.5f, 0.25f)) >= (235.0f / 255.0f)) {
+                saturated++;
+            }
         }
     }
 
-    bool flat = (maxLuma - minLuma) <= (2.0f / 255.0f) && (total / 9.0f) >= (240.0f / 255.0f);
+    bool flat = saturated >= 6;
 
     KeepOut out;
     out.color = flat ? stored : textures.texture.sample(textures.sampler, in.uv);

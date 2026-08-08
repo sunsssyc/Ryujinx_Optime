@@ -148,6 +148,32 @@ namespace Ryujinx.Graphics.Metal
                 target.MtlFormat == MTLPixelFormat.RG11B10Float;
         }
 
+        // The GPU memory dumps put the fault between the 1600x896 scene targets, none of
+        // which ever hold the flat value, and the 1920x1080 composite, which does. This
+        // names the shaders that span the two by reporting every distinct
+        // sampled-size -> target-size pair, so the composite draw can be identified from
+        // what it actually reads rather than from an assumption about it.
+        private static readonly System.Collections.Generic.HashSet<string> _spanSeen = [];
+
+        public static void NoteSpan(string program, int srcW, int srcH, int dstW, int dstH)
+        {
+            if (program == null || dstW < 900)
+            {
+                return;
+            }
+
+            lock (_spanSeen)
+            {
+                if (!_spanSeen.Add($"{program}:{srcW}x{srcH}->{dstW}x{dstH}"))
+                {
+                    return;
+                }
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu,
+                $"hdrspan program={program} samples {srcW}x{srcH} -> writes {dstW}x{dstH}");
+        }
+
         public static void NoteSampled(IntPtr texture, TextureBase storage = null)
         {
             if (texture == IntPtr.Zero)
@@ -349,12 +375,22 @@ namespace Ryujinx.Graphics.Metal
         /// Blits a 3x3 grid out of the watched target right after a pass that wrote it.
         /// The pass has already ended, so this only adds a blit encoder between passes.
         /// </summary>
-        public static void SamplePassEnd(CommandBufferScoped cbs, int frameSlot)
+        /// <summary>
+        /// Samples the watched target just BEFORE a pass that writes it, so the sequence
+        /// across a frame says which pass left it white.
+        ///
+        /// Must be called from a point that is allowed to switch encoders. An earlier
+        /// version sampled from the pass-ended callback, where the render encoder has not
+        /// been closed yet, and Metal asserted on the blit encoder it tried to open.
+        /// </summary>
+        public static void SampleBeforePass(CommandBufferScoped cbs, Texture target, int frameSlot)
         {
-            if (_sampleBuf.NativePtr == IntPtr.Zero || _openWatchedTarget == null)
+            if (_sampleBuf.NativePtr == IntPtr.Zero || !IsWatchedTarget(target))
             {
                 return;
             }
+
+            _openWatchedTarget = target;
 
             int passIndex = _pendingWatchedCount;
 

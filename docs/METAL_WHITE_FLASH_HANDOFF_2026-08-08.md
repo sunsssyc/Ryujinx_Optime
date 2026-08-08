@@ -281,3 +281,68 @@ as already applied and nothing was set on the new encoder — the first draw the
 dereferenced a null pipeline. Fixed by pairing the pointer with a process-wide
 generation counter bumped for every render encoder created. Verified over long runs with
 the state cache enabled.
+
+## Session 2026-08-08, later: GPU-truth localisation, and instruments that lied
+
+### The detector was wrong all day, and that invalidates most numbers above
+
+The flat-frame test was "nine taps, max-min <= 2/255, mean >= 240". A flat frame keeps
+its HUD - hearts, minimap, thermometer all draw normally over the white - so a single tap
+landing on the minimap breaks the uniformity test and the frame scores as ordinary.
+Whether it fires therefore depends on camera angle and HUD placement, which is why the
+same scene reported 0%, 7.4%, 19% and 42% in different runs. Those were not scene
+differences.
+
+Replacement, calibrated against 300 captured frames of real gameplay: count saturated
+taps over a 5x5 grid. Flat frames have at least 8 of 25 saturated (median 24); ordinary
+frames at most 4 (median 2). Threshold 6. Immune to the HUD.
+
+Anything above that rests on the old criterion should be re-measured before it is
+trusted, including "the guard removed the flash" - that 0/50 was the criterion failing,
+not the flash stopping.
+
+### What GPU memory says, independent of any instrument in this tree
+
+A queue-scope capture with the watchdog raised (RYUJINX_METAL_CAPTURE_WATCHDOG_MS)
+produces a full-frame trace. Its bundle contains raw per-texture dumps, which can be read
+directly - no Xcode, no replay, no code of ours in the path:
+
+  - seven 1600x896 scene targets: none flat (dominant value 0.3%-55%, black or float 1.0)
+  - one 1920x1080 target: 72.5% 0xFFFDFEFE, the exact value the present probe reports
+  - the 2560x1406 drawable: 67.1% flat white
+
+Decoding the 1920x1080 dump shows the white frame with the HUD intact. So the scene
+renders correctly at 1600x896 and the fault appears at full resolution. This is the one
+conclusion here that no instrument of ours can invalidate.
+
+Recipe: find MTLTexture-* files whose size matches w*h*4 (+ up to 64 KiB header), take the
+last w*h*4 bytes, read as BGRA8. A flat frame is obvious as a single dominant 32-bit word.
+
+### Ruled out this session, each with a measurement
+
+  - Metal fast-math (FastMathEnabled=false): 31.9%, unchanged
+  - fragment-dependency barrier skipping (always split): no difference in the live window
+  - full draw serialisation (end the pass after every draw): 34.2% vs 49.1% baseline -
+    reduced but nowhere near removed, so a read-after-write ordering fault cannot be it
+  - guarding the tonemap's reciprocal against a near-zero divisor: 35.2%, unchanged
+  - signed-overflow UB in the translated integer ops: the emitted MSL did change to
+    wrapping unsigned arithmetic and the flash measured *higher* afterwards (62.5%).
+    Reverted. It is still real undefined behaviour and worth fixing on its own merits.
+
+### A wrong turn worth recording
+
+hdrspan logging showed exactly one program sampling 1600x896 and writing 1920x1080
+(a38a7cbfc1472254), which looked like the composite. Painting it with
+RYUJINX_METAL_PAINT corrupted the HUD text instead of the scene - it is a UI shader that
+happens to sample the scene texture. "Reads A, writes B" does not identify a compositor.
+
+Note RYUJINX_METAL_PAINT and the other source-patching diagnostics only apply when the
+shader is actually compiled; with a warm disk cache they silently do nothing. Bump
+CodeGenVersion to force a recompile, and check the log line that confirms the patch.
+
+### FlashGuard
+
+Off by default. Two separate defects: it used the broken uniformity criterion (fixed
+here), and enabling it faulted the driver inside renderCommandEncoderWithDescriptor while
+building the keep pass's descriptor. The second is undiagnosed - the keep texture is the
+only new attachment in the present path and is the first thing to suspect.

@@ -32,7 +32,16 @@ namespace Ryujinx.Graphics.Metal
         // Every prior capture attempt wedged the frame pipeline before reaching the
         // next present, so the capture never ended and the app had to be killed.
         // The watchdog force-stops the capture from a timer thread instead.
-        private const int WatchdogMilliseconds = 3000;
+        //
+        // Three seconds is not enough for a queue-scope capture of a frame this size: it
+        // fired mid-write every time, leaving multi-GB bundles Xcode refuses to open,
+        // while the scope-only captures that did finish covered just the tail of a frame
+        // - UI and minimap, with the scene already drawn. Overridable so a full frame can
+        // be captured without rebuilding.
+        private static readonly int WatchdogMilliseconds =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_CAPTURE_WATCHDOG_MS"), out int ms) && ms > 0
+                ? ms
+                : 3000;
 
         private readonly object _lock = new();
         private readonly MTLCommandQueue _queue;

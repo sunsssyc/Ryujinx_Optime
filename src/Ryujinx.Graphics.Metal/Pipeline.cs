@@ -136,6 +136,14 @@ namespace Ryujinx.Graphics.Metal
                 _encoderStateManager.RenderResourcesPrepass();
             }
 
+            // Before the pass opens, while switching encoders is still legal, record what
+            // the watched target holds. The blit encoder this may open is closed again by
+            // EnsureRenderEncoder below.
+            if (HdrPassProbe.Enabled && Cbs.Encoders.CurrentEncoderType != EncoderType.Render)
+            {
+                HdrPassProbe.SampleBeforePass(Cbs, _encoderStateManager.RenderTargets[0], _presentCount % 4);
+            }
+
             MTLRenderCommandEncoder renderCommandEncoder = Cbs.Encoders.EnsureRenderEncoder();
 
             if (forDraw)
@@ -481,8 +489,16 @@ namespace Ryujinx.Graphics.Metal
 
             FlushCommandsImpl();
 
+            // A scoped capture has to be told where a frame begins and ends, and nothing
+            // was telling it: without this the scope never opened and the trace came out
+            // empty, while the queue-scope alternative recorded every command buffer and
+            // produced multi-GB bundles the tools aborted while finalising. Bracketing one
+            // present-to-present interval gives Xcode exactly one frame.
+            _renderer.FrameCapture.EndScope();
+
             _renderer.AutoFlush.Present();
             _renderer.FrameCapture.ProcessPresent();
+            _renderer.FrameCapture.BeginScope();
 
             _presentCount++;
 
