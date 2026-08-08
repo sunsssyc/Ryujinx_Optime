@@ -588,6 +588,11 @@ namespace Ryujinx.Graphics.Metal
             if (HdrPassProbe.Enabled)
             {
                 HdrPassProbe.BeginPassAll(_currentState.RenderTargets, _currentState.ClearLoadAction);
+
+                foreach (Texture rt in _currentState.RenderTargets)
+                {
+                    HdrPassProbe.NoteIdentity("target", rt);
+                }
             }
 
             if (HdrPassProbe.Enabled)

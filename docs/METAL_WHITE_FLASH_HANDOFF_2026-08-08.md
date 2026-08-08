@@ -501,3 +501,30 @@ disabled on the expanded child rows). That was not completed.
 Worth recording for whoever picks this up: driving this interface by describing clicks to
 someone else is where the time went. The parts that worked - compositor screenshots, raw
 texture decoding - are the ones that needed no interface at all.
+
+### Two blindfolds, both mine, and what came out from under them
+
+The present surface could not be measured at all until both of these were removed:
+
+  - it is written under its sRGB view, while every search here looked for RGBA8Unorm.
+    hdrident logging prints handle, canonical and viewRoot per full resolution texture,
+    and shows the present source's canonical pointer equal to an RGBA8_sRGB target's
+    handle - the same storage under two format views. This is the third time in these
+    notes that view identity produced a false "nothing writes it".
+  - the per-frame target census had a silent MaxTargets = 16, and a frame touches more
+    than that, so the surface never made it into the list. Raised to 64 and truncation is
+    now reported, per the rule in these notes that a cap without a dropped count makes
+    "not found" and "not looked for" indistinguishable.
+
+With both gone, the surface finally reports:
+
+    WHITE   1920x1080 RGBA8_sRGB  p=1, d=0
+    prev    1920x1080 RGBA8_sRGB  p=1, d=0
+
+One pass, zero draws, every frame, flat or not. Nothing in this backend ever draws into
+the surface that gets presented. Its content arrives through that pass's load action, so
+"which draw painted it white" was the wrong question the whole time - the right one is how
+that storage acquires content at all.
+
+Note it is *not* the same storage as the 1920x1080 RG11B10Float target - their canonical
+pointers differ - so the format-view relationship does not connect those two.

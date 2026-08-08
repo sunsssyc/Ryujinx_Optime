@@ -325,6 +325,15 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int firstLayer, int firstLevel)
         {
+            // The flat white 1920x1080 surface is not written by any render pass - it
+            // never appears in the per-target pass census - so it has to arrive by copy.
+            // This names the copies that land on a full resolution destination.
+            if (HdrPassProbe.Enabled && destination is Texture dstTex && dstTex.Width >= 1900)
+            {
+                HdrPassProbe.NoteCopy(Width, Height, MtlFormat.ToString(),
+                    dstTex.Width, dstTex.Height, dstTex.MtlFormat.ToString());
+            }
+
             HdrPassProbe.NoteNonRenderWrite(destination as Texture, "copy");
             HdrPassProbe.NoteCopyInto(destination as Texture);
 
@@ -374,6 +383,15 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int srcLayer, int dstLayer, int srcLevel, int dstLevel)
         {
+            // The flat white 1920x1080 surface is not written by any render pass - it
+            // never appears in the per-target pass census - so it has to arrive by copy.
+            // This names the copies that land on a full resolution destination.
+            if (HdrPassProbe.Enabled && destination is Texture dstTex && dstTex.Width >= 1900)
+            {
+                HdrPassProbe.NoteCopy(Width, Height, MtlFormat.ToString(),
+                    dstTex.Width, dstTex.Height, dstTex.MtlFormat.ToString());
+            }
+
             HdrPassProbe.NoteNonRenderWrite(destination as Texture, "copyLayer");
             HdrPassProbe.NoteCopyInto(destination as Texture);
 
@@ -425,6 +443,15 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, Extents2D srcRegion, Extents2D dstRegion, bool linearFilter)
         {
+            // The flat white 1920x1080 surface is not written by any render pass - it
+            // never appears in the per-target pass census - so it has to arrive by copy.
+            // This names the copies that land on a full resolution destination.
+            if (HdrPassProbe.Enabled && destination is Texture dstTex && dstTex.Width >= 1900)
+            {
+                HdrPassProbe.NoteCopy(Width, Height, MtlFormat.ToString(),
+                    dstTex.Width, dstTex.Height, dstTex.MtlFormat.ToString());
+            }
+
             HdrPassProbe.NoteNonRenderWrite(destination as Texture, "blitScaled");
             HdrPassProbe.NoteCopyInto(destination as Texture);
 

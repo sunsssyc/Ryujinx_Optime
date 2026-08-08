@@ -30,7 +30,10 @@ namespace Ryujinx.Graphics.Metal
         // Matches PresentProbe's ring so a frame classified two presents late can still
         // be described.
         private const int Slots = 4;
-        private const int MaxTargets = 16;
+        // A frame touches more than sixteen targets, and the cap silently dropped the rest -
+        // which is how the sRGB view of the present surface came to look as though nothing
+        // ever wrote it. Raised, and what still gets dropped is now reported.
+        private const int MaxTargets = 64;
 
         // Below this the target is a shadow map, a luminance reduction or a UI atlas,
         // not a full resolution stage of the chain under study.
@@ -52,6 +55,7 @@ namespace Ryujinx.Graphics.Metal
 
         private static readonly Entry[] _pending = new Entry[MaxTargets];
         private static int _pendingCount;
+        private static int _truncated;
 
         // The pass currently being encoded, so its draws can be attributed on end.
         private static int _openIndex = -1;
@@ -154,6 +158,54 @@ namespace Ryujinx.Graphics.Metal
         // sampled-size -> target-size pair, so the composite draw can be identified from
         // what it actually reads rather than from an assumption about it.
         private static readonly System.Collections.Generic.HashSet<string> _spanSeen = [];
+
+        private static readonly System.Collections.Generic.HashSet<string> _copySeen = [];
+
+        // Every identity a full resolution texture answers to. A view carries its own
+        // MTLTexture pointer, and a write made through one is attributed to whichever
+        // identity the bookkeeping happened to use - which is exactly how an earlier
+        // "nothing ever writes the presented image" conclusion in these notes came about
+        // and had to be retracted. Printing all three per texture makes the collision
+        // visible instead of leaving two records that never line up.
+        private static readonly System.Collections.Generic.HashSet<string> _identSeen = [];
+
+        public static void NoteIdentity(string role, Texture t)
+        {
+            if (t == null || t.Width < 1900)
+            {
+                return;
+            }
+
+            string key = $"{role}:0x{t.GetHandle().NativePtr:X}";
+
+            lock (_identSeen)
+            {
+                if (!_identSeen.Add(key))
+                {
+                    return;
+                }
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu,
+                $"hdrident {role} {t.Width}x{t.Height} {t.MtlFormat} " +
+                $"handle=0x{t.GetHandle().NativePtr:X} canonical=0x{t.CanonicalPtr:X} " +
+                $"viewRoot=0x{t.ViewRootPtr:X}");
+        }
+
+        public static void NoteCopy(int srcW, int srcH, string srcFmt, int dstW, int dstH, string dstFmt)
+        {
+            string key = $"{srcW}x{srcH}:{srcFmt}->{dstW}x{dstH}:{dstFmt}";
+
+            lock (_copySeen)
+            {
+                if (!_copySeen.Add(key))
+                {
+                    return;
+                }
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu, $"hdrcopy {key}");
+        }
 
         public static void NoteSpan(string program, int srcW, int srcH, int dstW, int dstH)
         {
@@ -332,6 +384,8 @@ namespace Ryujinx.Graphics.Metal
             {
                 if (_pendingCount == MaxTargets)
                 {
+                    _truncated++;
+
                     return;
                 }
 
@@ -595,7 +649,11 @@ namespace Ryujinx.Graphics.Metal
         private static Texture _pendingSceneTex, _pendingBloomTex;
 
         private static MTLBuffer _inputBuf;
-        private const int InputPixels = 9;
+        // 25, not 9. Xcode shows one of these inputs as almost entirely black while a
+        // nine-point sample of it read ~1.0 - every point had landed on sky. Too few
+        // samples is the same mistake the flat-frame criterion made.
+        private const int InputGridSide = 5;
+        private const int InputPixels = InputGridSide * InputGridSide;
         private const int InputBytes = InputPixels * 4;
         private const int InputsPerFrame = 4;
 

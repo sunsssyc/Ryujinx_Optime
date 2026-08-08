@@ -232,6 +232,8 @@ namespace Ryujinx.Graphics.Metal
             // record - it is told apart by its size and BGRA format.
             HdrPassProbe.NotePresentSource(src, slot);
             HdrPassProbe.SampleInputs(cbs, slot);
+            HdrPassProbe.NoteIdentity("present", src);
+
             HdrPassProbe.Commit(slot);
 
             // ── 1. Classify the frame two presents back ─────────────────────
