@@ -528,3 +528,22 @@ that storage acquires content at all.
 
 Note it is *not* the same storage as the 1920x1080 RG11B10Float target - their canonical
 pointers differ - so the format-view relationship does not connect those two.
+
+### The pass on the presented surface does nothing
+
+With the census able to see it at last, on flat and ordinary frames alike:
+
+    presented surface  1920x1080 RGBA8_sRGB   p=1, d=0, clr=0   (two, alternating)
+    scene composite    1920x1080 RG11B10Float p=4, d=96..97
+
+clr=0 means that single pass loads and stores; with zero draws it does nothing at all.
+Meanwhile the 96-97 composite draws land on a different storage - the canonical pointers
+differ, so this is not the format-view relationship that connected the present source to
+its sRGB target.
+
+Every frame reports this, flat or not, so it is not a description of the fault. Either
+there is a transfer from the composite to the presented surface that nothing here hooks,
+or the identity merging still splits one storage into two records somewhere. Given that
+mismatched identity has produced three wrong conclusions in these notes already, the
+second is the more likely of the two, and worth settling before anything is built on the
+first.
