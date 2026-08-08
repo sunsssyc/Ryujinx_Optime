@@ -188,3 +188,7 @@ PublishProfiles/
 # Ignore distribution build files
 distribution/macos/temp/
 distribution/macos/output/
+
+# Local build output and analysis scratch (several GB each)
+artifacts/
+tools/
