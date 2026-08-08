@@ -459,3 +459,9 @@ already exists and already samples the source.
 No extra pass, so nothing new for the descriptor builder to fault on; no CPU sync, so the
 command buffer is never swapped mid-Present. It needs HelperShader's present path to take
 a second attachment, which is why it was not done in the session that found this.
+
+Correction to the design above: it still names a keep texture as a colour attachment, and
+the fault being avoided happens while the driver builds an attachment descriptor. It
+removes the second render pass and the CPU sync, but not the attachment itself, so it may
+well hit the same fault. Whatever is wrong with using that texture as an attachment has to
+be understood first - that is the blocking question, not which pass does the writing.
