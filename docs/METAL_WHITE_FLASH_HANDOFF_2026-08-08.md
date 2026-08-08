@@ -479,3 +479,25 @@ are held by the texture cache and reach the encoder through the paths that regis
 against a command buffer; this one is held by a static field and only ever attached from
 Present. With the guard on, the process still exits during a camera sweep - after six
 sweeps in one run, two in another - so whatever it is, it is timing dependent.
+
+### The Xcode route, and how it was misused here
+
+A full-frame queue-scope capture opens and replays. What it confirmed, independently of
+everything in this tree: on a flat frame the 1600x896 G-buffer is intact - albedo,
+normals, depth all correct - matching what the raw texture dumps already said.
+
+What it did not yield is which encoder writes the flat 1920x1080 texture, and the reason
+is a misunderstanding of the tool rather than a limit of it. The Dependencies view's
+filter matches node names, which are encoders; textures are edge annotations, not nodes.
+Filtering by a texture address returns "0 matches", and a non-empty result from it earlier
+was simply whatever node happened to be selected. Several rounds of reading that encoder's
+attachments followed from taking that as a hit - all of its outputs are 1600x896 and it
+never touches the texture in question.
+
+The right way to ask "who wrote this texture" is the Memory view: select the resource and
+expand its own usage list, or use Reveal in Dependencies from a top-level row (it is
+disabled on the expanded child rows). That was not completed.
+
+Worth recording for whoever picks this up: driving this interface by describing clicks to
+someone else is where the time went. The parts that worked - compositor screenshots, raw
+texture decoding - are the ones that needed no interface at all.
