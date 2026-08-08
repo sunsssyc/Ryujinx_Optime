@@ -197,6 +197,56 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOW_NAN") ?? string.Empty)
                 .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        /// <summary>
+        /// Writes four grey patches of known value into the corner of everything this
+        /// shader outputs, so what happens to them between here and the screen can be read
+        /// off any single frame.
+        ///
+        /// This replaces a magenta stamp that could not answer the question it was set. A
+        /// stamp of (1, 0, 1) x 3.5 is far above any tonemap's white point, so it clips to
+        /// the same bytes whether the stage downstream applies a gain of one or of a
+        /// thousand - and its colour coming out identical on flat and ordinary frames was
+        /// read here as proof that no such gain exists. A saturated probe cannot detect
+        /// saturation. These values are low enough to have somewhere to go:
+        ///
+        ///   patches unchanged on a flat frame -> nothing downstream is applying a gain,
+        ///     and the white is this shader's own output
+        ///   patches driven to white           -> the stage after this one is saturating
+        ///     the frame, and this shader is innocent
+        ///
+        /// RYUJINX_METAL_RAMP=&lt;label&gt;:&lt;patch pixels&gt;
+        /// </summary>
+        private static readonly string[] _ramp =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_RAMP") ?? string.Empty)
+                .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        /// <summary>
+        /// Brackets what this shader actually wrote, by colouring the output according to
+        /// which band it falls in: green at or above 3.0, blue from 0.9 to 3.0.
+        ///
+        /// Every marker so far tested a named intermediate, which assumes the temp names in
+        /// the disk MSL dump are the ones feeding the colour in the compiled variant. This
+        /// tests out.color0 itself, after it has been written, so that assumption is gone.
+        ///
+        /// It also settles a reading this file got wrong. The shader writes
+        /// clamp(x, 0, 1) * 3.5, and a flat frame was assumed to be the clamp saturating -
+        /// which would put 3.5 on the output. But the grey ramp measured the transfer curve
+        /// downstream (0.05 -> 55, 0.15 -> 96, 0.35 -> 149, 0.70 -> 212), and on that curve
+        /// the 254 a flat frame shows corresponds to roughly 0.99, not to 3.5. If that is
+        /// right the frame is not saturated at all - it is uniform at an ordinary value,
+        /// which is what the earliest measurements in these notes said before the
+        /// saturation story took over.
+        ///
+        ///   green on a flat frame -> the output really is at the top of the clamp
+        ///   blue on a flat frame  -> it is near 1.0, and the question is why every pixel
+        ///     agrees rather than why any of them is large
+        ///
+        /// RYUJINX_METAL_BRACKET=&lt;label&gt;
+        /// </summary>
+        private static readonly string[] _bracket =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_BRACKET") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private static readonly string[] _guardBitTrickLabels =
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_BITTRICK") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -336,6 +386,52 @@ namespace Ryujinx.Graphics.Metal
 
                     Logger.Warning?.PrintMsg(LogClass.Gpu,
                         $"diagnostic: {DebugLabel} greens pixels where any of {string.Join(",", temps)} is NaN");
+                }
+            }
+
+            if (_bracket.Length != 0 && Array.IndexOf(_bracket, DebugLabel) >= 0)
+            {
+                int at = code.IndexOf("    out.color0.w", StringComparison.Ordinal);
+                int eol = at >= 0 ? code.IndexOf('\n', at) : -1;
+
+                if (eol < 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: {DebugLabel} NOT bracketed - no out.color0.w to insert after");
+                }
+                else
+                {
+                    code = code.Insert(eol + 1,
+                        "    if (out.color0.y >= 3.0f) { out.color0 = float4(0.0f, 1.0f, 0.0f, 1.0f); }\n" +
+                        "    else if (out.color0.y >= 0.9f) { out.color0 = float4(0.0f, 0.0f, 1.0f, 1.0f); }\n");
+
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} brackets its output - green at 3.0 and above, blue from 0.9");
+                }
+            }
+
+            if (_ramp.Length == 2 && DebugLabel == _ramp[0] &&
+                int.TryParse(_ramp[1], out int patch) && patch > 0)
+            {
+                int at = code.IndexOf("    out.color0.w", StringComparison.Ordinal);
+                int eol = at >= 0 ? code.IndexOf('\n', at) : -1;
+
+                if (eol < 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: {DebugLabel} NOT ramped - no out.color0.w to insert after");
+                }
+                else
+                {
+                    string w = MslFloat(patch);
+
+                    code = code.Insert(eol + 1,
+                        $"    if (in.position.y < {w} && in.position.x < {MslFloat(patch * 4)}) {{\n" +
+                        $"        float rampStep = floor(in.position.x / {w});\n" +
+                        "        float rampValue = rampStep < 0.5f ? 0.05f : (rampStep < 1.5f ? 0.15f : (rampStep < 2.5f ? 0.35f : 0.70f));\n" +
+                        "        out.color0 = float4(rampValue, rampValue, rampValue, 1.0f);\n" +
+                        "    }\n");
+
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} writes a four step grey ramp (0.05/0.15/0.35/0.70) in {patch}px patches");
                 }
             }
 
