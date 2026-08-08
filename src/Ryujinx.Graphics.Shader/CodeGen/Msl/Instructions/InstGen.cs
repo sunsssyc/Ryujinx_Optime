@@ -120,12 +120,31 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                     expr[index] = Enclose(srcExpr, src, inst, info, isLhs);
                 }
 
+                // Integer add, subtract, multiply and negate wrap on the guest GPU, and
+                // shaders rely on it: the bit-trick reciprocal seeded with 0x7EF07EBB
+                // computes 0x7EF07EBB - as_int(x), which overflows for every negative
+                // input. Signed overflow is undefined behaviour in Metal Shading
+                // Language, so the compiler may assume it never happens and fold the
+                // surrounding arithmetic accordingly. Unsigned arithmetic wraps by
+                // definition, so doing the maths there reproduces the hardware exactly.
+                bool wrapsAsInteger =
+                    (inst & Instruction.FP32) == 0 &&
+                    (inst & Instruction.FP64) == 0 &&
+                    (inst & Instruction.Mask) is Instruction.Add or Instruction.Subtract or
+                        Instruction.Multiply or Instruction.Negate &&
+                    GetSrcVarType(inst, 0) == AggregateType.S32;
+
                 switch (arity)
                 {
                     case 0:
                         return op;
 
                     case 1:
+                        if (wrapsAsInteger)
+                        {
+                            return $"as_type<int>({op}as_type<uint>({expr[0]}))";
+                        }
+
                         return op + expr[0];
 
                     case 2:
@@ -140,6 +159,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                             };
 
                             return $"{func}({expr[0]}, {expr[1]})";
+                        }
+
+                        if (wrapsAsInteger)
+                        {
+                            return $"as_type<int>(as_type<uint>({expr[0]}) {op} as_type<uint>({expr[1]}))";
                         }
 
                         return $"{expr[0]} {op} {expr[1]}";

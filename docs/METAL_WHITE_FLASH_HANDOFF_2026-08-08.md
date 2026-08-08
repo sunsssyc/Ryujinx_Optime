@@ -346,3 +346,19 @@ Off by default. Two separate defects: it used the broken uniformity criterion (f
 here), and enabling it faulted the driver inside renderCommandEncoderWithDescriptor while
 building the keep pass's descriptor. The second is undiagnosed - the keep texture is the
 only new attachment in the present path and is the first thing to suspect.
+
+### Integer wrapping: measured again, properly this time
+
+The first comparison of this change was worthless - the two arms faced different camera
+angles, and the flash rate swings with the view. Re-run with both arms loading the same
+save and executing the same scripted camera sweep, judged from compositor screenshots:
+
+    base  25/86  = 29.1% +-4.9
+    wrap  30/188 = 16.0% +-2.7
+    difference 13.1 pp, combined SE 5.6, 2.4 SE
+
+Kept on that basis, with three reservations on the record: the arms are unbalanced (one
+base round produced no shots), the shot rates differ between them, and the flash is
+reduced rather than removed. A correctness fix of this kind should be all-or-nothing for
+the shader it affects, so a partial effect means either something else contributes or
+part of this difference is not the change.
