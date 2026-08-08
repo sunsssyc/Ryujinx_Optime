@@ -247,6 +247,30 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_BRACKET") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        /// <summary>
+        /// Draws the texel fetch coordinate itself into red and green, and keeps whether
+        /// the frame would have been flat in blue.
+        ///
+        /// The bracket established that a flat frame is not saturated - the output sits
+        /// near 1.0, well below the 3.5 a clamped-and-scaled 1 would give - so the frame is
+        /// uniform at an ordinary value rather than blown out. For a pass that reads its
+        /// input with texel fetches, one value everywhere means every pixel fetched the
+        /// same texel, and the fetch coordinate is
+        /// fma(position, fp_c3->data[0].xy, fp_c3->data[0].zw). A zero or stale scale term
+        /// collapses the whole frame onto one texel.
+        ///
+        /// Showing the coordinate is better than testing it against a guess: a normal frame
+        /// is a smooth ramp, a collapsed one is flat, and neither needs a threshold. Blue
+        /// carries the artefact indicator so the two are readable in the same frame -
+        /// replacing the output unconditionally is what destroyed an earlier version of
+        /// this experiment, because it left no way to tell which frames were the bad ones.
+        ///
+        /// RYUJINX_METAL_SHOWCOORD=&lt;label&gt;:&lt;tempX&gt;,&lt;tempY&gt;
+        /// </summary>
+        private static readonly string[] _showCoord =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOWCOORD") ?? string.Empty)
+                .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private static readonly string[] _guardBitTrickLabels =
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_BITTRICK") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -386,6 +410,32 @@ namespace Ryujinx.Graphics.Metal
 
                     Logger.Warning?.PrintMsg(LogClass.Gpu,
                         $"diagnostic: {DebugLabel} greens pixels where any of {string.Join(",", temps)} is NaN");
+                }
+            }
+
+            if (_showCoord.Length == 2 && DebugLabel == _showCoord[0])
+            {
+                string[] axes = _showCoord[1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                string[] absent = axes.Where(t => !code.Contains($"{t} =")).ToArray();
+                int at = code.IndexOf("    out.color0.w", StringComparison.Ordinal);
+                int eol = at >= 0 ? code.IndexOf('\n', at) : -1;
+
+                if (axes.Length != 2 || absent.Length != 0 || eol < 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} NOT coord-mapped - " +
+                        (absent.Length != 0 ? $"absent: {string.Join(",", absent)}" : "need exactly two temps and an out.color0.w"));
+                }
+                else
+                {
+                    code = code.Insert(eol + 1,
+                        "    {\n" +
+                        "        float coordFlat = out.color0.y >= 0.9f ? 1.0f : 0.0f;\n" +
+                        $"        out.color0 = float4(float({axes[0]}) / 2048.0f, float({axes[1]}) / 1024.0f, coordFlat, 1.0f);\n" +
+                        "    }\n");
+
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} shows its fetch coordinate ({axes[0]},{axes[1]}) in red/green, flatness in blue");
                 }
             }
 
