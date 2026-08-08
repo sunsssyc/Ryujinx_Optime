@@ -676,3 +676,15 @@ the second has not had a fair test yet.
 The reproduction window is the practical constraint: about two minutes before the in-game
 sun moves off the angle, against eight to ten minutes per experiment. Anything that needs
 several arms should hot-swap them inside one session rather than relaunch.
+
+### The reproduction degraded, and why that matters more than it sounds
+
+Early runs flashed within one or two camera steps of loading. Later ones produced two runs
+in a whole sweep, which left the remaining test (|temp_290| > 100, the factor shared by
+the three numerators) unanswered twice.
+
+Suspected cause, unverified: the drive-in script presses the confirm key blindly, so the
+save-list cursor may have moved and later runs may be loading a different save than the
+one the flash was characterised on. Anything automating this should verify which save it
+loaded rather than assume, and prefer hot-swapped arms inside one session over relaunching
+- the window is about two minutes against eight to ten per launch.
