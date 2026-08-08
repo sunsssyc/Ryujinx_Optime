@@ -547,3 +547,19 @@ or the identity merging still splits one storage into two records somewhere. Giv
 mismatched identity has produced three wrong conclusions in these notes already, the
 second is the more likely of the two, and worth settling before anything is built on the
 first.
+
+### That contradiction resolves from evidence already taken
+
+No new run needed. The skip-hdr bisect dropped every draw whose colour target is the
+1920x1080 RG11B10Float composite, and the screen went constantly white - 24 of 24, luma
+248. Dropping those draws could not change what is displayed unless the presented image
+derives from that target.
+
+So the two are connected, and "the presented surface takes zero draws" is a bookkeeping
+artefact: it and the composite are one storage, and the canonical-pointer comparison that
+said otherwise is wrong. That is the fourth conclusion in these notes to come from
+identity merging rather than from the game.
+
+What this leaves: the presented storage does receive the composite's 96-97 draws. The
+scene at 1600x896 is intact. So the fault is inside those draws or their inputs, and the
+per-target census cannot see further - it counts draws, and the draw counts match.
