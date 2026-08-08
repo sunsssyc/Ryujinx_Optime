@@ -127,6 +127,10 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_PAINT") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        private static readonly string[] _guardBitTrickLabels =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_BITTRICK") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private static readonly string[] _guardDivideLabels =
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_DIVIDE") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -164,6 +168,42 @@ namespace Ryujinx.Graphics.Metal
                 Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: compiling {DebugLabel} fragment painting solid magenta");
 
                 code = code.Replace("return out;", "out.color0 = float4(1.0f, 0.0f, 1.0f, 1.0f);\n    return out;");
+            }
+
+            // Diagnostic: bound the bit-trick reciprocal. The guard below only matches
+            // "1.0f / temp", and this shader's reciprocals are the 0x7EF07EBB bit trick
+            // instead - so that guard never applied here and its negative result said
+            // nothing. Dropping this shader's draws removes the flash entirely, so the
+            // fault is inside it; this bounds the one construct in it that can produce a
+            // non-finite value from a small input.
+            if (_guardBitTrickLabels.Length != 0 &&
+                Array.IndexOf(_guardBitTrickLabels, DebugLabel) >= 0)
+            {
+                MatchCollection sites = Regex.Matches(
+                    code, @"(temp_\d+) = as_type<int>\(as_type<uint>\(temp_\d+\) \+ as_type<uint>\(as_type<int>\(0x7EF07EBB\)\)\);");
+
+                int bounded = 0;
+
+                foreach (Match site in sites)
+                {
+                    string name = site.Groups[1].Value;
+
+                    string before = code;
+                    code = code.Replace(
+                        $"as_type<float>({name})",
+                        $"clamp(as_type<float>({name}), -65504.0f, 65504.0f)");
+
+                    if (!ReferenceEquals(before, code))
+                    {
+                        bounded++;
+                    }
+                }
+
+                if (bounded != 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: bounded {bounded} bit-trick reciprocals in {DebugLabel}");
+                }
             }
 
             // Diagnostic: make every reciprocal in this fragment finite. The guest

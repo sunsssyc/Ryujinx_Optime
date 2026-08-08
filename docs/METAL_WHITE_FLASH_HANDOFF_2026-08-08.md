@@ -584,3 +584,47 @@ over 260000 composite draws. That is consistent with the partial reduction it me
 (29.1% to 16.0%), but it does not establish it - a 2.4 SE result on a rate that swings
 with the camera is thin either way. What it does rule out is the tidy explanation that
 other composite shaders share the pattern and were left unfixed. They do not.
+
+## The shader is identified
+
+Per-shader bisect - drop one shader's draws at a time, hot-swapped, with a control between
+every arm, judged from compositor screenshots:
+
+    control  41.7  62.5  37.5  41.7  37.5  45.8  41.7   (%)
+    5ccdedfa3a3376d1  29.2      797cbc23a0819594  33.3
+    3821a028b5a7f2b6  33.3      9ac2fc4adc220496  62.5
+    8571d78b93a6bbba  33.3      7854e6d7c6fd1230  37.5
+    ee89b4e471373459   0.0   <-- 24 of 24 ordinary
+
+Five of the six dominant shaders sit inside the control's own spread. Dropping
+ee89b4e471373459 removes the flash completely. Painting it magenta fills the entire
+viewport with the HUD on top, so it is a full-screen pass and its output is the frame -
+which is why a flat frame looks exactly like it does.
+
+### The mechanism inside it
+
+It reads the scene with texel fetches, not samples (grep for "sample(" finds nothing
+here), and ends:
+
+    temp_297 = temp_292 + temp_290                      // denominator
+    temp_302 = bit-trick reciprocal of temp_297         // seed 0x7EF19FFF
+    temp_307 = fma(temp_297, -R, fp_c1[0].y)            // Newton refinement
+    temp_311 = R * temp_307                             // refined 1/x
+    out.color0.xyz = clamp(temp_311 * rgb, 0, 1) * 3.5
+
+One scalar reciprocal multiplies all three channels, and the result is clamped to [0,1].
+As temp_297 approaches zero the reciprocal grows, all three clamps saturate together, and
+the frame is a uniform 3.5 in every channel - which is exactly the shape measured: flat,
+three channels equal, and a clamped 1.0 rather than an overflowed magnitude.
+
+Two of this session's negative results were wrong for mechanical reasons, not because the
+mechanism was wrong:
+
+  - the reciprocal guard matched "1.0f / temp" and this shader uses the bit trick, so it
+    never applied here at all
+  - the bit-trick guard matched seed 0x7EF07EBB; this site uses 0x7EF19FFF, so the eight
+    sites it bounded were all the wrong ones. Its bound was also 65504, while saturation
+    only needs the product to exceed 1.0
+
+Open: why temp_297 reaches zero here and not on hardware. It traces back through several
+hundred temps, and the integer wrapping in the bit trick is already hardware-correct.

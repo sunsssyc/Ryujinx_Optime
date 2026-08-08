@@ -1108,7 +1108,9 @@ namespace Ryujinx.Graphics.Metal
                 // pipeline, and issuing the draw anyway faults inside the Metal driver.
                 // Only the draw is skipped - the cleanup below still has to run.
                 if (_encoderStateManager.HasValidRenderPipeline &&
-                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])))
+                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])) &&
+                    !(_skipShader.Length != 0 &&
+                      _skipShader == _encoderStateManager.RenderProgram?.DebugLabel))
                 {
                     // The converted-topology path must keep the draw's instancing and
                     // base vertex/instance: dropping them draws a single instance of
@@ -1135,7 +1137,9 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 if (_encoderStateManager.HasValidRenderPipeline &&
-                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])))
+                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])) &&
+                    !(_skipShader.Length != 0 &&
+                      _skipShader == _encoderStateManager.RenderProgram?.DebugLabel))
                 {
                     renderCommandEncoder.DrawPrimitives(
                         primitiveType,
@@ -1270,7 +1274,9 @@ namespace Ryujinx.Graphics.Metal
                 ToneMapProbe.Record(_encoderStateManager.CurrentEncoderState);
 
                 if (_encoderStateManager.HasValidRenderPipeline &&
-                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])))
+                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])) &&
+                    !(_skipShader.Length != 0 &&
+                      _skipShader == _encoderStateManager.RenderProgram?.DebugLabel))
                 {
                     renderCommandEncoder.DrawIndexedPrimitives(
                         primitiveType,
@@ -1341,7 +1347,9 @@ namespace Ryujinx.Graphics.Metal
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
 
                 if (_encoderStateManager.HasValidRenderPipeline &&
-                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])))
+                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])) &&
+                    !(_skipShader.Length != 0 &&
+                      _skipShader == _encoderStateManager.RenderProgram?.DebugLabel))
                 {
                     renderCommandEncoder.DrawIndexedPrimitives(
                         primitiveType,
@@ -1659,6 +1667,12 @@ namespace Ryujinx.Graphics.Metal
         // able to separate. Hot-swappable so both arms run in one session.
         private static bool _skipHdrDraws;
 
+        // Per shader bisect. Every externally observable quantity matches between flat and
+        // ordinary frames, so the difference is inside shader execution; dropping one
+        // shader's draws at a time is what names which one. Hot-swappable, so all arms run
+        // in the session that reproduces the fault.
+        private static string _skipShader = string.Empty;
+
         // Diagnostic hammer, stronger than _serializeDraws: commit the command buffer and
         // block until the GPU has finished it before the watched draw. That orders the
         // watched read after every write already recorded, across encoders AND across
@@ -1693,6 +1707,10 @@ namespace Ryujinx.Graphics.Metal
 
                 _skipHdrDraws = System.IO.File.Exists("/tmp/ryujinx-metal-skip-hdr") &&
                     System.IO.File.ReadAllText("/tmp/ryujinx-metal-skip-hdr").Trim() == "1";
+
+                _skipShader = System.IO.File.Exists("/tmp/ryujinx-metal-skip-shader")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-skip-shader").Trim()
+                    : string.Empty;
 
                 _hardSync = System.IO.File.Exists("/tmp/ryujinx-metal-hardsync") &&
                     System.IO.File.ReadAllText("/tmp/ryujinx-metal-hardsync").Trim() == "1";
