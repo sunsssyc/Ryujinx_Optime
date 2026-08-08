@@ -890,3 +890,54 @@ control inside the same run.
     term of temp_297 crosses zero
   - flat frames stay white -> its clamps are not saturating, the pass that reads the scene
     and writes full resolution is innocent, and the white arrives downstream of it
+
+### The stamp run: the shader runs, does not saturate, and still writes white
+
+Two patchers on ee89b4e471373459 at once, both confirmed applied in the log:
+an unconditional 96x96 magenta corner, and green where all three clamped products
+reach 1. Reproducing save, 26 compositor screenshots, 7 of them flat:
+
+    flat frames    scene mean 254, 99.9% saturated
+    stamp          present on all 26, including all 7 flat frames
+    green          0.0% of pixels, on flat and ordinary frames alike
+
+The stamp settles what the green alone could not. A marker that never fires and a value
+that never occurs look identical, and the green was 0.0% everywhere - on its own it says
+nothing. The stamp is unconditional, so its presence on a flat frame proves the shader ran
+and that its pixels reached the screen. Both readings this file left open are now closed:
+the draws execute, and their output is the frame.
+
+Then the stamp's colour, which decides the rest. It measures (242, 62, 246) on flat frames
+and (242, 62, 246) on ordinary ones - the same bytes. A downstream exposure or tonemap
+blowing the frame up would have lifted the stamp's green channel along with everything
+else. It does not move. So nothing after this shader is applying a gain, and the white is
+this shader's own output, in every pixel that was not forced to magenta.
+
+### That leaves exactly one value
+
+The shader writes `clamp(x, 0.0f, 1.0f) * 3.5` per channel. On a flat frame the output is
+at the top of that clamp while `x >= 1` evaluates false on the same pixels. NaN is the only
+value that does both: it is not less than the bound, not greater, not equal, so every
+comparison against it is false, while the clamp still resolves it to a bound.
+
+It also explains, in one stroke, every null marker result recorded above:
+
+    |temp_297| < 1e-3   0.0%      NaN is not less than anything
+    |temp_290| > 100    0.0%      NaN is not greater than anything
+    |temp_313| > 1      0.0%
+    |temp_313| > 0.9    0.0%
+    |temp_44|  > 1      0.0%      the tonemap, same test, same blindness
+
+Four separate runs read those as "the value never reaches this range". A NaN reaches no
+range. Every magnitude marker built in this investigation was structurally incapable of
+seeing the thing it was pointed at.
+
+Testing it needs care in one respect: isnan() is precisely what fast math is allowed to
+fold to false, and Metal compiles with fast math on by default, so asking in the float
+domain risks measuring the optimiser. RYUJINX_METAL_SHOW_NAN tests the bit pattern instead
+- exponent all ones with a non-zero mantissa - which no arithmetic rewrite can touch.
+
+Note this also weakens the "Metal fast-math disabled: 31.9%, unchanged" exclusion above.
+Under IEEE semantics fmax(NaN, 0) returns 0, so clamp(NaN) would be 0 and the frame would
+go black rather than white - and a black frame scores zero flat frames by a saturation
+criterion, not 31.9%. That result needs re-taking with the shader cache invalidated.

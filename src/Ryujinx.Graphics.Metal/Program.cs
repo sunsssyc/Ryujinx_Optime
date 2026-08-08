@@ -174,6 +174,29 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_STAMP") ?? string.Empty)
                 .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        /// <summary>
+        /// Greens a pixel where any of the named values is NaN, tested on the bit pattern.
+        ///
+        /// This is the one candidate left after the stamp run. The composite writes
+        /// clamp(x, 0, 1) * 3.5, its output is white on a flat frame, and x >= 1 is false
+        /// on the same pixels - and NaN is the only value that sits at the top of a clamp
+        /// while failing a comparison against it. It also explains, in one go, why every
+        /// magnitude marker in these notes came back at 0.0% of pixels: NaN is false
+        /// against >, <, and ==, so |t| > limit and |t| < eps are both false for it, and
+        /// four separate runs read that as "the value never reaches this range".
+        ///
+        /// Tested as an integer, deliberately. isnan() is exactly what fast math is
+        /// permitted to fold away to false, and Metal compiles with it on by default, so
+        /// asking in the float domain risks measuring the optimiser instead of the value.
+        /// Exponent all ones with a non-zero mantissa is NaN, and no arithmetic rewrite
+        /// touches that.
+        ///
+        /// RYUJINX_METAL_SHOW_NAN=&lt;label&gt;:temp_a,temp_b,temp_c
+        /// </summary>
+        private static readonly string[] _showNaN =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOW_NAN") ?? string.Empty)
+                .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private static readonly string[] _guardBitTrickLabels =
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_BITTRICK") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -287,6 +310,32 @@ namespace Ryujinx.Graphics.Metal
 
                     Logger.Warning?.PrintMsg(LogClass.Gpu,
                         $"diagnostic: {DebugLabel} greens pixels where {string.Join(" and ", temps)} all reach 1");
+                }
+            }
+
+            if (_showNaN.Length == 2 && DebugLabel == _showNaN[0])
+            {
+                string[] temps = _showNaN[1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                string[] missing = temps.Where(t => !code.Contains($"{t} =")).ToArray();
+                int at = code.IndexOf("    out.color0.w", StringComparison.Ordinal);
+                int eol = at >= 0 ? code.IndexOf('\n', at) : -1;
+
+                if (missing.Length != 0 || eol < 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} NOT NaN-marked - " +
+                        (missing.Length != 0 ? $"absent: {string.Join(",", missing)}" : "no out.color0.w to insert after"));
+                }
+                else
+                {
+                    string test = string.Join(" || ", temps.Select(t =>
+                        $"((as_type<uint>({t}) & 0x7F800000u) == 0x7F800000u && (as_type<uint>({t}) & 0x007FFFFFu) != 0u)"));
+
+                    code = code.Insert(eol + 1,
+                        $"    if ({test}) {{ out.color0 = float4(0.0f, 1.0f, 0.0f, 1.0f); }}\n");
+
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} greens pixels where any of {string.Join(",", temps)} is NaN");
                 }
             }
 
