@@ -127,6 +127,14 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_PAINT") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        private static readonly string[] _showBig =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOW_BIG") ?? string.Empty)
+                .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        private static readonly string[] _showNearZero =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOW_NEARZERO") ?? string.Empty)
+                .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private static readonly string[] _guardBitTrickLabels =
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_BITTRICK") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -168,6 +176,34 @@ namespace Ryujinx.Graphics.Metal
                 Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: compiling {DebugLabel} fragment painting solid magenta");
 
                 code = code.Replace("return out;", "out.color0 = float4(1.0f, 0.0f, 1.0f, 1.0f);\n    return out;");
+            }
+
+            // Diagnostic: green the pixels where a named value exceeds a magnitude,
+            // leaving the rest of the frame alone. Marking the saturation itself rather
+            // than a guess at which factor caused it - the frame goes flat when three
+            // clamped products all reach 1, and either shared factor can do that.
+            if (_showBig.Length == 3 && DebugLabel == _showBig[0] &&
+                code.Contains("out.color0.w"))
+            {
+                string t = _showBig[1];
+
+                if (code.Contains($"{t} =") &&
+                    float.TryParse(_showBig[2], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out float lim))
+                {
+                    int at = code.IndexOf("    out.color0.w", StringComparison.Ordinal);
+                    int eol = code.IndexOf('\n', at);
+
+                    if (at >= 0 && eol > at)
+                    {
+                        code = code.Insert(eol + 1,
+                            $"    if (abs({t}) > {lim.ToString("G9", System.Globalization.CultureInfo.InvariantCulture)}f) {{ " +
+                            "out.color0 = float4(0.0f, 1.0f, 0.0f, 1.0f); }\n");
+
+                        Logger.Warning?.PrintMsg(LogClass.Gpu,
+                            $"diagnostic: {DebugLabel} greens pixels where |{t}| > {lim}");
+                    }
+                }
             }
 
             // Diagnostic: bound the bit-trick reciprocal. The guard below only matches

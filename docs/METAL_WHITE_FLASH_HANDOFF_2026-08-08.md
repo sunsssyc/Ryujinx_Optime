@@ -650,3 +650,29 @@ zero depends on the values in frame.
 
 Not established: which term diverges, or whether denormals are involved. That is the next
 question, and it is now a question about four expressions rather than about the frame.
+
+### Marking pixels inside the shader
+
+RYUJINX_METAL_SHOW_NEARZERO=label:temp:eps greens pixels where |temp| < eps;
+RYUJINX_METAL_SHOW_BIG=label:temp:limit greens them where |temp| > limit. Both leave the
+rest of the frame untouched, which matters: an earlier version replaced the output
+unconditionally and destroyed the very artefact it was meant to correlate against - the
+frame stopped going white, so "no marked pixels" said nothing.
+
+Both need the shader recompiled, so bump CodeGenVersion, and check the log line that
+confirms the patch applied before believing a negative.
+
+Results so far, and their standing:
+
+  - |temp_297| < 1e-3 (the reciprocal's denominator): never green while flat frames still
+    appeared as white. The denominator is not approaching zero, so that hypothesis is out.
+  - |temp_290| > 100 (the factor shared by all three numerators): inconclusive, the
+    capture window caught no flat frames at all.
+
+Which leaves both shared factors still open. The three channels saturate together, so it
+is either temp_311 (the reciprocal) or temp_290 (shared by the three fma numerators), and
+the second has not had a fair test yet.
+
+The reproduction window is the practical constraint: about two minutes before the in-game
+sun moves off the angle, against eight to ten minutes per experiment. Anything that needs
+several arms should hot-swap them inside one session rather than relaunch.
