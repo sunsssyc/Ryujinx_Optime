@@ -735,3 +735,29 @@ result.
 Thresholds cost three runs here. |temp_290| > 100 and |temp_313| > 1 were both picked
 without knowing the value range, and both came back empty in a way that looks like a
 negative result but only says the threshold was outside the data.
+
+### The marker is sound, and both candidate shaders come out clean
+
+Positive control: with an always-true threshold the frame turns green (78,241,66). The
+marker fires, and the marked shader's pixels reach the screen. So the negatives below are
+real results rather than a broken tool.
+
+On frames that come out flat, with 14 flat frames sampled:
+
+    ee89b4e471373459   |temp_290| > 100    0.0% of pixels
+    ee89b4e471373459   |temp_313| > 1      0.0%
+    ee89b4e471373459   |temp_313| > 0.9    0.0%
+    3ebc3a8f6b77cc8f   |temp_44|  > 1      0.0%
+
+Neither the shader the bisect named nor the tonemap downstream of it reaches a value that
+would saturate its clamps, on exactly the frames that turn white. Whatever produces the
+white is not the arithmetic in either of them going out of range.
+
+What still stands: dropping ee89b4e471373459's draws takes flat frames to 0 of 24, and
+painting it fills the viewport. What that means is now open again - a shader can be
+necessary for the artefact without being where the bad value appears.
+
+One reading that fits all of it: on flat frames these draws do not execute at all. That
+would explain zero marked pixels (nothing runs, nothing marks) and leave the frame showing
+whatever the load action brought in. It does not obviously explain why removing the draws
+entirely stops the artefact, so it needs testing rather than adopting.
