@@ -789,3 +789,20 @@ Where that leaves the search: the flash is still unattributed to any shader. The
 facts remain the ones measured outside this codebase - the 1600x896 G-buffer is intact on
 flat frames, the 1920x1080 surface holds the flat value, and there is now a save that
 reproduces at about 10%.
+
+### The sampling was never powerful enough
+
+The second bisect, scored with a renders-a-picture check:
+
+    control  66.7  20.8  50.0  25.0  41.7  41.7   (%)
+    arms     41.7  45.8  45.8  45.8  41.7
+
+Every arm rendered a picture, and every arm landed inside a control that swings from 20.8%
+to 66.7% between adjacent samples. Twenty-four screenshots per arm cannot resolve anything
+against that. Every A/B in this file taken at that sample size should be read as
+inconclusive rather than negative, including the ones reported as ruling something out.
+
+tools/ab_probe.sh replaces it: the probe classifies every presented frame with the
+criterion calibrated on 300 captures, giving hundreds of samples per arm in the same wall
+clock, and each arm reports mean luma so an arm that blanked the screen is labelled rather
+than scored.
