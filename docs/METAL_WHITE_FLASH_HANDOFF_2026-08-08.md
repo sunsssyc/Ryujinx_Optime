@@ -1087,3 +1087,24 @@ against a 49.1% baseline, a partial response of the kind an ordering fault gives
 To confirm rather than adopt it, the input has to be sampled at the point of use instead of
 at present - either in the shader (which has been the reliable instrument all session) or
 by blitting the input immediately before the composite pass opens.
+
+### The strict barrier does not fix it, measured with enough samples this time
+
+Hot-swapped inside one session against the reproducing save, alternating twice, scored on
+probe counts rather than screenshots, with mean luma checked so a blanked arm would be
+visible:
+
+    barrier off   574/1440 = 39.9%   luma 153
+    barrier ON    485/1260 = 38.5%   luma 153
+    barrier off   597/1380 = 43.3%   luma 164
+    barrier ON    541/1260 = 42.9%   luma 154
+
+About 1300 samples per arm puts the standard error near 1.4 points, and both differences
+are inside that. Both arms render a picture. Forcing every guest TextureBarrier to split the
+pass does nothing to the rate.
+
+That is a real negative, unlike the earlier version of this measurement, which used 24
+screenshots and the criterion that was later withdrawn. It removes the obvious lever for
+the ordering reading without disposing of the reading itself - the ordering that matters
+would then be between render passes, which Metal sequences on its own, or somewhere the
+guest's barrier calls never reach.
