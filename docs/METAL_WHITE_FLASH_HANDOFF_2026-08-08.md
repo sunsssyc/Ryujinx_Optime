@@ -941,3 +941,70 @@ Note this also weakens the "Metal fast-math disabled: 31.9%, unchanged" exclusio
 Under IEEE semantics fmax(NaN, 0) returns 0, so clamp(NaN) would be 0 and the frame would
 go black rather than white - and a black frame scores zero flat frames by a saturation
 criterion, not 31.9%. That result needs re-taking with the shader cache invalidated.
+
+## Session 2026-08-09, later: the composite is innocent and the fault is upstream
+
+Four in-shader experiments on ee89b4e471373459, each confirmed applied in the log and each
+carrying its own control in the same picture. Judged from compositor screenshots against
+the reproducing save.
+
+### 1. It runs, and its clamps do not saturate
+
+Unconditional magenta corner plus green where all three clamped products reach 1. Over 26
+shots with 7 flat frames: the stamp is on every frame including all the flat ones, and the
+green never fires. So the shader executes and its pixels are the frame - but that alone
+proved nothing, because a marker that never fires looks exactly like a value that never
+occurs, which is how four earlier runs in this file were misread.
+
+### 2. Nothing downstream applies a gain
+
+A four step grey ramp (0.05/0.15/0.35/0.70) written into the corner reads 55/96/149/212 on
+flat frames and 55/96/149/212 on ordinary ones, while every pixel around it goes to 254.
+
+This replaced a magenta stamp that could not answer the question. (1, 0, 1) x 3.5 is far
+above any tonemap's white point, so it clips identically under a gain of one or a thousand
+- and its colour being unchanged had been read here as proof that no gain exists. A
+saturated probe cannot detect saturation. That inference was wrong and is withdrawn.
+
+### 3. The flat frame is uniform, not overexposed
+
+Bracketing the output by band - green at or above 3.0, blue from 0.9 - gives 100% blue on
+flat frames, never green, with ordinary frames at 7% blue as the control. The output is
+near 1.0, not the 3.5 that saturating clamp(x, 0, 1) * 3.5 would produce.
+
+So temp_313 sits around 0.26-0.86 on a flat frame, which is exactly why every marker testing
+it for a large magnitude or for NaN came back false. Those markers were right. The
+saturation hypothesis they were built on was not, and this restores the earliest measurement
+in these notes: a flat frame is a constant colour, uncorrelated with the scene.
+
+### 4. The coordinate is fine and the fetched texel is white
+
+Drawing the fetch coordinate into red and green with flatness in blue: on flat frames the
+coordinate ramps across the screen exactly as on ordinary ones, spread 131/119 against
+130/124. It does not collapse, so every pixel reads a different texel.
+
+Drawing the fetched texel instead:
+
+    flat frames    fetched R mean 254, G mean 254
+    ordinary       fetched R mean 151-163, G mean 149-158
+
+The 1600x896 RG11B10Float scene texture this pass reads is already uniformly white on flat
+frames. The composite reproduces it faithfully. It is not the fault.
+
+The binding is not the fault either: the input slot reports the same root pointer
+(0x9DB944C80) on flat frames and on the frames before them, so this is the same host
+texture holding different content, not a draw sampling the wrong texture.
+
+### What this overturns, and where to go next
+
+It sits against "seven 1600x896 scene targets: none flat" from the GPU trace. That reading
+examined every 1600x896 texture in the capture without knowing which one the failing draw
+had bound, and judged flatness by dominant-value share. This measures what the failing draw
+actually reads, per pixel, on the frames that are actually flat, with a positive control in
+the same image. Where they disagree, this one is the stronger evidence - but the
+disagreement is worth resolving rather than assuming.
+
+Next: apply the same method one stage earlier. Find what writes 0x9DB944C80, and ask
+whether its inputs are white on the same frames. The technique now has a track record -
+show the value, keep an artefact indicator in a spare channel, and never test a magnitude
+against a threshold picked without knowing the range.
