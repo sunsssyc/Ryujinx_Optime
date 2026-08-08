@@ -463,5 +463,19 @@ a second attachment, which is why it was not done in the session that found this
 Correction to the design above: it still names a keep texture as a colour attachment, and
 the fault being avoided happens while the driver builds an attachment descriptor. It
 removes the second render pass and the CPU sync, but not the attachment itself, so it may
-well hit the same fault. Whatever is wrong with using that texture as an attachment has to
-be understood first - that is the blocking question, not which pass does the writing.
+well hit the same fault.
+
+And the attachment's properties are not what is wrong with it. Logged side by side at
+creation, the keep texture and the surface the game renders into are identical in every
+respect:
+
+    keep: 1920x1080 RGBA8Unorm usage=ShaderRead,ShaderWrite,RenderTarget,PixelFormatView
+          storage=Managed samples=1 type=Type2D mips=1 slices=1
+    src : 1920x1080 RGBA8Unorm usage=ShaderRead,ShaderWrite,RenderTarget,PixelFormatView
+          storage=Managed samples=1 type=Type2D mips=1 slices=1
+
+So the search moves to lifetime and ownership rather than description. The game's surfaces
+are held by the texture cache and reach the encoder through the paths that register them
+against a command buffer; this one is held by a static field and only ever attached from
+Present. With the guard on, the process still exits during a camera sweep - after six
+sweeps in one run, two in another - so whatever it is, it is timing dependent.

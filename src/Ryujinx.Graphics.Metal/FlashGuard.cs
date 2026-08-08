@@ -97,6 +97,24 @@ namespace Ryujinx.Graphics.Metal
             _keepWidth = like.Width;
             _keepHeight = like.Height;
 
+            // The blocking question is why attaching this faults the driver, and the
+            // answer has to start with how it differs from the surface the game itself
+            // renders to. Printed once.
+            MTLTexture kt = _keep.GetHandle();
+            MTLTexture st = like.GetHandle();
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu,
+                $"flashguard keep: {_keep.Width}x{_keep.Height} fmt={_keep.MtlFormat} " +
+                $"usage={kt.Usage} storage={kt.StorageMode} samples={kt.SampleCount} " +
+                $"type={kt.TextureType} mips={kt.MipmapLevelCount} slices={kt.ArrayLength} " +
+                $"ptr=0x{kt.NativePtr:X}");
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu,
+                $"flashguard src : {like.Width}x{like.Height} fmt={like.MtlFormat} " +
+                $"usage={st.Usage} storage={st.StorageMode} samples={st.SampleCount} " +
+                $"type={st.TextureType} mips={st.MipmapLevelCount} slices={st.ArrayLength} " +
+                $"ptr=0x{st.NativePtr:X}");
+
             return _keep;
         }
 
