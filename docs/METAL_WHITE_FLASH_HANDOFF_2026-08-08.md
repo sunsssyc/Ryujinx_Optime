@@ -628,3 +628,25 @@ mechanism was wrong:
 
 Open: why temp_297 reaches zero here and not on hardware. It traces back through several
 hundred temps, and the integer wrapping in the bit trick is already hardware-correct.
+
+### What the denominator is made of
+
+    temp_297 = sum of several bit-trick reciprocal and inverse-sqrt terms
+      temp_255 = bitTrick(temp_237) * ...        seed 0x7EF07EBB
+      temp_171 = bitTrick(temp_161) * ...        seed 0x7EF07EBB
+      temp_212 = bitTrick(temp_207) * ...        seed 0x7EF07EBB
+      temp_173 = as_float((as_uint(temp_157) >> 1) + cb) * ...   fast inverse sqrt
+
+An accumulation of 1/x and 1/sqrt(x) terms, whose sum is then reciprocated - a weight
+normalisation. Every integer add in the chain now carries wrapping semantics, including
+the `int(temp_166) + cb` site, so the integer side matches the hardware.
+
+That leaves the float side: denormal handling (NVIDIA flushes in some modes, Metal need
+not) or precision differences in these approximations. Since the denominator is a sum,
+small per-term differences can carry it across zero for particular scenes, and crossing
+zero is what makes the reciprocal blow up and saturate all three channels together. It
+also explains why the fault is view dependent and intermittent - whether the sum crosses
+zero depends on the values in frame.
+
+Not established: which term diverges, or whether denormals are involved. That is the next
+question, and it is now a question about four expressions rather than about the frame.
