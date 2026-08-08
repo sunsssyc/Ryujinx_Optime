@@ -761,3 +761,31 @@ One reading that fits all of it: on flat frames these draws do not execute at al
 would explain zero marked pixels (nothing runs, nothing marks) and leave the frame showing
 whatever the load action brought in. It does not obviously explain why removing the draws
 entirely stops the artefact, so it needs testing rather than adopting.
+
+## Retraction: the shader was never identified
+
+The bisect result above is an artefact. Mean luma per arm, from the same screenshots:
+
+    control          194.5   (min 156, max 248 - ordinary frames with flashes)
+    other five arms  179-213 (same, all inside the control's spread)
+    ee89b4e471373459   3.5   (min 3, max 3)
+
+Dropping that shader's draws leaves a black screen, not a flash-free one. "0 of 24 flat"
+was true only because a black frame cannot reach the flat-frame threshold. The bisect
+showed that removing this shader removes the picture, which is what a full-screen pass
+does, and says nothing about the flash. The paint test agrees for the same reason: filling
+its output fills the viewport because it draws the viewport.
+
+Everything built on that identification is void - the in-shader markers finding nothing
+anomalous were measuring an innocent shader, and the tonemap below it was only implicated
+because it sat downstream of the wrong suspect.
+
+The error is the same one this file already records twice: a classifier reporting "the
+artefact is absent" when the real answer is "the image is absent". The bisect harness must
+check that each arm still renders a picture - mean luma in the control's range - before its
+rate is comparable to anything.
+
+Where that leaves the search: the flash is still unattributed to any shader. The reliable
+facts remain the ones measured outside this codebase - the 1600x896 G-buffer is intact on
+flat frames, the 1920x1080 surface holds the flat value, and there is now a save that
+reproduces at about 10%.
