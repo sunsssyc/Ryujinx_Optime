@@ -12,6 +12,7 @@
 
     <ItemGroup>
       <EmbeddedResource Include="Shaders\Blit.metal" />
+      <EmbeddedResource Include="Shaders\KeepGood.metal" />
       <EmbeddedResource Include="Shaders\BlitMs.metal" />
       <EmbeddedResource Include="Shaders\Present.metal" />
       <EmbeddedResource Include="Shaders\ChangeBufferStride.metal" />

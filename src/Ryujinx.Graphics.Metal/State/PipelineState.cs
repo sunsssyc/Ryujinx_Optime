@@ -224,7 +224,14 @@ namespace Ryujinx.Graphics.Metal
                 Logger.Error?.PrintMsg(LogClass.Gpu, $"Failed to create Render Pipeline State: {StringHelper.String(error.LocalizedDescription)}");
             }
 
-            program.AddGraphicsPipeline(ref Internal, pipelineState);
+            // Only cache valid pipeline states. A null/zero PSO from a failed
+            // compilation would otherwise be returned on every subsequent draw
+            // with the same pipeline configuration, causing a SIGSEGV in the
+            // Metal driver's drawPrimitives.
+            if (pipelineState.NativePtr != IntPtr.Zero)
+            {
+                program.AddGraphicsPipeline(ref Internal, pipelineState);
+            }
 
             return pipelineState;
         }

@@ -1,5 +1,4 @@
 using Ryujinx.Common.Logging;
-using SharpMetal.Metal;
 using System;
 using System.IO;
 using System.Runtime.Versioning;
@@ -20,6 +19,8 @@ namespace Ryujinx.Graphics.Metal
     {
         private const string TriggerPath = "/tmp/ryujinx-draw-ring-dump";
         private const int Capacity = 1 << 15;
+        private const int DumpDrawCount = 1 << 13;
+        private const int DumpFrameCount = 5;
 
         public static readonly bool Enabled =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_DRAW_RING") == "1";
@@ -40,15 +41,11 @@ namespace Ryujinx.Graphics.Metal
             public byte Topology;
             public int Count;
             public int Instances;
-            public ulong Cb1A;
-            public ulong Cb1B;
-            public ulong Cb4A;
-            public ulong Cb4B;
+            public ulong Cb1Address;
+            public ulong Cb3Address;
+            public ulong WatchTex8ResourceId;
+            public ulong WatchTexAResourceId;
             public bool Watched;
-            public IntPtr Tex0;
-            public IntPtr Tex1;
-            public IntPtr Tex2;
-            public IntPtr Tex3;
         }
 
         private struct ReadbackEntry
@@ -66,6 +63,11 @@ namespace Ryujinx.Graphics.Metal
         private static int _cursor;
         private static int _frame;
         private static string _frameWall = string.Empty;
+
+        public static bool IsWatched(string program)
+        {
+            return Enabled && _watch.Length != 0 && program != null && Array.IndexOf(_watch, program) >= 0;
+        }
 
         public static void OnPresent()
         {
@@ -103,7 +105,7 @@ namespace Ryujinx.Graphics.Metal
             entry.Head = head;
         }
 
-        public static unsafe void Record(EncoderState state, Ryujinx.Graphics.GAL.PrimitiveTopology topology, int count, int instances)
+        public static void Record(EncoderState state, Ryujinx.Graphics.GAL.PrimitiveTopology topology, int count, int instances)
         {
             Program program = state.RenderProgram;
             Texture rt0 = state.RenderTargets[0];
@@ -114,7 +116,10 @@ namespace Ryujinx.Graphics.Metal
             entry.Seq = Ryujinx.Graphics.GAL.DrawDiagnostics.BindSequence;
             entry.Frame = _frame;
             entry.Program = program?.DebugLabel;
-            entry.Rt0 = rt0 != null ? rt0.GetHandle().NativePtr : IntPtr.Zero;
+            // Do not call GetHandle from diagnostics. The render pass already owns
+            // the target, and touching Metal objects here perturbs the lifetime race
+            // we are trying to observe.
+            entry.Rt0 = IntPtr.Zero;
             entry.RtW = rt0?.Width ?? 0;
             entry.RtH = rt0?.Height ?? 0;
             entry.Topology = (byte)topology;
@@ -122,79 +127,19 @@ namespace Ryujinx.Graphics.Metal
             entry.Instances = instances;
             entry.Watched = false;
 
-            entry.Tex0 = entry.Tex1 = entry.Tex2 = entry.Tex3 = IntPtr.Zero;
-
-            // Fullscreen passes: record which textures are actually bound, so a flash
-            // frame can be compared against neighbours - a different handle means the
-            // alias/pool resolution picked another texture, the same handle means the
-            // content itself was wrong.
-            if (count <= 6 && instances == 1)
-            {
-                int found = 0;
-
-                for (int i = 0; i < state.TextureRefs.Length && found < 4; i++)
-                {
-                    TextureBase storage = state.TextureRefs[i].Storage;
-
-                    if (storage != null)
-                    {
-                        IntPtr handle = storage.GetHandle().NativePtr;
-
-                        switch (found++)
-                        {
-                            case 0: entry.Tex0 = handle; break;
-                            case 1: entry.Tex1 = handle; break;
-                            case 2: entry.Tex2 = handle; break;
-                            case 3: entry.Tex3 = handle; break;
-                        }
-                    }
-                }
-            }
-
-            if (_watch.Length != 0 && entry.Program != null && Array.IndexOf(_watch, entry.Program) >= 0)
+            if (IsWatched(entry.Program))
             {
                 entry.Watched = true;
-                (entry.Cb1A, entry.Cb1B) = ReadUniformHead(state, 20); // fp_c1
-                (entry.Cb4A, entry.Cb4B) = ReadUniformHead(state, 23); // fp_c4
+                entry.Cb1Address = state.DrawRingCb1Address;
+                entry.Cb3Address = state.DrawRingCb3Address;
+                entry.WatchTex8ResourceId = state.DrawRingTex8ResourceId;
+                entry.WatchTexAResourceId = state.DrawRingTexAResourceId;
             }
-        }
-
-        private static unsafe (ulong, ulong) ReadUniformHead(EncoderState state, int binding)
-        {
-            if ((uint)binding >= (uint)state.UniformBufferRefs.Length)
-            {
-                return (0, 0);
-            }
-
-            BufferRef bufferRef = state.UniformBufferRefs[binding];
-
-            if (bufferRef.Buffer == null)
-            {
-                return (0, 0);
-            }
-
-            MTLBuffer buffer = bufferRef.Buffer.GetUnsafe().Value;
-
-            if (buffer.NativePtr == IntPtr.Zero)
-            {
-                return (0, 0);
-            }
-
-            int offset = bufferRef.Range?.Offset ?? 0;
-
-            if ((ulong)(offset + 16) > buffer.Length)
-            {
-                return (0, 0);
-            }
-
-            ulong* data = (ulong*)((byte*)buffer.Contents + offset);
-
-            return (data[0], data[1]);
         }
 
         private static void Dump()
         {
-            string path = $"/tmp/ryujinx-draw-ring-{DateTime.Now:HHmmss}.txt";
+            string path = $"/tmp/ryujinx-draw-ring-{DateTime.Now:HHmmss-fff}.txt";
 
             try
             {
@@ -208,10 +153,15 @@ namespace Ryujinx.Graphics.Metal
                 {
                     ref ReadbackEntry rb = ref _readbacks[i & (Capacity - 1)];
 
+                    if (rb.Frame < _frame - DumpFrameCount)
+                    {
+                        continue;
+                    }
+
                     text.AppendLine($"rb f={rb.Frame} off=0x{rb.Offset:X} size={rb.Size} head={rb.Head:X16}");
                 }
 
-                int start = Math.Max(0, _cursor - Capacity);
+                int start = Math.Max(0, _cursor - DumpDrawCount);
 
                 for (int i = start; i < _cursor; i++)
                 {
@@ -222,12 +172,8 @@ namespace Ryujinx.Graphics.Metal
 
                     if (entry.Watched)
                     {
-                        text.Append($" c1={entry.Cb1A:X16}{entry.Cb1B:X16} c4={entry.Cb4A:X16}{entry.Cb4B:X16}");
-                    }
-
-                    if (entry.Tex0 != IntPtr.Zero)
-                    {
-                        text.Append($" tex={entry.Tex0:X},{entry.Tex1:X},{entry.Tex2:X},{entry.Tex3:X}");
+                        text.Append($" c1addr={entry.Cb1Address:X16} c3addr={entry.Cb3Address:X16}" +
+                            $" t8id={entry.WatchTex8ResourceId:X16} tAid={entry.WatchTexAResourceId:X16}");
                     }
 
                     text.AppendLine();

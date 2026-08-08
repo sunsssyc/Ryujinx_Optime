@@ -33,6 +33,20 @@ class CommandBufferEncoder
 
     internal MTLCommandEncoder? CurrentEncoder { get; private set; }
 
+    private static long _renderEncoderGeneration;
+
+    /// <summary>
+    /// Incremented for every render command encoder created, process-wide.
+    ///
+    /// Encoders are released as soon as their pass ends, so the allocator readily hands
+    /// the same address straight back for the next one. Any cache that identifies an
+    /// encoder by its pointer alone therefore cannot tell a fresh encoder from the one
+    /// it replaced, and would wrongly consider its state already applied - leaving the
+    /// new encoder without a pipeline and faulting the driver on the first draw. Pairing
+    /// the pointer with this counter makes each encoder distinct.
+    /// </summary>
+    internal static long RenderEncoderGeneration => System.Threading.Volatile.Read(ref _renderEncoderGeneration);
+
     private MTLCommandBuffer _commandBuffer;
     private IEncoderFactory _encoderFactory;
 
@@ -126,14 +140,17 @@ class CommandBufferEncoder
             {
                 case EncoderType.Blit:
                     BlitEncoder.EndEncoding();
+                    ObjcOwnership.Release(BlitEncoder.NativePtr);
                     CurrentEncoder = null;
                     break;
                 case EncoderType.Compute:
                     ComputeEncoder.EndEncoding();
+                    ObjcOwnership.Release(ComputeEncoder.NativePtr);
                     CurrentEncoder = null;
                     break;
                 case EncoderType.Render:
                     RenderEncoder.EndEncoding();
+                    ObjcOwnership.Release(RenderEncoder.NativePtr);
                     CurrentEncoder = null;
                     _encoderFactory?.OnRenderPassEnded(_endingFor);
                     break;
@@ -152,6 +169,12 @@ class CommandBufferEncoder
         _endingFor = EncoderType.None;
 
         MTLRenderCommandEncoder renderCommandEncoder = _encoderFactory.CreateRenderCommandEncoder();
+
+        System.Threading.Interlocked.Increment(ref _renderEncoderGeneration);
+
+        // Pass encoders are autoreleased with no pool on this thread; own them
+        // for the pass lifetime (released in EndCurrentPass after EndEncoding).
+        ObjcOwnership.Retain(renderCommandEncoder.NativePtr);
 
         CurrentEncoder = renderCommandEncoder;
         CurrentEncoderType = EncoderType.Render;
@@ -219,6 +242,8 @@ class CommandBufferEncoder
         using MTLBlitPassDescriptor descriptor = new();
         MTLBlitCommandEncoder blitCommandEncoder = _commandBuffer.BlitCommandEncoder(descriptor);
 
+        ObjcOwnership.Retain(blitCommandEncoder.NativePtr);
+
         CurrentEncoder = blitCommandEncoder;
         CurrentEncoderType = EncoderType.Blit;
         return blitCommandEncoder;
@@ -231,6 +256,8 @@ class CommandBufferEncoder
         _endingFor = EncoderType.None;
 
         MTLComputeCommandEncoder computeCommandEncoder = _encoderFactory.CreateComputeCommandEncoder();
+
+        ObjcOwnership.Retain(computeCommandEncoder.NativePtr);
 
         CurrentEncoder = computeCommandEncoder;
         CurrentEncoderType = EncoderType.Compute;

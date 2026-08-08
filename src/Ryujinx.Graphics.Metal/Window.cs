@@ -103,6 +103,11 @@ namespace Ryujinx.Graphics.Metal
 
                 CAMetalDrawable drawable = new(ObjectiveC.IntPtr_objc_msgSend(_metalLayer, "nextDrawable"));
 
+                // nextDrawable returns an autoreleased object and this thread has no
+                // draining pool; own it until presentation (released after
+                // PresentDrawable in Pipeline.Present).
+                ObjcOwnership.Retain(drawable.NativePtr);
+
                 _width = (int)drawable.Texture.Width;
                 _height = (int)drawable.Texture.Height;
 

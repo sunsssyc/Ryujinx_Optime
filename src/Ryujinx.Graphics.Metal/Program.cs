@@ -5,6 +5,7 @@ using Ryujinx.Graphics.Shader;
 using SharpMetal.Foundation;
 using SharpMetal.Metal;
 using System;
+using System.Text.RegularExpressions;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -126,6 +127,18 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_PAINT") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        private static readonly string[] _guardDivideLabels =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_DIVIDE") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        private static readonly string[] _clampFetchLabels =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_CLAMP_FETCH") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        private static readonly string[] _showInputLabels =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOW_INPUT") ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private string PatchSourceForDiagnostics(ShaderSource shader)
         {
             if (shader.Stage != ShaderStage.Fragment)
@@ -151,6 +164,69 @@ namespace Ryujinx.Graphics.Metal
                 Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: compiling {DebugLabel} fragment painting solid magenta");
 
                 code = code.Replace("return out;", "out.color0 = float4(1.0f, 0.0f, 1.0f, 1.0f);\n    return out;");
+            }
+
+            // Diagnostic: make every reciprocal in this fragment finite. The guest
+            // tonemap divides by a luminance it builds from the scene plus an unclamped
+            // bloom term, then clamps the result to [0,1] - so a luminance near zero
+            // sends every channel to 1.0 and the whole scene turns white. Bounding the
+            // divisor tests whether that division is what produces the white frames.
+            if (_guardDivideLabels.Length != 0 &&
+                Array.IndexOf(_guardDivideLabels, DebugLabel) >= 0)
+            {
+                string guarded = Regex.Replace(
+                    code,
+                    @"= 1\.0f / (temp_\d+);",
+                    m => $"= 1.0f / (abs({m.Groups[1].Value}) < 1e-6f ? (({m.Groups[1].Value}) < 0.0f ? -1e-6f : 1e-6f) : {m.Groups[1].Value});");
+
+                if (guarded != code)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: compiling {DebugLabel} fragment with guarded reciprocals");
+                    code = guarded;
+                }
+            }
+
+            // Diagnostic: clamp every texture fetch this fragment makes to the same
+            // ceiling the shader already applies to one of them. The guest tonemap
+            // clamps its scene fetch to 10000 but adds an unclamped second fetch on top,
+            // then divides by a luminance built from the sum - so an out-of-range value
+            // arriving through the unclamped path saturates all three channels to 1.0.
+            if (_clampFetchLabels.Length != 0 &&
+                Array.IndexOf(_clampFetchLabels, DebugLabel) >= 0)
+            {
+                string clamped = Regex.Replace(
+                    code,
+                    @"(temp_\d+) = (textures\.[A-Za-z0-9_]+\.sample\([^;]*\)\.xyz);",
+                    m => $"{m.Groups[1].Value} = min({m.Groups[2].Value}, float3(10000.0f));");
+
+                if (clamped != code)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: compiling {DebugLabel} fragment with clamped texture fetches");
+                    code = clamped;
+                }
+            }
+
+            // Diagnostic: replace the tonemapped colour with a coarse magnitude scale of
+            // the luminance it was given, so a screenshot reads off how large the input
+            // actually is. The curve this shader implements asymptotes to 1.0, so a
+            // blown-out input produces white legitimately - this separates "the shader
+            // is wrong" from "the shader was handed an out-of-range image".
+            if (_showInputLabels.Length != 0 &&
+                Array.IndexOf(_showInputLabels, DebugLabel) >= 0 &&
+                code.Contains("return out;"))
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: compiling {DebugLabel} fragment showing input magnitude");
+
+                // Output the scene fetch itself. The shader's curve asymptotes to 1.0,
+                // so it turns white either because it read white or because it read
+                // something huge - showing the raw fetch tells those apart directly,
+                // with no mid-frame readback to perturb the frame.
+                // Show the sample coordinates instead of the sample. Skipping the draws
+                // that fill this texture changes nothing and the output is uniform, which
+                // is what happens when every pixel reads the same texel - so the question
+                // is whether the interpolated coordinate collapses on those frames.
+                code = code.Replace("return out;",
+                    "out.color0 = float4(temp_0, temp_1, 0.0f, 1.0f);\n    return out;");
             }
 
             return code;

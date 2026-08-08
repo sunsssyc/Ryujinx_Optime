@@ -21,6 +21,7 @@ namespace Ryujinx.Graphics.Metal
 
         private readonly ISampler _samplerLinear;
         private readonly ISampler _samplerNearest;
+        private readonly IProgram _programKeepGood;
         private readonly IProgram _programColorBlitF;
         private readonly IProgram _programColorBlitI;
         private readonly IProgram _programColorBlitU;
@@ -78,6 +79,12 @@ namespace Ryujinx.Graphics.Metal
             ResourceLayout presentResourceLayout = new ResourceLayoutBuilder()
                 .Add(ResourceStages.Vertex | ResourceStages.Fragment, ResourceType.UniformBuffer, 0)
                 .Add(ResourceStages.Fragment, ResourceType.TextureAndSampler, 0).Build();
+
+            string keepGoodSource = ReadMsl("KeepGood.metal");
+            _programKeepGood = new Program(renderer, device, [
+                new ShaderSource(keepGoodSource, ShaderStage.Fragment, TargetLanguage.Msl),
+                new ShaderSource(keepGoodSource, ShaderStage.Vertex, TargetLanguage.Msl)
+            ], blitResourceLayout);
 
             string presentSource = ReadMsl("Present.metal");
             string presentSourceF = presentSource.Replace("FORMAT", "float", StringComparison.Ordinal);
@@ -211,6 +218,55 @@ namespace Ryujinx.Graphics.Metal
 #pragma warning restore IDE0055
 
             return msl;
+        }
+
+        /// <summary>
+        /// Updates <paramref name="keep"/> with <paramref name="src"/> unless the source
+        /// is a flat frame, in which case the stored image is left alone. The decision is
+        /// made in the shader for the frame it applies to.
+        /// </summary>
+        public unsafe void UpdateKeepGood(CommandBufferScoped cbs, Texture src, Texture keep)
+        {
+            _pipeline.SwapState(_helperShaderState);
+
+            const int RegionBufferSize = 16;
+
+            _pipeline.SetTextureAndSampler(ShaderStage.Fragment, 0, src, _samplerLinear);
+
+            Span<float> region = stackalloc float[RegionBufferSize / sizeof(float)];
+            region[0] = 0f;
+            region[1] = 1f;
+            region[2] = 0f;
+            region[3] = 1f;
+
+            using ScopedTemporaryBuffer buffer = _renderer.BufferManager.ReserveOrCreate(cbs, RegionBufferSize);
+            buffer.Holder.SetDataUnchecked<float>(buffer.Offset, region);
+            _pipeline.SetUniformBuffers([new BufferAssignment(0, buffer.Range)]);
+
+            Span<Viewport> viewports = stackalloc Viewport[16];
+            viewports[0] = new Viewport(
+                new Rectangle<float>(0, 0, keep.Width, keep.Height),
+                ViewportSwizzle.PositiveX,
+                ViewportSwizzle.PositiveY,
+                ViewportSwizzle.PositiveZ,
+                ViewportSwizzle.PositiveW,
+                0f,
+                1f);
+
+            Span<Rectangle<int>> scissors = stackalloc Rectangle<int>[16];
+            scissors[0] = new Rectangle<int>(0, 0, keep.Width, keep.Height);
+
+            _pipeline.SetProgram(_programKeepGood);
+            _pipeline.SetRenderTargets([keep], null);
+            _pipeline.SetScissors(scissors);
+
+            // Load, never clear: the stored frame has to survive into the shader.
+            _pipeline.SetClearLoadAction(false);
+            _pipeline.SetViewports(viewports);
+            _pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+            _pipeline.Draw(4, 1, 0, 0, "Keep Good Frame");
+
+            _pipeline.SwapState(null);
         }
 
         public unsafe void BlitColor(

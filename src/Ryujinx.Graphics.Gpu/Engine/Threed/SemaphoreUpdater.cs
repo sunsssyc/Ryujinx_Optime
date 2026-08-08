@@ -145,6 +145,18 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         }
 
         /// <summary>
+        /// RYUJINX_SYNC_REPORTS=1 forces every counter report to complete before
+        /// command processing continues. Async counter results are written to guest
+        /// memory by a host-completion callback, unordered against processing-time
+        /// writes: a stale result landing on a guest address that was since reused
+        /// as a fence/progress word satisfies a poll early, and the guest rewrites
+        /// buffers that queued draws still read (single-frame wrong-binding washes,
+        /// six captures). Flushing at report time removes the reordering window.
+        /// </summary>
+        private static readonly bool _syncReports =
+            System.Environment.GetEnvironmentVariable("RYUJINX_SYNC_REPORTS") == "1";
+
+        /// <summary>
         /// Writes a GPU counter to guest memory.
         /// This also writes the current timestamp value.
         /// </summary>
@@ -187,6 +199,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 case ReportCounterType.TransformFeedbackPrimitivesWritten:
                     counter = _context.Renderer.ReportCounter(CounterType.TransformFeedbackPrimitivesWritten, resultHandler, 1f, false);
                     break;
+            }
+
+            if (_syncReports && counter != null)
+            {
+                counter.Flush();
             }
 
             _channel.MemoryManager.CounterCache.AddOrUpdate(gpuVa, counter);

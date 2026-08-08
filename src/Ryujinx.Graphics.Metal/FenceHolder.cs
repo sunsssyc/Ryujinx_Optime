@@ -16,6 +16,11 @@ namespace Ryujinx.Graphics.Metal
         {
             _fence = fence;
             _referenceCount = 1;
+
+            // Waiters (SyncManager) can hold this fence after the pool slot was
+            // recycled and released its own retain; keep the command buffer alive
+            // until the last reference is put.
+            ObjcOwnership.Retain(_fence.NativePtr);
         }
 
         public MTLCommandBuffer GetUnsafe()
@@ -51,6 +56,7 @@ namespace Ryujinx.Graphics.Metal
         {
             if (Interlocked.Decrement(ref _referenceCount) == 0)
             {
+                ObjcOwnership.Release(_fence.NativePtr);
                 _fence = default;
             }
         }

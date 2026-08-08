@@ -332,12 +332,30 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
                 return NvInternalResult.InvalidInput;
             }
 
+            // "Expired" here can also mean the threshold lies BEYOND the submitted max:
+            // MinCompare treats any not-yet-declared fence value as already passed. A
+            // wait racing the submit that declares the value then succeeds instantly
+            // with zero GPU progress - silent, timing-sensitive, and the guest goes on
+            // to rewrite buffers that queued draws still read. Log it (rare) and, under
+            // strict sync, fall through to the normal waiter path instead; the guest's
+            // own ioctl timeout still bounds genuinely invalid fences.
+            bool beyondMax = (int)(fence.Value - _device.System.HostSyncpoint.ReadSyncpointMaxValue(fence.Id)) > 0;
+
             // First try to check if the syncpoint is already expired on the CPU side
             if (_device.System.HostSyncpoint.IsSyncpointExpired(fence.Id, fence.Value))
             {
-                value = _device.System.HostSyncpoint.ReadSyncpointMinValue(fence.Id);
+                if (beyondMax)
+                {
+                    Logger.Warning?.Print(LogClass.ServiceNv,
+                        $"EventWait fence {fence.Id}:{fence.Value} beyond submitted max - legacy instant-expire{(StrictSync.Enabled ? " suppressed" : "")}");
+                }
 
-                return NvInternalResult.Success;
+                if (!(beyondMax && StrictSync.Enabled))
+                {
+                    value = _device.System.HostSyncpoint.ReadSyncpointMinValue(fence.Id);
+
+                    return NvInternalResult.Success;
+                }
             }
 
             // Try to invalidate the CPU cache and check for expiration again.
@@ -346,9 +364,12 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
             // Has the fence already expired?
             if (_device.System.HostSyncpoint.IsSyncpointExpired(fence.Id, fence.Value))
             {
-                value = newCachedSyncpointValue;
+                if (!(beyondMax && StrictSync.Enabled))
+                {
+                    value = newCachedSyncpointValue;
 
-                return NvInternalResult.Success;
+                    return NvInternalResult.Success;
+                }
             }
 
             // If the timeout is 0, directly return.

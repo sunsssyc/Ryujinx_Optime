@@ -88,6 +88,7 @@ namespace Ryujinx.Graphics.Metal
         private const int MaxResidentTracked = 8192;
 
         private IntPtr _encoder;
+        private long _generation = -1;
         private Field _known;
 
         private readonly (IntPtr Buffer, ulong Offset)[] _vertexBuffers = new (IntPtr, ulong)[BufferSlots];
@@ -98,6 +99,15 @@ namespace Ryujinx.Graphics.Metal
         private readonly HashSet<(IntPtr Resource, MTLResourceUsage Usage, MTLRenderStages Stages)> _resident = [];
 
         public IntPtr PipelineState;
+
+        /// <summary>
+        /// Whether the last <see cref="EncoderStateManager.SetRenderPipelineState"/> left a
+        /// usable pipeline on the encoder. Kept separate from <see cref="PipelineState"/>,
+        /// which persists across encoders: zeroing that field to signal failure would make
+        /// the draw guard skip the very call that repairs it, blacking out every later frame.
+        /// </summary>
+        public bool PipelineValid;
+
         public IntPtr DepthStencilState;
         public ColorF BlendColor;
         public MTLDepthClipMode DepthClipMode;
@@ -184,12 +194,19 @@ namespace Ryujinx.Graphics.Metal
 
         private void Retarget(MTLRenderCommandEncoder encoder)
         {
-            if (_encoder == encoder.NativePtr)
+            // The pointer alone is not an identity: a released encoder's address is
+            // routinely reused by the next one, and treating that as the same encoder
+            // keeps every field marked applied, so nothing is ever set on the new
+            // encoder - the first draw then faults in the driver on a null pipeline.
+            long generation = CommandBufferEncoder.RenderEncoderGeneration;
+
+            if (_encoder == encoder.NativePtr && _generation == generation)
             {
                 return;
             }
 
             _encoder = encoder.NativePtr;
+            _generation = generation;
             _known = default;
             _vertexBound = 0;
             _fragmentBound = 0;
@@ -214,6 +231,13 @@ namespace Ryujinx.Graphics.Metal
         private EncoderState _currentState;
 
         internal readonly EncoderState CurrentEncoderState => _currentState;
+
+        /// <summary>
+        /// True when the render encoder has a valid, non-null pipeline state set.
+        /// Draw calls must check this and skip when false to avoid a SIGSEGV in
+        /// the Metal driver (async shader compilation can leave the PSO null).
+        /// </summary>
+        public bool HasValidRenderPipeline => _applied.PipelineValid;
 
         public readonly IndexBufferState IndexBuffer => _currentState.IndexBuffer;
         public readonly PrimitiveTopology Topology => _currentState.Topology;
@@ -553,8 +577,34 @@ namespace Ryujinx.Graphics.Metal
                 targetless.DefaultRasterSampleCount = 1;
             }
 
+            // Record what this pass writes, so the present-time sweep can walk the chain
+            // from scene colour to present source. Bookkeeping only - no Metal call, no
+            // pass split, so it cannot move the race it is measuring.
+            if (FrameProbe.Enabled)
+            {
+                FrameProbe.NotePass(_currentState.RenderTargets, _currentState.DepthStencil);
+            }
+
+            if (HdrPassProbe.Enabled)
+            {
+                HdrPassProbe.BeginPassAll(_currentState.RenderTargets, _currentState.ClearLoadAction);
+            }
+
+            if (HdrPassProbe.Enabled)
+            {
+                HdrPassProbe.NoteWriterProgram(_currentState.RenderTargets[0], _currentState.RenderProgram?.DebugLabel);
+            }
+
+            bool countSamples = _pipeline.SupportsSamplesPassed;
+            ulong visibilityOffset = countSamples ? _pipeline.PrepareCounterRenderPass(renderPassDescriptor) : 0;
+
             // Initialise Encoder
             MTLRenderCommandEncoder renderCommandEncoder = _pipeline.CommandBuffer.RenderCommandEncoder(renderPassDescriptor);
+
+            if (countSamples)
+            {
+                renderCommandEncoder.SetVisibilityResultMode(MTLVisibilityResultMode.Counting, visibilityOffset);
+            }
 
             return renderCommandEncoder;
         }
@@ -708,6 +758,16 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _currentState.Dirty &= ~DirtyFlags.RenderAll;
+
+            // A pipeline that failed to build has to stay dirty. Clearing the flag would
+            // stop the state cache from ever rebuilding it, and since the draw guard skips
+            // on an invalid pipeline, nothing would ever run SetRenderPipelineState again -
+            // one failed build would blank every later frame. Retrying each draw instead
+            // lets the draw recover as soon as async shader compilation finishes.
+            if (!_applied.PipelineValid)
+            {
+                _currentState.Dirty |= DirtyFlags.RenderPipeline;
+            }
         }
 
         public void RebindComputeState(MTLComputeCommandEncoder computeCommandEncoder)
@@ -809,6 +869,17 @@ namespace Ryujinx.Graphics.Metal
         {
             MTLRenderPipelineState pipelineState = _currentState.Pipeline.CreateRenderPipeline(_device, _currentState.RenderProgram);
 
+            // Compilation failed (async shader compile not finished, or a genuinely
+            // bad pipeline). Leave whatever is on the encoder alone and report the
+            // state as unusable, so the caller skips the draw instead of letting the
+            // Metal driver dereference a null pipeline inside drawPrimitives.
+            _applied.PipelineValid = pipelineState.NativePtr != IntPtr.Zero;
+
+            if (!_applied.PipelineValid)
+            {
+                return;
+            }
+
             if (!_applied.Knows(renderCommandEncoder, AppliedRenderState.Field.Pipeline) ||
                 _applied.PipelineState != pipelineState.NativePtr)
             {
@@ -882,6 +953,10 @@ namespace Ryujinx.Graphics.Metal
             if (prg.VertexFunction != IntPtr.Zero)
             {
                 _currentState.RenderProgram = prg;
+                _currentState.DrawRingCb1Address = 0;
+                _currentState.DrawRingCb3Address = 0;
+                _currentState.DrawRingTex8ResourceId = 0;
+                _currentState.DrawRingTexAResourceId = 0;
 
                 SignalDirty(DirtyFlags.RenderPipeline | DirtyFlags.ArgBuffers);
             }
@@ -1743,6 +1818,21 @@ namespace Ryujinx.Graphics.Metal
             return (gpuAddress, nativePtr);
         }
 
+        private static bool _identitySampling;
+
+        internal static void RefreshSamplingToggle()
+        {
+            try
+            {
+                _identitySampling = System.IO.File.Exists("/tmp/ryujinx-metal-identity-sample") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-identity-sample").Trim() == "1";
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; the next frame picks it up.
+            }
+        }
+
         private readonly (ulong gpuAddress, IntPtr nativePtr) AddressForTexture(ref TextureRef texture)
         {
             TextureBase storage = texture.Storage;
@@ -1757,7 +1847,13 @@ namespace Ryujinx.Graphics.Metal
                     textureBuffer.RebuildStorage(false);
                 }
 
-                MTLTexture mtlTexture = storage.GetHandle(_pipeline.Cbs);
+                // A/B switch: sampling normally goes through the swizzled view, while
+                // attachments use the identity handle. RG11B10Float carries no alpha, so
+                // a swizzle that routes a component to alpha or to one samples as exactly
+                // 1.0 - which is the value the tonemap reads on a white frame.
+                MTLTexture mtlTexture = _identitySampling
+                    ? storage.GetIdentityHandle(_pipeline.Cbs)
+                    : storage.GetHandle(_pipeline.Cbs);
 
                 gpuAddress = mtlTexture.GpuResourceID._impl;
                 nativePtr = mtlTexture.NativePtr;
@@ -1775,7 +1871,13 @@ namespace Ryujinx.Graphics.Metal
 
             if (storage != null)
             {
-                MTLTexture mtlTexture = storage.GetHandle(_pipeline.Cbs);
+                // A/B switch: sampling normally goes through the swizzled view, while
+                // attachments use the identity handle. RG11B10Float carries no alpha, so
+                // a swizzle that routes a component to alpha or to one samples as exactly
+                // 1.0 - which is the value the tonemap reads on a white frame.
+                MTLTexture mtlTexture = _identitySampling
+                    ? storage.GetIdentityHandle(_pipeline.Cbs)
+                    : storage.GetHandle(_pipeline.Cbs);
 
                 gpuAddress = mtlTexture.GpuResourceID._impl;
                 nativePtr = mtlTexture.NativePtr;
@@ -1823,6 +1925,7 @@ namespace Ryujinx.Graphics.Metal
         private readonly void UpdateAndBind(Program program, uint setIndex, ref readonly RenderEncoderBindings bindings)
         {
             ResourceBindingSegment[] bindingSegments = program.BindingSegments[setIndex];
+            bool captureToneMapBindings = ToneMapProbe.IsWatched(program.DebugLabel);
 
             if (bindingSegments.Length == 0)
             {
@@ -1864,6 +1967,32 @@ namespace Ryujinx.Graphics.Metal
 
                             ref BufferRef buffer = ref _currentState.UniformBufferRefs[index];
                             (ulong gpuAddress, IntPtr nativePtr) = AddressForBuffer(ref buffer);
+
+                            if (HdrPassProbe.Enabled && buffer.Buffer != null && index == 20 &&
+                                program.DebugLabel == "3ebc3a8f6b77cc8f")
+                            {
+                                MTLBuffer tb = buffer.Buffer.GetUnsafe().Value;
+                                HdrPassProbe.NoteToneMapWeights(tb.Contents, buffer.Range?.Offset ?? 0);
+                            }
+
+                            if (HdrPassProbe.Enabled && buffer.Buffer != null &&
+                                HdrPassProbe.IsWatchedTarget(_currentState.RenderTargets[0]))
+                            {
+                                MTLBuffer ub = buffer.Buffer.GetUnsafe().Value;
+                                HdrPassProbe.NoteUniform(ub.Contents, buffer.Range?.Offset ?? 0, buffer.Range?.Size ?? 256);
+                            }
+
+                            if (captureToneMapBindings)
+                            {
+                                if (index == 20)
+                                {
+                                    _currentState.DrawRingCb1Address = gpuAddress;
+                                }
+                                else if (index == 22)
+                                {
+                                    _currentState.DrawRingCb3Address = gpuAddress;
+                                }
+                            }
 
                             MTLRenderStages renderStages = 0;
 
@@ -1934,6 +2063,36 @@ namespace Ryujinx.Graphics.Metal
                                 (ulong gpuAddress, IntPtr nativePtr) = hasTexture
                                     ? AddressForTexture(ref texture)
                                     : (0, IntPtr.Zero);
+
+                                if (HdrPassProbe.Enabled && hasTexture &&
+                                    HdrPassProbe.IsWatchedTarget(_currentState.RenderTargets[0]))
+                                {
+                                    HdrPassProbe.NoteSampled(nativePtr, texture.Storage);
+                                }
+
+                                if (HdrPassProbe.Enabled && hasTexture)
+                                {
+                                    HdrPassProbe.NoteSampledUnderWatchedTarget(
+                                        index, texture.Storage, _currentState.RenderTargets[0]);
+
+                                    if (program.DebugLabel == "3ebc3a8f6b77cc8f")
+                                    {
+                                        HdrPassProbe.NoteToneMapSlotId(index, gpuAddress, texture.Storage);
+                                    }
+                                }
+
+                                if (captureToneMapBindings && hasTexture)
+                                {
+                                    if (index == 8)
+                                    {
+                                        _currentState.DrawRingTex8ResourceId = gpuAddress;
+                                    }
+                                    else if (index == 10)
+                                    {
+                                        _currentState.DrawRingTexAResourceId = gpuAddress;
+                                    }
+                                }
+
                                 ulong samplerId = hasSampler && texture.Sampler != null
                                     ? texture.Sampler.Get(_pipeline.Cbs).Value.GpuResourceID._impl
                                     : 0;
@@ -1993,6 +2152,17 @@ namespace Ryujinx.Graphics.Metal
                                 for (int i = 0; i < textures.Length; i++)
                                 {
                                     TextureRef texture = textures[i];
+
+                                    // The tonemap's inputs were only ever recorded from the
+                                    // non-array branch. If they actually arrive through an
+                                    // array segment, everything compared so far was a
+                                    // different texture than the one the shader samples.
+                                    if (HdrPassProbe.Enabled && hasTexture &&
+                                        program.DebugLabel == "3ebc3a8f6b77cc8f")
+                                    {
+                                        HdrPassProbe.NoteToneMapInput(1000 + binding + i, texture.Storage);
+                                    }
+
                                     (ulong gpuAddress, IntPtr nativePtr) = hasTexture
                                         ? AddressForTexture(ref texture)
                                         : (0, IntPtr.Zero);

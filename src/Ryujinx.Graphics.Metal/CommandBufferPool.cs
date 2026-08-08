@@ -41,6 +41,13 @@ namespace Ryujinx.Graphics.Metal
 #endif
 
                 CommandBuffer = queue.CommandBuffer(descriptor);
+
+                // The command buffer is autoreleased and nothing drains a pool on
+                // this thread; take ownership (released in WaitAndDecrementRef).
+                // The descriptor is owned (+1 from new) and was leaked per rent.
+                ObjcOwnership.Retain(CommandBuffer.NativePtr);
+                descriptor.Dispose();
+
                 Fence = new FenceHolder(CommandBuffer);
 
                 Encoders.Initialize(CommandBuffer, stateManager);
@@ -280,6 +287,11 @@ namespace Ryujinx.Graphics.Metal
             entry.Dependants.Clear();
             entry.Waitables.Clear();
             entry.Fence?.Dispose();
+
+            // Balance the retain taken in Use(). The FenceHolder holds its own
+            // retain for waiters that outlive this slot.
+            ObjcOwnership.Release(entry.CommandBuffer.NativePtr);
+            entry.CommandBuffer = default;
         }
 
         public void Dispose()

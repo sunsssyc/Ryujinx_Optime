@@ -109,6 +109,15 @@ namespace Ryujinx.Graphics.Metal
         public readonly TextureRef[] TextureRefs = new TextureRef[Constants.MaxTextureBindings * 2];
         public readonly ImageRef[] ImageRefs = new ImageRef[Constants.MaxImageBindings * 2];
 
+        // Diagnostic-only copies of the GPU addresses already produced while
+        // encoding the watched tone-map pass's argument buffers. Keeping these
+        // here lets DrawRing observe the actual encoded values without calling
+        // GetHandle() or dereferencing Metal resources after the binding prepass.
+        public ulong DrawRingCb1Address;
+        public ulong DrawRingCb3Address;
+        public ulong DrawRingTex8ResourceId;
+        public ulong DrawRingTexAResourceId;
+
         public ArrayRef<TextureArray>[] TextureArrayRefs = [];
         public ArrayRef<ImageArray>[] ImageArrayRefs = [];
 

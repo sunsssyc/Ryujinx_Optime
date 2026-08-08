@@ -87,6 +87,13 @@ namespace Ryujinx.Graphics.Metal
                         }
                         else
                         {
+                            // This submit is invisible to SyncManager's flush counter, so
+                            // sync handles created after it share a FlushId with handles
+                            // from before it and coalesced signalling can mark them done
+                            // off an earlier command buffer's completion. Register the
+                            // boundary so coalescing cannot cross this hidden submit.
+                            _renderer.RegisterFlush();
+
                             scoped = cbp.ReturnAndRent(scoped);
                         }
                     }

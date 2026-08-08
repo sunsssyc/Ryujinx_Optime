@@ -41,6 +41,7 @@ namespace Ryujinx.Graphics.Metal
         internal SyncManager SyncManager { get; private set; }
         internal AutoFlushCounter AutoFlush { get; private set; }
         internal FrameCapture FrameCapture { get; private set; }
+        internal CounterManager Counters { get; private set; }
 
         internal HashSet<Program> Programs { get; }
         internal HashSet<SamplerHolder> Samplers { get; }
@@ -76,10 +77,25 @@ namespace Ryujinx.Graphics.Metal
             BufferManager = new BufferManager(_device, this, _pipeline);
 
             _pipeline.InitEncoderStateManager(BufferManager);
+            Counters = new CounterManager(_device, this);
 
             BackgroundResources = new BackgroundResources(this);
             HelperShader = new HelperShader(_device, this, _pipeline);
             SyncManager = new SyncManager(this);
+
+            PresentProbe.Init(_device);
+            FlashGuard.Init(_device);
+
+            if (HdrPassProbe.Enabled)
+            {
+                HdrPassProbe.Initialize(_device);
+            }
+
+            if (FrameProbe.Enabled)
+            {
+                FrameProbe.Initialize(_device);
+                FrameProbe.SetPipeline(_pipeline);
+            }
         }
 
         public void BackgroundContextAction(Action action, bool alwaysBackground = false)
@@ -273,7 +289,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void UpdateCounters()
         {
-            // https://developer.apple.com/documentation/metal/gpu_counters_and_counter_sample_buffers/creating_a_counter_sample_buffer_to_store_a_gpu_s_counter_data_during_a_pass?language=objc
+            Counters.Update();
         }
 
         public void PreFrame()
@@ -283,15 +299,27 @@ namespace Ryujinx.Graphics.Metal
 
         public ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler, float divisor, bool hostReserved)
         {
-            // https://developer.apple.com/documentation/metal/gpu_counters_and_counter_sample_buffers/creating_a_counter_sample_buffer_to_store_a_gpu_s_counter_data_during_a_pass?language=objc
-            CounterEvent counterEvent = new();
+            if (type == CounterType.SamplesPassed && Counters.SupportsSamplesPassed)
+            {
+                // Close the encoder so every draw before the report contributes to the
+                // old counter and subsequent draws use the new counter's result buffer.
+                _pipeline.EndCurrentPass(PassEndReason.Counter);
+
+                return Counters.Report(resultHandler, divisor);
+            }
+
+            CounterEvent counterEvent = new(null);
             resultHandler?.Invoke(counterEvent, type == CounterType.SamplesPassed ? (ulong)1 : 0);
             return counterEvent;
         }
 
         public void ResetCounter(CounterType type)
         {
-            // https://developer.apple.com/documentation/metal/gpu_counters_and_counter_sample_buffers/creating_a_counter_sample_buffer_to_store_a_gpu_s_counter_data_during_a_pass?language=objc
+            if (type == CounterType.SamplesPassed && Counters.SupportsSamplesPassed)
+            {
+                _pipeline.EndCurrentPass(PassEndReason.Counter);
+                Counters.Reset();
+            }
         }
 
         public void WaitSync(ulong id, HostSyncWaitSource source = HostSyncWaitSource.Unknown)
@@ -338,6 +366,7 @@ namespace Ryujinx.Graphics.Metal
                 sampler.Dispose();
             }
 
+            Counters.Dispose();
             _pipeline.Dispose();
             _window.Dispose();
         }

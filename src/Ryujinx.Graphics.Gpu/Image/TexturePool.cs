@@ -148,6 +148,17 @@ namespace Ryujinx.Graphics.Gpu.Image
         private readonly Dictionary<Texture, TextureAliasList> _aliasLists;
 
         /// <summary>
+        /// RYUJINX_DISABLE_FORMAT_ALIASES=1 bypasses the fork's format-alias textures
+        /// and returns the parent texture as upstream does. A/B probe: the aliases are
+        /// separate host objects whose content arrives via copy dependencies, so a sync
+        /// that lands one frame late hands a post-process pass one frame of stale
+        /// content - the exact shape of the observed single-frame washes - and their
+        /// lifetime is tied to churning parents, a suspect for the footprint blow-up.
+        /// </summary>
+        private static readonly bool _disableFormatAliases =
+            System.Environment.GetEnvironmentVariable("RYUJINX_DISABLE_FORMAT_ALIASES") == "1";
+
+        /// <summary>
         /// Linked list node used on the texture pool cache.
         /// </summary>
         public LinkedListNode<TexturePool> CacheNode { get; set; }
@@ -320,7 +331,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             ref readonly TextureDescriptor descriptor = ref GetInternal(id, out texture);
 
-            if (texture != null && formatInfo.Format != 0 && texture.Format != formatInfo.Format)
+            if (texture != null && formatInfo.Format != 0 && texture.Format != formatInfo.Format && !_disableFormatAliases)
             {
                 if (!_aliasLists.TryGetValue(texture, out TextureAliasList aliasList))
                 {

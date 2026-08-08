@@ -32,4 +32,7 @@ Coding Guidelines
 Project Docs
 =================
 
-To be added. Many project files will contain basic XML docs for key functions and classes in the meantime.
+- [macOS native Metal current handoff (2026-08-02)](METAL_CURRENT_HANDOFF_2026-08-02.md)
+- [macOS native Metal full investigation history](METAL_HANDOFF_2026-07-18.md)
+
+Many project files also contain XML documentation for key functions and classes.

@@ -14,6 +14,42 @@ namespace Ryujinx.Graphics.Metal
         private Auto<DisposableTexture> _identitySwizzleHandle;
         private readonly bool _identityIsDifferent;
 
+        // FrameProbe identifies writers by native pointer. A view gets its own
+        // MTLTexture pointer, so without this map a write through a view looks like a
+        // write to a texture nobody ever presents - which is how "nobody writes the
+        // presented image" got reported once and had to be retracted.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<IntPtr, IntPtr> _viewRoots = new();
+
+        public IntPtr ViewRootPtr { get; private set; }
+
+        /// <summary>
+        /// One identity per underlying resource, set unconditionally at construction: the
+        /// storage this texture was created from, or its own storage when it is not a
+        /// view. Ownership comparisons must use this. Comparing MTLTexture handles does
+        /// not work - a view, the identity view and the swizzled view of one resource all
+        /// carry different pointers, so a write through any of them looks like a write to
+        /// a texture nobody touches. That failure produced three separate "nothing writes
+        /// this" conclusions in the white-flash investigation, each of them wrong.
+        /// </summary>
+        public IntPtr CanonicalPtr { get; private set; }
+
+        public static IntPtr ResolveViewRoot(IntPtr native)
+        {
+            IntPtr current = native;
+
+            for (int depth = 0; depth < 8; depth++)
+            {
+                if (!_viewRoots.TryGetValue(current, out IntPtr parent) || parent == current)
+                {
+                    break;
+                }
+
+                current = parent;
+            }
+
+            return current;
+        }
+
         public Texture(MTLDevice device, MetalRenderer renderer, Pipeline pipeline, TextureCreateInfo info) : base(device, renderer, pipeline, info)
         {
             MTLPixelFormat pixelFormat = FormatTable.GetFormat(Info.Format);
@@ -61,6 +97,10 @@ namespace Ryujinx.Graphics.Metal
             }
 
             MtlFormat = pixelFormat;
+
+            // Not a view: its own storage is the canonical identity.
+            CanonicalPtr = _identitySwizzleHandle.GetUnsafe().Value.NativePtr;
+
             descriptor.Dispose();
         }
 
@@ -169,6 +209,31 @@ namespace Ryujinx.Graphics.Metal
             MtlFormat = pixelFormat;
             FirstLayer = firstLayer;
             FirstLevel = firstLevel;
+            CanonicalPtr = sourceTexture.NativePtr;
+
+            // Instrument-only bookkeeping: keep it off the normal path entirely so the
+            // probe cannot change the behaviour it is measuring. HdrPassProbe needs the
+            // same map: comparing raw handles instead of view roots is what made writes
+            // through a view look like writes to a texture nobody touches.
+            if (FrameProbe.Enabled || HdrPassProbe.Enabled)
+            {
+                ViewRootPtr = ResolveViewRoot(sourceTexture.NativePtr);
+
+                if (ViewRootPtr != IntPtr.Zero)
+                {
+                    if (identityTexture.NativePtr != IntPtr.Zero)
+                    {
+                        _viewRoots[identityTexture.NativePtr] = ViewRootPtr;
+                    }
+
+                    MTLTexture handle = GetIdentityHandle();
+
+                    if (handle.NativePtr != IntPtr.Zero)
+                    {
+                        _viewRoots[handle.NativePtr] = ViewRootPtr;
+                    }
+                }
+            }
         }
 
         public void PopulateRenderPassAttachment(MTLRenderPassColorAttachmentDescriptor descriptor, CommandBufferScoped cbs)
@@ -260,6 +325,9 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int firstLayer, int firstLevel)
         {
+            HdrPassProbe.NoteNonRenderWrite(destination as Texture, "copy");
+            HdrPassProbe.NoteCopyInto(destination as Texture);
+
             CommandBufferScoped cbs = Pipeline.Cbs;
 
             TextureBase src = this;
@@ -306,6 +374,9 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int srcLayer, int dstLayer, int srcLevel, int dstLevel)
         {
+            HdrPassProbe.NoteNonRenderWrite(destination as Texture, "copyLayer");
+            HdrPassProbe.NoteCopyInto(destination as Texture);
+
             CommandBufferScoped cbs = Pipeline.Cbs;
 
             TextureBase src = this;
@@ -354,6 +425,9 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, Extents2D srcRegion, Extents2D dstRegion, bool linearFilter)
         {
+            HdrPassProbe.NoteNonRenderWrite(destination as Texture, "blitScaled");
+            HdrPassProbe.NoteCopyInto(destination as Texture);
+
             if (!Renderer.CommandBufferPool.OwnedByCurrentThread)
             {
                 Logger.Warning?.PrintMsg(LogClass.Gpu, "Metal doesn't currently support scaled blit on background thread.");
@@ -606,6 +680,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data)
         {
+            HdrPassProbe.NoteNonRenderWrite(this, "upload");
+
             CommandBufferScoped cbs = Pipeline.Cbs;
             MTLBlitCommandEncoder blitCommandEncoder = Pipeline.GetOrCreateBlitEncoder();
 
@@ -632,6 +708,10 @@ namespace Ryujinx.Graphics.Metal
 
                 if ((uint)endOffset > (uint)dataSpan.Length)
                 {
+                    // Truncated upload: without this the staging BufferHolder (and
+                    // its device buffer sized for the full upload) leaked.
+                    buffer.Dispose();
+
                     return;
                 }
 

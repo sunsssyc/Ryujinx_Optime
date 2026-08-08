@@ -140,7 +140,17 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
                 {
                     Logger.Warning?.Print(LogClass.ServiceNv, "GPU processing thread is too slow, waiting on CPU...");
 
-                    Fence.Wait(gpuContext, Timeout.InfiniteTimeSpan);
+                    bool timedOut = Fence.Wait(gpuContext, Timeout.InfiniteTimeSpan);
+
+                    // The manager silently caps the infinite wait at 1 second. Returning
+                    // success on that timeout tells the guest its fence passed while the
+                    // GPU thread is still >1s behind, so the game rewrites the binding
+                    // constant buffers that queued draws will still read - observed as a
+                    // one-frame full-screen wash when the words are consumed torn.
+                    while (timedOut && StrictSync.Enabled)
+                    {
+                        timedOut = Fence.Wait(gpuContext, Timeout.InfiniteTimeSpan);
+                    }
 
                     ResetFailingState();
 

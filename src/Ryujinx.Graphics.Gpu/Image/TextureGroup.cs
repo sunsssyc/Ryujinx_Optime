@@ -46,6 +46,9 @@ namespace Ryujinx.Graphics.Gpu.Image
         private static readonly System.Collections.Concurrent.ConcurrentQueue<string> _reloadRecords = new();
         private static System.Threading.Timer _reloadDrainTimer;
 
+        // Flash-diagnosis counters live in Ryujinx.Common.SyncMemDiag
+        // so both Gpu and Metal can access them.
+
         private static void RecordReload(string entry)
         {
             _reloadRecords.Enqueue(entry);
@@ -388,7 +391,19 @@ namespace Ryujinx.Graphics.Gpu.Image
                     // A write from CPU will do a flush before writing its data, which should unset this.
                     if (modified)
                     {
+                        if (handleDirty)
+                        {
+                            Ryujinx.Common.SyncMemDiag.IncrementProtected();
+                        }
                         handleDirty = false;
+                    }
+                    else if (handleDirty)
+                    {
+                        Ryujinx.Common.SyncMemDiag.IncrementUpload();
+                    }
+                    else
+                    {
+                        Ryujinx.Common.SyncMemDiag.IncrementClean();
                     }
 
                     // Evaluate if any copy dependencies need to be fulfilled. A few rules:
@@ -1722,6 +1737,8 @@ namespace Ryujinx.Graphics.Gpu.Image
             {
                 return;
             }
+
+            Ryujinx.Common.SyncMemDiag.IncrementFlushAction();
 
             bool isGpuThread = _context.IsGpuThread();
 

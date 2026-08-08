@@ -27,6 +27,7 @@ namespace Ryujinx.Graphics.Metal
         FragmentDependency,
         ColorMask,
         RenderTargets,
+        Counter,
         BlitEncoder,
         ComputeEncoder,
         Dispose,
@@ -66,6 +67,7 @@ namespace Ryujinx.Graphics.Metal
         private ulong _drawCountAtPassStart;
 
         public ulong DrawCount { get; private set; }
+        public ulong DispatchCount { get; private set; }
 
         public MTLCommandBuffer CommandBuffer;
 
@@ -76,6 +78,7 @@ namespace Ryujinx.Graphics.Metal
         internal CommandBufferScoped Cbs { get; private set; }
         internal CommandBufferEncoder Encoders => Cbs.Encoders;
         internal EncoderType CurrentEncoderType => Encoders.CurrentEncoderType;
+        internal bool SupportsSamplesPassed => _renderer.Counters.SupportsSamplesPassed;
 
         public Pipeline(MTLDevice device, MetalRenderer renderer)
         {
@@ -205,6 +208,15 @@ namespace Ryujinx.Graphics.Metal
             _encoderStateManager.SignalBufferRebind();
         }
 
+        // FrameProbe needs the live command buffer to blit a patch out mid-frame. Both
+        // are thin wrappers so the probe never reaches into pipeline internals itself.
+        internal CommandBufferScoped CurrentCbs => Cbs;
+
+        internal void EndCurrentPassForProbe()
+        {
+            EndCurrentPass(PassEndReason.Unspecified);
+        }
+
         public void EndCurrentPass(PassEndReason reason = PassEndReason.Unspecified)
         {
             _pendingPassEndReason = reason;
@@ -224,6 +236,13 @@ namespace Ryujinx.Graphics.Metal
             };
 
             _passEndReasons[(int)reason]++;
+
+            if (PresentProbe.Enabled)
+            {
+                ulong drawsInPass = DrawCount - _drawCountAtPassStart;
+                PresentProbe.RecordPass(_presentCount, reason, drawsInPass);
+                HdrPassProbe.EndPass(drawsInPass, reason);
+            }
         }
 
         // Diagnostic: how often a new pass uses an attachment set seen among the
@@ -280,6 +299,11 @@ namespace Ryujinx.Graphics.Metal
             return _encoderStateManager.CreateRenderCommandEncoder();
         }
 
+        public ulong PrepareCounterRenderPass(MTLRenderPassDescriptor descriptor)
+        {
+            return _renderer.Counters.PrepareRenderPass(descriptor, Cbs);
+        }
+
         public MTLComputeCommandEncoder CreateComputeCommandEncoder()
         {
             return _encoderStateManager.CreateComputeCommandEncoder();
@@ -293,8 +317,22 @@ namespace Ryujinx.Graphics.Metal
 
         private (IntPtr Handle, int W, int H) _lastPresented;
 
+        [ThreadStatic]
+        private static IntPtr _frameAutoreleasePool;
+
         public void Present(CAMetalDrawable drawable, Texture src, Extents2D srcRegion, Extents2D dstRegion, bool isLinear, bool useFsrSharpener, float scalingFilterLevel)
         {
+            // Drain everything autoreleased on the render thread since the last
+            // present (encoders, command buffers, drawables and their driver-side
+            // shadows), then open the next frame's pool. Without this the thread
+            // has no pool at all and every autoreleased +1 is permanent.
+            if (_frameAutoreleasePool != IntPtr.Zero)
+            {
+                ObjcOwnership.objc_autoreleasePoolPop(_frameAutoreleasePool);
+            }
+
+            _frameAutoreleasePool = ObjcOwnership.objc_autoreleasePoolPush();
+
             if (_logPresent)
             {
                 // Log only when the presented texture changes identity or size; a line
@@ -311,21 +349,85 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
+            _lastPresentSource = src;
+            _drawCountAtFrameStart = DrawCount;
+
+            if (_stainSweep)
+            {
+                // 24 steps over a ~3000 draw frame, cycling so the whole range is covered
+                // several times inside one trigger window.
+                _stainAtDraw = (_presentCount % 24) * 128;
+                PresentProbe.NoteStainIndex(_stainAtDraw);
+            }
+
             _renderer.FrameCapture.CurrentCommandBuffer = CommandBuffer;
             _renderer.FrameCapture.OnPresentBegin();
 
             AppliedRenderState.RefreshToggle();
+            FlashGuard.RefreshToggle();
+            RefreshBarrierToggle();
+            EncoderStateManager.RefreshSamplingToggle();
 
             if (DrawRing.Enabled)
             {
                 DrawRing.OnPresent();
             }
 
+            if (ToneMapProbe.Enabled)
+            {
+                ToneMapProbe.OnPresent();
+            }
+
+            if (PresentProbe.Enabled)
+            {
+                PresentProbe.OnPresent(Cbs, src, DrawCount, DispatchCount);
+            }
+
             // TODO: Clean this up
             TextureCreateInfo textureInfo = new((int)drawable.Texture.Width, (int)drawable.Texture.Height, (int)drawable.Texture.Depth, (int)drawable.Texture.MipmapLevelCount, (int)drawable.Texture.SampleCount, 0, 0, 0, Format.B8G8R8A8Unorm, 0, Target.Texture2D, SwizzleComponent.Red, SwizzleComponent.Green, SwizzleComponent.Blue, SwizzleComponent.Alpha);
             Texture dst = new(_device, _renderer, this, textureInfo, drawable.Texture, 0, 0);
 
-            if (useFsrSharpener)
+            // Positive control for the stain probe: staining here must turn the presented
+            // frame green. If it does not, the stain never took effect and a "no green
+            // ever came back" result from the post-present stain means nothing.
+            if (_stainBeforePresent)
+            {
+                // A pass may still be open here; creating an encoder on top of one is an
+                // immediate driver assertion. The post-present stain happens after
+                // EndCurrentPass and so never hit this.
+                EndCurrentPass(PassEndReason.Unspecified);
+
+                MTLRenderPassDescriptor pre = new();
+                MTLRenderPassColorAttachmentDescriptor pa = pre.ColorAttachments.Object(0);
+                pa.Texture = src.GetIdentityHandle(Cbs);
+                pa.LoadAction = MTLLoadAction.Clear;
+                pa.StoreAction = MTLStoreAction.Store;
+                pa.ClearColor = new MTLClearColor { red = 0.0, green = 1.0, blue = 0.0, alpha = 1.0 };
+
+                MTLRenderCommandEncoder preEncoder = CommandBuffer.RenderCommandEncoder(pre);
+                preEncoder.EndEncoding();
+                pre.Dispose();
+            }
+
+            if (FlashGuard.Enabled)
+            {
+                // Fold this frame into the kept image unless it is flat, then present the
+                // kept image. Both steps decide in the shader, for the frame they apply
+                // to - the earlier variants either needed a CPU stall to know in time, or
+                // fell back on a surface from the rotation that was often flat itself.
+                Texture keep = FlashGuard.GetKeepTexture(_device, _renderer, this, src);
+
+                if (keep != null)
+                {
+                    _renderer.HelperShader.UpdateKeepGood(Cbs, src, keep);
+                    _renderer.HelperShader.BlitColor(Cbs, keep, dst, srcRegion, dstRegion, isLinear, true);
+                }
+                else
+                {
+                    _renderer.HelperShader.BlitColor(Cbs, src, dst, srcRegion, dstRegion, isLinear, true);
+                }
+            }
+            else if (useFsrSharpener)
             {
                 _renderer.HelperShader.PresentColor(Cbs, src, dst, srcRegion, dstRegion, scalingFilterLevel / 100f, true);
             }
@@ -334,9 +436,48 @@ namespace Ryujinx.Graphics.Metal
                 _renderer.HelperShader.BlitColor(Cbs, src, dst, srcRegion, dstRegion, isLinear, true);
             }
 
+            _guardPreviousSource = src;
+
             EndCurrentPass(PassEndReason.Present);
 
+            // Attribution-free probe: after presenting, stain the source a colour nothing
+            // in the scene produces. If it comes back on a later frame still stained, the
+            // frame was presented without anything having drawn into it - which separates
+            // "something wrote white" from "nothing wrote at all". Bookkeeping-based
+            // ownership tracking cannot answer this; its self-check says it is unreliable.
+            if (_stainPresentSource)
+            {
+                MTLRenderPassDescriptor stain = new();
+                MTLRenderPassColorAttachmentDescriptor a = stain.ColorAttachments.Object(0);
+                a.Texture = src.GetIdentityHandle(Cbs);
+                a.LoadAction = MTLLoadAction.Clear;
+                a.StoreAction = MTLStoreAction.Store;
+                a.ClearColor = new MTLClearColor { red = 0.0, green = 1.0, blue = 0.0, alpha = 1.0 };
+
+                MTLRenderCommandEncoder stainEncoder = CommandBuffer.RenderCommandEncoder(stain);
+                stainEncoder.EndEncoding();
+                stain.Dispose();
+            }
+
+            // Sample the present source and every target this frame passed through.
+            // Has to sit here: no pass is open, the present blit is already encoded, and
+            // the command buffer has not been committed yet. Read back several frames
+            // later, so nothing is ever waited on.
+            if (FrameProbe.Enabled)
+            {
+                FrameProbe.Capture(Cbs, src);
+            }
+
+            // The per-present view of the drawable's texture was never released -
+            // one native texture view leaked per frame. The Auto defers the native
+            // release until the command buffer using it completes, so this is safe
+            // before the flush below.
+            dst.Release();
+
             Cbs.CommandBuffer.PresentDrawable(drawable);
+
+            // Balance the ownership taken at nextDrawable time (Window.Present).
+            ObjcOwnership.Release(drawable.NativePtr);
 
             FlushCommandsImpl();
 
@@ -658,6 +799,8 @@ namespace Ryujinx.Graphics.Metal
                 new MTLSize { width = (ulong)groupsX, height = (ulong)groupsY, depth = (ulong)groupsZ },
                 new MTLSize { width = (ulong)localSize.X, height = (ulong)localSize.Y, depth = (ulong)localSize.Z });
 
+            DispatchCount++;
+
             if (debugGroupName != String.Empty)
             {
                 PopDebugGroup();
@@ -891,6 +1034,32 @@ namespace Ryujinx.Graphics.Metal
 
             AutoFlushPreDraw();
 
+            if (_hardSync && _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel == "3ebc3a8f6b77cc8f")
+            {
+                CommandBufferScoped previous = Cbs;
+                FlushCommandsImpl();
+                previous.CommandBuffer.WaitUntilCompleted();
+            }
+
+            if (HdrPassProbe.Enabled)
+            {
+                HdrPassProbe.NoteDraw(_encoderStateManager.RenderTargets[0],
+                    _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel, DrawCount);
+
+                bool isToneDraw = HdrPassProbe.TakeToneDrawFlag();
+
+                if (isToneDraw && HdrPassProbe.ShouldSkipToneDraw())
+                {
+                    return;
+                }
+
+                if (HdrPassProbe.ShouldSkipDraw(_encoderStateManager.RenderTargets[0]) ||
+                    HdrPassProbe.ShouldSkipPresentWrite(_encoderStateManager.RenderTargets[0]))
+                {
+                    return;
+                }
+            }
+
             if (DrawRing.Enabled)
             {
                 DrawRing.Record(_encoderStateManager.CurrentEncoderState, _encoderStateManager.Topology, vertexCount, instanceCount);
@@ -909,35 +1078,47 @@ namespace Ryujinx.Graphics.Metal
                 MTLBuffer mtlBuffer = buffer.Get(Cbs, 0, indexCount * sizeof(int)).Value;
 
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
+                ToneMapProbe.Record(_encoderStateManager.CurrentEncoderState);
 
-                // The converted-topology path must keep the draw's instancing and
-                // base vertex/instance: dropping them draws a single instance of
-                // the wrong vertices for instanced quad/fan draws.
-                renderCommandEncoder.DrawIndexedPrimitives(
-                    primitiveType,
-                    (ulong)indexCount,
-                    MTLIndexType.UInt32,
-                    mtlBuffer,
-                    0,
-                    (ulong)instanceCount,
-                    firstVertex,
-                    (ulong)firstInstance);
+                // Checked only after the encoder has applied state, since that is what
+                // builds the pipeline. A failed build leaves the encoder without a usable
+                // pipeline, and issuing the draw anyway faults inside the Metal driver.
+                // Only the draw is skipped - the cleanup below still has to run.
+                if (_encoderStateManager.HasValidRenderPipeline)
+                {
+                    // The converted-topology path must keep the draw's instancing and
+                    // base vertex/instance: dropping them draws a single instance of
+                    // the wrong vertices for instanced quad/fan draws.
+                    renderCommandEncoder.DrawIndexedPrimitives(
+                        primitiveType,
+                        (ulong)indexCount,
+                        MTLIndexType.UInt32,
+                        mtlBuffer,
+                        0,
+                        (ulong)instanceCount,
+                        firstVertex,
+                        (ulong)firstInstance);
+                }
             }
             else
             {
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
+                ToneMapProbe.Record(_encoderStateManager.CurrentEncoderState);
 
                 if (debugGroupName != String.Empty)
                 {
                     PushDebugGroup(debugGroupName);
                 }
 
-                renderCommandEncoder.DrawPrimitives(
-                    primitiveType,
-                    (ulong)firstVertex,
-                    (ulong)vertexCount,
-                    (ulong)instanceCount,
-                    (ulong)firstInstance);
+                if (_encoderStateManager.HasValidRenderPipeline)
+                {
+                    renderCommandEncoder.DrawPrimitives(
+                        primitiveType,
+                        (ulong)firstVertex,
+                        (ulong)vertexCount,
+                        (ulong)instanceCount,
+                        (ulong)firstInstance);
+                }
 
                 if (debugGroupName != String.Empty)
                 {
@@ -946,6 +1127,28 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _encoderStateManager.DisposeRenderTemporaryBuffers();
+
+            if (_stainSweep && _stainAtDraw >= 0 && _lastPresentSource != null &&
+                (int)(DrawCount - _drawCountAtFrameStart) == _stainAtDraw)
+            {
+                EndCurrentPass(PassEndReason.Unspecified);
+
+                MTLRenderPassDescriptor sweep = new();
+                MTLRenderPassColorAttachmentDescriptor sa = sweep.ColorAttachments.Object(0);
+                sa.Texture = _lastPresentSource.GetIdentityHandle(Cbs);
+                sa.LoadAction = MTLLoadAction.Clear;
+                sa.StoreAction = MTLStoreAction.Store;
+                sa.ClearColor = new MTLClearColor { red = 0.0, green = 1.0, blue = 0.0, alpha = 1.0 };
+
+                MTLRenderCommandEncoder sweepEncoder = CommandBuffer.RenderCommandEncoder(sweep);
+                sweepEncoder.EndEncoding();
+                sweep.Dispose();
+            }
+
+            if (_serializeDraws)
+            {
+                EndCurrentPass(PassEndReason.FragmentDependency);
+            }
 
             TraceDrawPost();
         }
@@ -989,6 +1192,25 @@ namespace Ryujinx.Graphics.Metal
 
             AutoFlushPreDraw();
 
+            if (HdrPassProbe.Enabled)
+            {
+                HdrPassProbe.NoteDraw(_encoderStateManager.RenderTargets[0],
+                    _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel, DrawCount);
+
+                bool isToneDraw = HdrPassProbe.TakeToneDrawFlag();
+
+                if (isToneDraw && HdrPassProbe.ShouldSkipToneDraw())
+                {
+                    return;
+                }
+
+                if (HdrPassProbe.ShouldSkipDraw(_encoderStateManager.RenderTargets[0]) ||
+                    HdrPassProbe.ShouldSkipPresentWrite(_encoderStateManager.RenderTargets[0]))
+                {
+                    return;
+                }
+            }
+
             if (DrawRing.Enabled)
             {
                 DrawRing.Record(_encoderStateManager.CurrentEncoderState, _encoderStateManager.Topology, indexCount, instanceCount);
@@ -1020,19 +1242,45 @@ namespace Ryujinx.Graphics.Metal
             if (mtlBuffer.NativePtr != IntPtr.Zero)
             {
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
+                ToneMapProbe.Record(_encoderStateManager.CurrentEncoderState);
 
-                renderCommandEncoder.DrawIndexedPrimitives(
-                    primitiveType,
-                    (ulong)finalIndexCount,
-                    type,
-                    mtlBuffer,
-                    (ulong)offset,
-                    (ulong)instanceCount,
-                    firstVertex,
-                    (ulong)firstInstance);
+                if (_encoderStateManager.HasValidRenderPipeline)
+                {
+                    renderCommandEncoder.DrawIndexedPrimitives(
+                        primitiveType,
+                        (ulong)finalIndexCount,
+                        type,
+                        mtlBuffer,
+                        (ulong)offset,
+                        (ulong)instanceCount,
+                        firstVertex,
+                        (ulong)firstInstance);
+                }
             }
 
             _encoderStateManager.DisposeRenderTemporaryBuffers();
+
+            if (_stainSweep && _stainAtDraw >= 0 && _lastPresentSource != null &&
+                (int)(DrawCount - _drawCountAtFrameStart) == _stainAtDraw)
+            {
+                EndCurrentPass(PassEndReason.Unspecified);
+
+                MTLRenderPassDescriptor sweep = new();
+                MTLRenderPassColorAttachmentDescriptor sa = sweep.ColorAttachments.Object(0);
+                sa.Texture = _lastPresentSource.GetIdentityHandle(Cbs);
+                sa.LoadAction = MTLLoadAction.Clear;
+                sa.StoreAction = MTLStoreAction.Store;
+                sa.ClearColor = new MTLClearColor { red = 0.0, green = 1.0, blue = 0.0, alpha = 1.0 };
+
+                MTLRenderCommandEncoder sweepEncoder = CommandBuffer.RenderCommandEncoder(sweep);
+                sweepEncoder.EndEncoding();
+                sweep.Dispose();
+            }
+
+            if (_serializeDraws)
+            {
+                EndCurrentPass(PassEndReason.FragmentDependency);
+            }
 
             TraceDrawPost();
         }
@@ -1051,6 +1299,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
+
             TraceDraw("DrawIndexedIndirect", 0, 0, offset, 0);
 
             MTLBuffer buffer = _renderer.BufferManager
@@ -1065,13 +1314,16 @@ namespace Ryujinx.Graphics.Metal
             {
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
 
-                renderCommandEncoder.DrawIndexedPrimitives(
-                    primitiveType,
-                    type,
-                    indexBuffer,
-                    (ulong)indexOffset,
-                    buffer,
-                    (ulong)(indirectBuffer.Offset + offset));
+                if (_encoderStateManager.HasValidRenderPipeline)
+                {
+                    renderCommandEncoder.DrawIndexedPrimitives(
+                        primitiveType,
+                        type,
+                        indexBuffer,
+                        (ulong)indexOffset,
+                        buffer,
+                        (ulong)(indirectBuffer.Offset + offset));
+                }
             }
 
             _encoderStateManager.DisposeRenderTemporaryBuffers();
@@ -1099,6 +1351,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             AutoFlushPreDraw();
+
             TraceDraw("DrawIndirect", 0, 0, offset, 0);
 
             MTLBuffer buffer = _renderer.BufferManager
@@ -1108,10 +1361,13 @@ namespace Ryujinx.Graphics.Metal
             MTLPrimitiveType primitiveType = TopologyRemap(_encoderStateManager.Topology).Convert();
             MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
 
-            renderCommandEncoder.DrawPrimitives(
-                primitiveType,
-                buffer,
-                (ulong)(indirectBuffer.Offset + offset));
+            if (_encoderStateManager.HasValidRenderPipeline)
+            {
+                renderCommandEncoder.DrawPrimitives(
+                    primitiveType,
+                    buffer,
+                    (ulong)(indirectBuffer.Offset + offset));
+            }
 
             _encoderStateManager.DisposeRenderTemporaryBuffers();
         }
@@ -1358,6 +1614,89 @@ namespace Ryujinx.Graphics.Metal
             _encoderStateManager.UpdateViewports(viewports);
         }
 
+        // A/B switch for the skip below, re-read once a frame so both behaviours can be
+        // measured inside one session - this machine's white-frame rate swings with the
+        // camera, so comparing separate runs measures the view, not the change.
+        private static bool _strictBarrier;
+
+        // Diagnostic hammer: end the render pass after every draw, so no draw can ever
+        // read a texture another draw in the same pass wrote. If the white frames
+        // survive full serialisation the fault cannot be a read-after-write ordering
+        // problem, and has to be inside the shader itself.
+        private static bool _serializeDraws;
+
+        // Diagnostic hammer, stronger than _serializeDraws: commit the command buffer and
+        // block until the GPU has finished it before the watched draw. That orders the
+        // watched read after every write already recorded, across encoders AND across
+        // command buffers. If the white frames survive this, no ordering fix can help -
+        // the shader is being handed the wrong contents, not stale ones.
+        private static bool _hardSync;
+        private static bool _stainPresentSource;
+        private static bool _stainBeforePresent;
+
+        // Sweep: stain the present source after the Kth draw of the frame, with K stepping
+        // frame by frame. The frame comes back green only if nothing wrote the source
+        // after draw K, so the K where green stops is the last writer's position. One run
+        // covers the whole range, which matters because the trigger view lasts ~2 minutes.
+        private static bool _stainSweep;
+        private static int _stainAtDraw = -1;
+        private static ulong _drawCountAtFrameStart;
+        private Texture _lastPresentSource;
+
+        // The surface presented last time. The present source alternates between a couple
+        // of textures, so the other one already holds the previous frame - no copy needed.
+        private Texture _guardPreviousSource;
+
+        internal static void RefreshBarrierToggle()
+        {
+            try
+            {
+                _strictBarrier = System.IO.File.Exists("/tmp/ryujinx-metal-strict-barrier") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-strict-barrier").Trim() == "1";
+
+                _serializeDraws = System.IO.File.Exists("/tmp/ryujinx-metal-serialize") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-serialize").Trim() == "1";
+
+                _hardSync = System.IO.File.Exists("/tmp/ryujinx-metal-hardsync") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-hardsync").Trim() == "1";
+
+                HdrPassProbe.SetSkipToneDraw(System.IO.File.Exists("/tmp/ryujinx-metal-skiptone") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-skiptone").Trim() == "1");
+
+                HdrPassProbe.SetSkipPresentWrites(System.IO.File.Exists("/tmp/ryujinx-metal-skippresent") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-skippresent").Trim() == "1");
+
+                _stainPresentSource = System.IO.File.Exists("/tmp/ryujinx-metal-stain") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-stain").Trim() == "1";
+
+                _stainBeforePresent = System.IO.File.Exists("/tmp/ryujinx-metal-stainpre") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-stainpre").Trim() == "1";
+
+                _stainSweep = System.IO.File.Exists("/tmp/ryujinx-metal-stainsweep") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-stainsweep").Trim() == "1";
+
+                if (System.IO.File.Exists("/tmp/ryujinx-metal-skiprange"))
+                {
+                    string[] parts = System.IO.File.ReadAllText("/tmp/ryujinx-metal-skiprange").Trim().Split(' ');
+
+                    if (parts.Length == 2 &&
+                        int.TryParse(parts[0], out int lo) &&
+                        int.TryParse(parts[1], out int hi))
+                    {
+                        HdrPassProbe.SetSkipRange(lo, hi);
+                    }
+                }
+                else
+                {
+                    HdrPassProbe.SetSkipRange(-1, -1);
+                }
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; the next frame picks it up.
+            }
+        }
+
         public void TextureBarrier()
         {
             if (CurrentEncoderType != EncoderType.Render)
@@ -1370,7 +1709,7 @@ namespace Ryujinx.Graphics.Metal
             // them, so with no draw encoded since this pass began there is nothing
             // for it to order - and splitting anyway costs a full attachment store
             // and reload. The guest issues these in the hundreds per frame.
-            if (DrawCount == _drawCountAtPassStart)
+            if (!_strictBarrier && DrawCount == _drawCountAtPassStart)
             {
                 _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
 
