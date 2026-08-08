@@ -2089,6 +2089,9 @@ namespace Ryujinx.Graphics.Metal
                                             spanRt.Width, spanRt.Height);
                                     }
 
+                                    HdrPassProbe.NoteCompositeDraw(
+                                        program.DebugLabel, _currentState.RenderTargets[0]);
+
                                     if (program.DebugLabel == "3ebc3a8f6b77cc8f")
                                     {
                                         HdrPassProbe.NoteToneMapSlotId(index, gpuAddress, texture.Storage);

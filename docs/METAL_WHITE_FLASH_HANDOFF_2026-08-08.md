@@ -563,3 +563,24 @@ identity merging rather than from the game.
 What this leaves: the presented storage does receive the composite's 96-97 draws. The
 scene at 1600x896 is intact. So the fault is inside those draws or their inputs, and the
 per-target census cannot see further - it counts draws, and the draw counts match.
+
+### Which shaders draw the composite, and where the bit-trick lives
+
+Counting draws into the RG11B10Float composite by shader, over a couple of minutes of
+play:
+
+    5ccdedfa3a3376d1  80000      797cbc23a0819594  65265
+    3821a028b5a7f2b6  40346      9ac2fc4adc220496  31629
+    8571d78b93a6bbba  28390      7854e6d7c6fd1230  16068
+    ...
+    ee89b4e471373459   2305
+
+ee89b4e471373459 is the one carrying the 0x7EF07EBB bit-trick reciprocal - sixteen of
+them, in 972 lines. The six that dominate the draw count are small (136-311 lines) and
+contain none.
+
+So the integer-wrapping fix reaches exactly one shader out of the set, holding 2305 of
+over 260000 composite draws. That is consistent with the partial reduction it measured
+(29.1% to 16.0%), but it does not establish it - a 2.4 SE result on a rate that swings
+with the camera is thin either way. What it does rule out is the tidy explanation that
+other composite shaders share the pattern and were left unfixed. They do not.

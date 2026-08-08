@@ -192,6 +192,42 @@ namespace Ryujinx.Graphics.Metal
                 $"viewRoot=0x{t.ViewRootPtr:X}");
         }
 
+        // The composite's own draws, by shader. hdrspan mixed in the UI shaders that
+        // write the sRGB view of the same storage; this counts only draws whose target is
+        // the RG11B10Float composite, which is where the 96-97 draws land.
+        private static readonly System.Collections.Generic.Dictionary<string, int> _compositeDraws = new();
+
+        public static void NoteCompositeDraw(string program, Texture target)
+        {
+            if (program == null || !IsWatchedTarget(target))
+            {
+                return;
+            }
+
+            lock (_compositeDraws)
+            {
+                _compositeDraws.TryGetValue(program, out int n);
+                _compositeDraws[program] = n + 1;
+
+                if ((n + 1) % 2000 != 0)
+                {
+                    return;
+                }
+            }
+
+            System.Text.StringBuilder sb = new();
+
+            lock (_compositeDraws)
+            {
+                foreach (var kv in _compositeDraws)
+                {
+                    sb.Append($" {kv.Key}={kv.Value}");
+                }
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu, $"hdrcomposite{sb}");
+        }
+
         public static void NoteCopy(int srcW, int srcH, string srcFmt, int dstW, int dstH, string dstFmt)
         {
             string key = $"{srcW}x{srcH}:{srcFmt}->{dstW}x{dstH}:{dstFmt}";
