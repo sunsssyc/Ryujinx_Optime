@@ -65,7 +65,15 @@ namespace Ryujinx.Graphics.Metal
         // a good frame while the draw total is unchanged, so the extra pass is empty -
         // this records where in the sequence it falls and what ended it.
         private const int MaxWatched = 12;
-        private const int WatchedMinWidth = 1900;
+
+        // Which RG11B10Float stage the per-pass content sampling follows. It was fixed at
+        // the full resolution composite; now that the composite has been shown to read an
+        // already-white 1600x896 scene texture, the same walk has to run one stage earlier,
+        // and the stage after that if it comes to it. Exact width rather than a minimum, so
+        // pointing it at 1600 does not also pick up 1920 and interleave two chains in one
+        // sequence.
+        private static readonly int WatchedWidth =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_WIDTH"), out int w) && w > 0 ? w : 1920;
 
         private struct PassDetail
         {
@@ -148,7 +156,7 @@ namespace Ryujinx.Graphics.Metal
         public static bool IsWatchedTarget(Texture target)
         {
             return target != null &&
-                target.Width >= WatchedMinWidth &&
+                target.Width == WatchedWidth &&
                 target.MtlFormat == MTLPixelFormat.RG11B10Float;
         }
 
@@ -389,9 +397,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            if (target.Width >= WatchedMinWidth &&
-                target.MtlFormat == MTLPixelFormat.RG11B10Float &&
-                _pendingWatchedCount < MaxWatched)
+            if (IsWatchedTarget(target) && _pendingWatchedCount < MaxWatched)
             {
                 _pendingWatched[_pendingWatchedCount] = new PassDetail { Cleared = clearLoadAction };
                 _openWatched = true;
@@ -473,6 +479,39 @@ namespace Ryujinx.Graphics.Metal
         /// version sampled from the pass-ended callback, where the render encoder has not
         /// been closed yet, and Metal asserted on the blit encoder it tried to open.
         /// </summary>
+        /// <summary>
+        /// The last watched target seen this frame, kept after the pass closes so the
+        /// content can be sampled once more at present.
+        ///
+        /// The chain above samples before each pass, which reads as "after the previous
+        /// one" for every pass but the last - and the last one's output is exactly what the
+        /// next stage reads. Walking the 1600x896 stage produced eight "varied" entries and
+        /// no verdict for that reason, while the shader reading this texture was measuring
+        /// 254 in every channel. The missing sample is the whole answer.
+        /// </summary>
+        private static Texture _lastWatchedTarget;
+
+        public static void SampleAtPresent(CommandBufferScoped cbs, int frameSlot)
+        {
+            if (_lastWatchedTarget == null)
+            {
+                return;
+            }
+
+            if (_pendingWatchedCount >= MaxWatched)
+            {
+                return;
+            }
+
+            SampleWatched(cbs, _lastWatchedTarget, frameSlot, _pendingWatchedCount);
+
+            // Claim the slot so Commit carries it and DescribePassContent prints it as the
+            // final entry. It belongs to no pass, hence the zero draws.
+            _pendingWatched[_pendingWatchedCount] = new PassDetail();
+            _pendingWatchedCount++;
+            _lastWatchedTarget = null;
+        }
+
         public static void SampleBeforePass(CommandBufferScoped cbs, Texture target, int frameSlot)
         {
             if (_sampleBuf.NativePtr == IntPtr.Zero || !IsWatchedTarget(target))
@@ -481,8 +520,19 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _openWatchedTarget = target;
+            _lastWatchedTarget = target;
 
-            int passIndex = _pendingWatchedCount;
+            SampleWatched(cbs, target, frameSlot, _pendingWatchedCount);
+        }
+
+        private static void SampleWatched(CommandBufferScoped cbs, Texture target, int frameSlot, int passIndex)
+        {
+            if (_sampleBuf.NativePtr == IntPtr.Zero || target == null)
+            {
+                return;
+            }
+
+            _openWatchedTarget = target;
 
             if (passIndex >= MaxWatched)
             {

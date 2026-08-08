@@ -234,6 +234,11 @@ namespace Ryujinx.Graphics.Metal
             HdrPassProbe.SampleInputs(cbs, slot);
             HdrPassProbe.NoteIdentity("present", src);
 
+            // The final state of the watched stage, which is what the stage after it reads.
+            // Sampling only before each pass leaves the last pass's output unmeasured, and
+            // that is the one that matters.
+            HdrPassProbe.SampleAtPresent(cbs, slot);
+
             HdrPassProbe.Commit(slot);
 
             // ── 1. Classify the frame two presents back ─────────────────────
