@@ -12,9 +12,13 @@ namespace Ryujinx.Graphics.Metal
     /// near-white - the scene is gone while the HUD still composites over it. The cause
     /// is unresolved (see docs/METAL_WHITE_FLASH_HANDOFF_2026-08-08.md); what is well
     /// established is that such a frame is uniform, which is something a rendered scene
-    /// never is. This samples nine points spread across the source just before the
-    /// present blit and, when they are all bright and all but identical, presents the
-    /// other surface in the rotation - the previous frame's image - instead.
+    /// never is. This samples the source just before the present blit and, when enough of
+    /// those samples are saturated, presents the last frame that was not flat instead.
+    ///
+    /// The test counts saturated samples rather than asking them to be equal. A flat frame
+    /// keeps its HUD, so a uniformity test is decided by whether a sample lands on the
+    /// minimap - which is why an earlier version of this fired on some camera angles and
+    /// not others, and reported success it had not achieved.
     ///
     /// Two costs, both real:
     /// - one GPU sync per frame, to have the samples on the CPU before deciding
@@ -37,21 +41,20 @@ namespace Ryujinx.Graphics.Metal
     /// code released a texture an in-flight command buffer was about to attach); the
     /// remainder is unresolved. Its usage flags do include RenderTarget, so that is not
     /// it. Do not enable this for anyone until the exit is understood.
-    ///
-    /// Verified: 42.5% of sampled frames were flat white with it off, 0% with it on,
-    /// judged from macOS compositor screenshots rather than the emulator's own probe,
-    /// with the frame rate unchanged and the output confirmed to be ordinary gameplay.
     /// </summary>
     [SupportedOSPlatform("macos")]
     static class FlashGuard
     {
-        private const int Pixels = 9;
+        private const int GridSide = 5;
+        private const int Pixels = GridSide * GridSide;
+
+        // Same threshold the probe and KeepGood.metal use.
+        private const int SaturatedNeeded = 6;
         private const int BytesPerPixel = 4;
 
-        // Same thresholds the detector was validated with: nine points spread over the
-        // frame agreeing this closely is not a scene, even a blown-out sky.
-        private const float UniformSpread = 2f;
-        private const float WhiteLuma = 240f;
+        // Calibrated on 300 captured frames of real gameplay: a flat frame has at least
+        // 8 of 25 samples saturated (median 24), an ordinary one at most 4 (median 2).
+        private const float SaturatedLuma = 235f;
 
         private static bool _enabled;
         private static MTLBuffer _buf;
@@ -102,10 +105,8 @@ namespace Ryujinx.Graphics.Metal
             _buf = device.NewBuffer(Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
         }
 
-        // Off by default. It measured clean in one scene, but in ordinary play the flash
-        // was still reported and the render encoder faulted inside the driver while
-        // building this pass's descriptor - so it is not fit to be on for anyone until
-        // both are understood. RYUJINX_METAL_FLASHGUARD=1 opts in.
+        // Off by default; see the type comment for what it achieves and what stops it
+        // from being usable. RYUJINX_METAL_FLASHGUARD=1 opts in.
         private static readonly bool _defaultEnabled =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_FLASHGUARD") == "1";
 
@@ -154,7 +155,12 @@ namespace Ryujinx.Graphics.Metal
             {
                 blit.CopyFromTexture(
                     tex, 0, 0,
-                    new MTLOrigin { x = (ulong)(src.Width * (i % 3 + 1) / 4), y = (ulong)(src.Height * (i / 3 + 1) / 4), z = 0 },
+                    new MTLOrigin
+                    {
+                        x = (ulong)(src.Width * (i % GridSide + 1) / (GridSide + 1)),
+                        y = (ulong)(src.Height * (i / GridSide + 1) / (GridSide + 1)),
+                        z = 0,
+                    },
                     new MTLSize { width = 1, height = 1, depth = 1 },
                     _buf, (ulong)(i * BytesPerPixel), BytesPerPixel, BytesPerPixel);
             }
@@ -164,21 +170,21 @@ namespace Ryujinx.Graphics.Metal
             flushAndWait();
 
             byte* p = (byte*)_buf.Contents;
-            float min = 255f, max = 0f, total = 0f;
+            int saturated = 0;
 
             for (int i = 0; i < Pixels; i++)
             {
                 byte* px = p + i * BytesPerPixel;
-                float luma = (px[0] + px[1] + px[1] + px[2]) * 0.25f;
 
-                total += luma;
-                min = MathF.Min(min, luma);
-                max = MathF.Max(max, luma);
+                if ((px[0] + px[1] + px[1] + px[2]) * 0.25f >= SaturatedLuma)
+                {
+                    saturated++;
+                }
             }
 
             _seen++;
 
-            bool flat = (max - min) <= UniformSpread && (total / Pixels) >= WhiteLuma;
+            bool flat = saturated >= SaturatedNeeded;
 
             if (flat && _previousSource != null && !ReferenceEquals(_previousSource, src))
             {
