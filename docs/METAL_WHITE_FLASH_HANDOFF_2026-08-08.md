@@ -362,3 +362,24 @@ base round produced no shots), the shot rates differ between them, and the flash
 reduced rather than removed. A correctness fix of this kind should be all-or-nothing for
 the shader it affects, so a partial effect means either something else contributes or
 part of this difference is not the change.
+
+### The canvas is white, and the scene fails to cover it
+
+Dropping every draw whose colour target 0 is the 1920x1080 composite
+(/tmp/ryujinx-metal-skip-hdr) and judging from compositor screenshots:
+
+    skip off: 13/24 flat, mean luma 152..248   (ordinary flashing)
+    skip on:  24/24 flat, mean luma 248..248   (constant white)
+
+With nothing drawn into it the target reads white, not black. So the scene is composited
+over a white canvas, and a flat frame is the scene failing to cover it - not something
+painting white over the scene.
+
+That reframes the search, and it retires an exclusion that never held: white and ordinary
+frames were measured to have the same total draw count (2400-2800), which was taken as
+evidence that no draw goes missing. The composite is one or two draws; a missing one
+disappears into the +-300 frame-to-frame spread. "Same draw total" never ruled this out.
+
+Next: count draws into that target specifically, per frame, and compare flat frames
+against their immediate predecessor - the paired control, not a periodic sample from
+another scene.

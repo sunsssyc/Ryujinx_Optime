@@ -1100,7 +1100,8 @@ namespace Ryujinx.Graphics.Metal
                 // builds the pipeline. A failed build leaves the encoder without a usable
                 // pipeline, and issuing the draw anyway faults inside the Metal driver.
                 // Only the draw is skipped - the cleanup below still has to run.
-                if (_encoderStateManager.HasValidRenderPipeline)
+                if (_encoderStateManager.HasValidRenderPipeline &&
+                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])))
                 {
                     // The converted-topology path must keep the draw's instancing and
                     // base vertex/instance: dropping them draws a single instance of
@@ -1126,7 +1127,8 @@ namespace Ryujinx.Graphics.Metal
                     PushDebugGroup(debugGroupName);
                 }
 
-                if (_encoderStateManager.HasValidRenderPipeline)
+                if (_encoderStateManager.HasValidRenderPipeline &&
+                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])))
                 {
                     renderCommandEncoder.DrawPrimitives(
                         primitiveType,
@@ -1260,7 +1262,8 @@ namespace Ryujinx.Graphics.Metal
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
                 ToneMapProbe.Record(_encoderStateManager.CurrentEncoderState);
 
-                if (_encoderStateManager.HasValidRenderPipeline)
+                if (_encoderStateManager.HasValidRenderPipeline &&
+                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])))
                 {
                     renderCommandEncoder.DrawIndexedPrimitives(
                         primitiveType,
@@ -1330,7 +1333,8 @@ namespace Ryujinx.Graphics.Metal
             {
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
 
-                if (_encoderStateManager.HasValidRenderPipeline)
+                if (_encoderStateManager.HasValidRenderPipeline &&
+                    !(_skipHdrDraws && HdrPassProbe.IsWatchedTarget(_encoderStateManager.RenderTargets[0])))
                 {
                     renderCommandEncoder.DrawIndexedPrimitives(
                         primitiveType,
@@ -1641,6 +1645,13 @@ namespace Ryujinx.Graphics.Metal
         // problem, and has to be inside the shader itself.
         private static bool _serializeDraws;
 
+        // Bisect: drop every draw whose colour target 0 is the full resolution composite.
+        // If the frame still comes out flat white with all of them gone, the white was
+        // already in that texture when the passes loaded it, and nothing they draw is
+        // responsible - which is the half of the search space no instrument here has been
+        // able to separate. Hot-swappable so both arms run in one session.
+        private static bool _skipHdrDraws;
+
         // Diagnostic hammer, stronger than _serializeDraws: commit the command buffer and
         // block until the GPU has finished it before the watched draw. That orders the
         // watched read after every write already recorded, across encoders AND across
@@ -1672,6 +1683,9 @@ namespace Ryujinx.Graphics.Metal
 
                 _serializeDraws = System.IO.File.Exists("/tmp/ryujinx-metal-serialize") &&
                     System.IO.File.ReadAllText("/tmp/ryujinx-metal-serialize").Trim() == "1";
+
+                _skipHdrDraws = System.IO.File.Exists("/tmp/ryujinx-metal-skip-hdr") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-skip-hdr").Trim() == "1";
 
                 _hardSync = System.IO.File.Exists("/tmp/ryujinx-metal-hardsync") &&
                     System.IO.File.ReadAllText("/tmp/ryujinx-metal-hardsync").Trim() == "1";
