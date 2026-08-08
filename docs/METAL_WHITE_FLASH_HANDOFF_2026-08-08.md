@@ -1008,3 +1008,51 @@ Next: apply the same method one stage earlier. Find what writes 0x9DB944C80, and
 whether its inputs are white on the same frames. The technique now has a track record -
 show the value, keep an artefact indicator in a spare channel, and never test a magnitude
 against a threshold picked without knowing the range.
+
+### Two CPU-side instruments cannot corroborate it, and that is worth knowing
+
+Pointing the per-pass content walk at the 1600x896 stage (RYUJINX_METAL_WATCH_WIDTH=1600),
+with the missing at-present sample added, gives "varied" at every entry on flat frames -
+the opposite of what the in-shader fetch measured. And the input sampler disagrees with
+itself between runs: one session reported the narrow span on the flat frame and the wide one
+on its predecessor, the next reported exactly the reverse.
+
+Both are sampled at present, after the frame's rendering has finished and the texture may
+already have been rewritten for the next one, so neither is reliably associated with the
+frame it is printed against. Min and max of packed RG11B10 words mixes three channels into
+one ordering, which makes the numbers look meaningful when they are not.
+
+The in-shader measurement has no such gap: it reads what the shader reads, at the moment it
+reads it, on the frames that are flat, with a control in the same image. Where they
+disagree it wins, and the two CPU-side readings should not be quoted as evidence either way
+until they are re-taken at the point of use.
+
+### Where this stands, and what to do next
+
+Settled, each with a positive control:
+
+  - the composite draws cover the frame exactly as on ordinary frames
+  - the composite shader runs, its coordinate ramps normally, its clamps do not saturate,
+    its output is near 1.0 rather than a saturated 3.5, and nothing downstream applies a gain
+  - what it reads is already white
+  - the binding is the same host texture on flat frames and their predecessors
+
+Retracted: the saturation hypothesis and everything derived from it, the inference from the
+magenta stamp, and the "seven 1600x896 targets, none flat" trace reading as applied to the
+bound texture.
+
+The next stage up is the scene buffer itself, and it is not one shader - hdrcomposite at
+WATCH_WIDTH=1600 lists dozens of programs and thousands of draws per frame. So the method
+has to change with it. Two routes, in order of cost:
+
+  1. Ask whether the composite reads that texture before the scene pass has finished
+     writing it. A white uniform value is what an untouched or cleared target looks like,
+     and "end the pass after every draw" already measured 34.2% against a 49.1% baseline -
+     a partial response is what an ordering fault gives, not what an arithmetic one gives.
+  2. If not ordering, bisect the draws into that target by index range (SetSkipRange is
+     already there) rather than by shader, since no single shader owns it.
+
+Whatever comes next, keep the technique that worked tonight: draw the value rather than
+test it, keep an artefact indicator in a spare channel so the bad frames are identifiable in
+the same picture, and never compare a magnitude against a threshold chosen without knowing
+the range.
