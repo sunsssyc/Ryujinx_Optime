@@ -427,6 +427,13 @@ namespace Ryujinx.Graphics.Metal
 
                 if (keep != null)
                 {
+                    // Register both against this command buffer before the pass names them.
+                    // The parameterless GetHandle does not register, and this texture is
+                    // reachable only from a static field, so nothing else stops it being
+                    // recycled while the frame that attaches it is still in flight.
+                    keep.GetHandle(Cbs);
+                    src.GetHandle(Cbs);
+
                     _renderer.HelperShader.UpdateKeepGood(Cbs, src, keep);
                     _renderer.HelperShader.BlitColor(Cbs, keep, dst, srcRegion, dstRegion, isLinear, true);
                 }
