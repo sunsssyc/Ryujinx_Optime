@@ -709,3 +709,29 @@ Two things to carry over about running experiments against it:
 
 The SHOW_BIG patch's blanking is undiagnosed. Its insert is conditional and placed after
 the last out.color0 write, so on inspection it should leave ordinary pixels alone.
+
+### The identified shader is upstream of the fault, not the fault
+
+Marking pixels inside ee89b4e471373459 on frames that came out flat (mean luma 248-249):
+
+    |temp_290| > 100     0.0% of pixels
+    |temp_313| > 1       0.0%
+    |temp_313| > 0.9     0.0%
+
+Its values are ordinary on exactly the frames that come out white. The clamps are not
+saturating, and nothing in it reaches the magnitudes that would make them.
+
+That corrects the inference drawn from the bisect. "Dropping X removes the artefact"
+does not mean X produces it - it can equally mean X feeds whatever does. The paint test
+supports the second reading: filling this shader's output with magenta fills the screen,
+which shows a downstream stage carries its output through unchanged, and a stage that
+carries it through can equally be the one that blows it up.
+
+So the chain is ee89b4e471373459 producing ordinary values, and something downstream
+turning them white - most likely the tonemap read early in this session
+(3ebc3a8f6b77cc8f), which divides by a luminance built from its input and clamps the
+result.
+
+Thresholds cost three runs here. |temp_290| > 100 and |temp_313| > 1 were both picked
+without knowing the value range, and both came back empty in a way that looks like a
+negative result but only says the threshold was outside the data.

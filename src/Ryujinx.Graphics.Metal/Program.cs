@@ -151,6 +151,24 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOW_INPUT") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        /// <summary>
+        /// A float literal MSL will accept. "G9" renders 100 as "100", and "100f" is not a
+        /// valid literal - the shader fails to compile, its pipeline comes out null, the
+        /// draw guard skips every draw that used it, and a full-screen pass silently
+        /// leaves the frame black. That looked like the patch blanking the image.
+        /// </summary>
+        private static string MslFloat(float value)
+        {
+            string text = value.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+
+            if (text.IndexOf('.') < 0 && text.IndexOf('e') < 0 && text.IndexOf('E') < 0)
+            {
+                text += ".0";
+            }
+
+            return text + "f";
+        }
+
         private string PatchSourceForDiagnostics(ShaderSource shader)
         {
             if (shader.Stage != ShaderStage.Fragment)
@@ -197,7 +215,7 @@ namespace Ryujinx.Graphics.Metal
                     if (at >= 0 && eol > at)
                     {
                         code = code.Insert(eol + 1,
-                            $"    if (abs({t}) > {lim.ToString("G9", System.Globalization.CultureInfo.InvariantCulture)}f) {{ " +
+                            $"    if (abs({t}) > {MslFloat(lim)}) {{ " +
                             "out.color0 = float4(0.0f, 1.0f, 0.0f, 1.0f); }\n");
 
                         Logger.Warning?.PrintMsg(LogClass.Gpu,
