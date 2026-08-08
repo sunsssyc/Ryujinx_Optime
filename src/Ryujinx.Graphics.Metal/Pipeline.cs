@@ -54,6 +54,10 @@ namespace Ryujinx.Graphics.Metal
         private ulong _byteWeight;
         private int _disposedResourceCount;
         private int _presentCount;
+
+        // The per-frame slot the probes index by. Passes encoded now belong to the frame
+        // this present will close, which is the same numbering PresentProbe classifies by.
+        internal int FrameSlot => _presentCount;
         private int _autoFlushDrawCount;
         private int _autoFlushAttachmentCount;
 
@@ -390,6 +394,10 @@ namespace Ryujinx.Graphics.Metal
             {
                 PresentProbe.OnPresent(Cbs, src, DrawCount, DispatchCount);
             }
+
+            // After the classification above has read this frame's slot, and before the
+            // next frame encodes anything into its own.
+            CoverageProbe.OnPresent(Cbs, _presentCount + 1);
 
             // TODO: Clean this up
             TextureCreateInfo textureInfo = new((int)drawable.Texture.Width, (int)drawable.Texture.Height, (int)drawable.Texture.Depth, (int)drawable.Texture.MipmapLevelCount, (int)drawable.Texture.SampleCount, 0, 0, 0, Format.B8G8R8A8Unorm, 0, Target.Texture2D, SwizzleComponent.Red, SwizzleComponent.Green, SwizzleComponent.Blue, SwizzleComponent.Alpha);

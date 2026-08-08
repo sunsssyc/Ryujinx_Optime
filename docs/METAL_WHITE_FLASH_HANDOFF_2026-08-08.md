@@ -806,3 +806,87 @@ tools/ab_probe.sh replaces it: the probe classifies every presented frame with t
 criterion calibrated on 300 captures, giving hundreds of samples per arm in the same wall
 clock, and each arm reports mean luma so an arm that blanked the screen is labelled rather
 than scored.
+
+## Session 2026-08-09: the composite covers the frame, measured in hardware
+
+### What was missing from every instrument before this
+
+Everything built so far measures one of two things: what was bound (pass counts, draw
+counts, sampled texture identities, constant buffer contents) or what the pixels became
+(grid samples, in-shader value markers). All of it reports a flat frame and the frame
+before it as identical, and this file records the reading that would explain every one of
+those null results at once - that on a flat frame the composite draws produce no fragments,
+leaving whatever the load action brought in. It was never tested, because nothing here
+measures whether a draw covered anything.
+
+Metal answers that in hardware. CoverageProbe (RYUJINX_METAL_COVERAGE=1) points the
+visibility result buffer at the passes whose colour target 0 is the 1920x1080 RG11B10Float
+composite, one 64-bit slot per pass, and reports the counts beside the scissor, viewport
+and depth compare in force when the pass opened. The GPU writes those counts after the pass
+has run, so no state cache, texture view identity or shader arithmetic sits between the
+number and the truth - the three things that produced four retracted conclusions above. It
+compares a flat frame against its own immediate predecessor inside one run, so there are no
+arms, no camera angle confound and no sample size to argue about.
+
+The buffer is primed with all ones rather than zero, deliberately. Zero is the answer being
+looked for and is also what an unwritten slot holds, so a readback taken too early would
+manufacture exactly the result the probe exists to detect. PENDING means void, not zero.
+
+### Result: coverage is identical, to the fragment
+
+Reproducing save loaded on a clean build, 258 flat frames in 3900 (6.6%), 60 logged runs:
+
+    WHITE  p0:cov=2073600 sc=0,0,2560x1406 vp=1920x-1080 dcmp=Always
+           p1:cov=2073600 sc=0,0,1920x1080 vp=1920x1080  dcmp=Always
+           p2:cov=126417  p3:cov=501600  p4:cov=253870 (sc=1567,654,315x426 - the minimap)
+    prev   identical, value for value, across all 60 runs
+
+2073600 is exactly 1920x1080. The composite draws rasterise the entire frame on flat frames,
+with the same scissor, the same viewport and the same depth function as on ordinary ones.
+
+So the draws run and they cover. That closes the whole geometry and fixed-function branch -
+scissor, viewport, degenerate vertices, depth or stencil rejection, colour write mask - and
+it retires the "these draws do not execute at all" reading this file proposed. What is left
+is what the draws read or compute.
+
+### The composite shader is identified again, on grounds the bisect never touched
+
+hdrspan over a full session lists every distinct sampled-size -> written-size pair. Exactly
+one program spans the scene to full resolution:
+
+    ee89b4e471373459  samples 1600x896 -> writes 1920x1080
+
+Every other program writing the composite samples UI textures (8x8 to 950x176) or the
+1920x1080 surface itself. Combined with a coverage of exactly one full screen in p1, with
+dropping it leaving a black screen, and with painting it filling the viewport, this is the
+scene composite. Note none of those four facts is the bisect that was retracted - that
+argued from a flash rate, and this argues from what the shader reads and how much it covers.
+
+### That contradicts the in-shader marker result, and the marker is the one to doubt
+
+The shader ends:
+
+    temp_313 = temp_311 * temp_310;          // reciprocal x numerator
+    temp_314 = clamp(temp_313, 0.0f, 1.0f);
+    out.color0.y = temp_314 * 3.5;           // and likewise x and z
+
+A uniform white frame is all three clamps saturating, so temp_313 >= 1 across the frame.
+The marker runs above report |temp_313| > 0.9 firing on 0.0% of pixels on flat frames.
+Both cannot hold: this shader covers 1920x1080 fragments and its output is the frame.
+
+The likelier failure is the one this file already records twice - a source-patching
+diagnostic that never reached the compiler because the disk shader cache was warm, so the
+run measured an unpatched shader and read the absence of marks as an absence of the value.
+
+### Next, and it needs no thresholds
+
+Mark where all three clamps saturate - `temp_313 >= 1 && temp_315 >= 1 && temp_317 >= 1` -
+rather than at a threshold picked without knowing the range. That question is
+self-calibrating: on an ordinary frame a few sky pixels go green, and on a flat frame the
+whole screen does. Bump CodeGenVersion so it is actually compiled, and confirm the positive
+control inside the same run.
+
+  - flat frames turn green -> this shader computes the white, and the search moves to which
+    term of temp_297 crosses zero
+  - flat frames stay white -> its clamps are not saturating, the pass that reads the scene
+    and writes full resolution is innocent, and the white arrives downstream of it

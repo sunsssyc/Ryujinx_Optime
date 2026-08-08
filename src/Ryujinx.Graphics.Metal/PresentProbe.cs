@@ -314,7 +314,8 @@ namespace Ryujinx.Graphics.Metal
                                 $"    WHITE inputs: {HdrPassProbe.DescribeInputs(midSlot)}\n" +
                                 $"     prev inputs: {HdrPassProbe.DescribeInputs((mid - 1) % Slots)}\n" +
                                 $"    WHITE nonRenderWrites: {HdrPassProbe.DescribeWrites(midSlot)}\n" +
-                                
+                                $"    WHITE coverage:{CoverageProbe.Describe(midSlot)}\n" +
+                                $"     prev coverage:{CoverageProbe.Describe((mid - 1) % Slots)}\n" +
                                 $"     prev presentSrc: {HdrPassProbe.DescribePresentWritten((mid - 1) % Slots)}");
                         }
                     }
@@ -353,7 +354,8 @@ namespace Ryujinx.Graphics.Metal
                             $"D={drawsThisFrame} C={dispatchesThisFrame} " +
                             $"SM:u={smUploads},p={smProtected},f={smFlushAct} " +
                             $"src=0x{srcTex.NativePtr:X}:{srcW}x{srcH}\n" +
-                            $"     sweep: {DescribeSweep()}");
+                            $"     sweep: {DescribeSweep()}\n" +
+                            $"     good coverage:{CoverageProbe.Describe(midSlot)}");
                     }
                 }
             }

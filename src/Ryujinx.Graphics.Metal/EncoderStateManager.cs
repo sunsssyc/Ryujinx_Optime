@@ -601,12 +601,29 @@ namespace Ryujinx.Graphics.Metal
             }
 
             bool countSamples = _pipeline.SupportsSamplesPassed;
-            ulong visibilityOffset = countSamples ? _pipeline.PrepareCounterRenderPass(renderPassDescriptor) : 0;
+            ulong visibilityOffset = 0;
+
+            // A pass descriptor carries one visibility buffer, so the coverage probe and
+            // the guest's occlusion queries cannot both have it. The probe takes only the
+            // passes into the watched composite, and only when it is switched on.
+            bool measureCoverage = CoverageProbe.Enabled && CoverageProbe.TryTakePass(
+                _pipeline.FrameSlot,
+                _currentState.RenderTargets.Length > 0 ? _currentState.RenderTargets[0] : null,
+                _currentState.Scissors.Length > 0 ? _currentState.Scissors[0] : default,
+                _currentState.Viewports.Length > 0 ? _currentState.Viewports[0] : default,
+                _currentState.DepthStencilUid.DepthCompareFunction,
+                renderPassDescriptor,
+                out visibilityOffset);
+
+            if (!measureCoverage && countSamples)
+            {
+                visibilityOffset = _pipeline.PrepareCounterRenderPass(renderPassDescriptor);
+            }
 
             // Initialise Encoder
             MTLRenderCommandEncoder renderCommandEncoder = _pipeline.CommandBuffer.RenderCommandEncoder(renderPassDescriptor);
 
-            if (countSamples)
+            if (countSamples || measureCoverage)
             {
                 renderCommandEncoder.SetVisibilityResultMode(MTLVisibilityResultMode.Counting, visibilityOffset);
             }
