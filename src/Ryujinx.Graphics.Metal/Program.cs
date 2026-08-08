@@ -271,6 +271,28 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOWCOORD") ?? string.Empty)
                 .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        /// <summary>
+        /// Draws two fetched values straight into red and green, flatness still in blue.
+        ///
+        /// SHOWCOORD answered the question before this one: on a flat frame the fetch
+        /// coordinate ramps across the screen exactly as it does on an ordinary frame
+        /// (spread 131/119 against 130/124), so every pixel is reading a different texel
+        /// and still arriving at the same colour. The only thing left that does that is an
+        /// input which is itself uniform.
+        ///
+        /// The per-frame input sampling already recorded this and it went unread: on a flat
+        /// frame the sampled words of the bound 1600x896 scene texture span 0x781DFBC0 to
+        /// 0x781E03C0, a difference of 0x800, which is a single quantisation step of one
+        /// channel - against a far wider span on the frame before. This shows the fetched
+        /// texel itself so the reading does not depend on decoding packed words or on
+        /// matching texture identities.
+        ///
+        /// RYUJINX_METAL_SHOWFETCH=&lt;label&gt;:&lt;tempA&gt;,&lt;tempB&gt;
+        /// </summary>
+        private static readonly string[] _showFetch =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOWFETCH") ?? string.Empty)
+                .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private static readonly string[] _guardBitTrickLabels =
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_BITTRICK") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -410,6 +432,32 @@ namespace Ryujinx.Graphics.Metal
 
                     Logger.Warning?.PrintMsg(LogClass.Gpu,
                         $"diagnostic: {DebugLabel} greens pixels where any of {string.Join(",", temps)} is NaN");
+                }
+            }
+
+            if (_showFetch.Length == 2 && DebugLabel == _showFetch[0])
+            {
+                string[] pair = _showFetch[1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                string[] absent = pair.Where(t => !code.Contains($"{t} =")).ToArray();
+                int at = code.IndexOf("    out.color0.w", StringComparison.Ordinal);
+                int eol = at >= 0 ? code.IndexOf('\n', at) : -1;
+
+                if (pair.Length != 2 || absent.Length != 0 || eol < 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} NOT fetch-mapped - " +
+                        (absent.Length != 0 ? $"absent: {string.Join(",", absent)}" : "need exactly two temps and an out.color0.w"));
+                }
+                else
+                {
+                    code = code.Insert(eol + 1,
+                        "    {\n" +
+                        "        float fetchFlat = out.color0.y >= 0.9f ? 1.0f : 0.0f;\n" +
+                        $"        out.color0 = float4({pair[0]}, {pair[1]}, fetchFlat, 1.0f);\n" +
+                        "    }\n");
+
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} shows fetched {pair[0]},{pair[1]} in red/green, flatness in blue");
                 }
             }
 
