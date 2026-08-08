@@ -433,3 +433,29 @@ not explained; the texture's usage flags do include RenderTarget, so that is not
 
 Anyone picking this up: the visual result is already there. What stands between it and
 being usable is that exit, not the suppression.
+
+### Two mitigation designs, both crashing, and the one that should not
+
+Both attempts suppress the artefact and both take the emulator down:
+
+  - render a keep texture in its own pass, decide in the shader: the driver faults
+    building that pass's descriptor (AGX FramebufferGen3). Rebuilding the keep texture on
+    resize was one cause and is fixed; the rest is unexplained.
+  - decide on the CPU and keep the good frame with a copy: exits sooner. flushAndWait
+    commits and swaps the command buffer in the middle of Present, and the rest of Present
+    goes on using the Cbs local it captured before the swap. That is inherent to any
+    design that needs the samples on the CPU before choosing what to present, not an
+    implementation slip.
+
+A design that avoids both, not attempted here: fold it into the present blit, which
+already exists and already samples the source.
+
+  - give that pass two colour attachments - the drawable, and a keep texture
+  - give its shader two sampled textures - the source, and the *other* keep texture
+  - the shader tests the source, writes the chosen image to both attachments
+  - ping-pong the two keep textures each frame, so the one being read is never the one
+    being written
+
+No extra pass, so nothing new for the descriptor builder to fault on; no CPU sync, so the
+command buffer is never swapped mid-Present. It needs HelperShader's present path to take
+a second attachment, which is why it was not done in the session that found this.
