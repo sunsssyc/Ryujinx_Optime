@@ -5,6 +5,7 @@ using Ryujinx.Graphics.Shader;
 using SharpMetal.Foundation;
 using SharpMetal.Metal;
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -135,6 +136,44 @@ namespace Ryujinx.Graphics.Metal
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOW_NEARZERO") ?? string.Empty)
                 .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
+        /// <summary>
+        /// Greens a pixel when every one of the named values has reached 1, which for this
+        /// shader is the whole of "it wrote white here": the frame goes flat when its three
+        /// clamped products all saturate together.
+        ///
+        /// The point of asking it this way is that it needs no threshold. Three runs were
+        /// spent on SHOW_BIG limits picked without knowing the value range, and each came
+        /// back empty in a way that reads like a negative result but only says the limit
+        /// was outside the data. Saturation is where the clamp is, so the question carries
+        /// its own scale, and it is self-controlling: on an ordinary frame the few pixels
+        /// that are genuinely blown out go green, and on a flat frame all of them do.
+        ///
+        /// RYUJINX_METAL_SHOW_SAT=&lt;label&gt;:temp_a,temp_b,temp_c
+        /// </summary>
+        private static readonly string[] _showSaturated =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOW_SAT") ?? string.Empty)
+                .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        /// <summary>
+        /// Stamps a fixed magenta square in the corner of everything this shader writes.
+        /// It answers one question and only that one: did this shader's pixels reach the
+        /// screen on this frame?
+        ///
+        /// It exists because a marker that never fires and a value that never occurs look
+        /// identical, and this file's notes are full of the second being read off the
+        /// first. The saturation marker came back at 0.0% of pixels on flat frames - but
+        /// also on ordinary ones, so on its own it says nothing. The stamp is
+        /// unconditional, so it is present on any frame this shader painted, whatever the
+        /// arithmetic did. A flat frame keeping the stamp and losing the green means the
+        /// shader ran and did not saturate; a flat frame losing both means its output never
+        /// reached the frame at all.
+        ///
+        /// RYUJINX_METAL_STAMP=&lt;label&gt;:&lt;pixels&gt;
+        /// </summary>
+        private static readonly string[] _stamp =
+            (Environment.GetEnvironmentVariable("RYUJINX_METAL_STAMP") ?? string.Empty)
+                .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
         private static readonly string[] _guardBitTrickLabels =
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_BITTRICK") ?? string.Empty)
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -221,6 +260,57 @@ namespace Ryujinx.Graphics.Metal
                         Logger.Warning?.PrintMsg(LogClass.Gpu,
                             $"diagnostic: {DebugLabel} greens pixels where |{t}| > {lim}");
                     }
+                }
+            }
+
+            if (_showSaturated.Length == 2 && DebugLabel == _showSaturated[0])
+            {
+                string[] temps = _showSaturated[1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                string[] missing = temps.Where(t => !code.Contains($"{t} =")).ToArray();
+                int at = code.IndexOf("    out.color0.w", StringComparison.Ordinal);
+                int eol = at >= 0 ? code.IndexOf('\n', at) : -1;
+
+                // Say which of the two ways this can fail actually happened. A patch that
+                // quietly applies to nothing, and is then read as "the value never occurs",
+                // is the mistake these notes record most often.
+                if (missing.Length != 0 || eol < 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} NOT marked - " +
+                        (missing.Length != 0 ? $"absent: {string.Join(",", missing)}" : "no out.color0.w to insert after"));
+                }
+                else
+                {
+                    code = code.Insert(eol + 1,
+                        $"    if ({string.Join(" && ", temps.Select(t => $"{t} >= 1.0f"))}) {{ " +
+                        "out.color0 = float4(0.0f, 1.0f, 0.0f, 1.0f); }\n");
+
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} greens pixels where {string.Join(" and ", temps)} all reach 1");
+                }
+            }
+
+            if (_stamp.Length == 2 && DebugLabel == _stamp[0] &&
+                int.TryParse(_stamp[1], out int stampSize) && stampSize > 0)
+            {
+                int at = code.IndexOf("    out.color0.w", StringComparison.Ordinal);
+                int eol = at >= 0 ? code.IndexOf('\n', at) : -1;
+
+                if (eol < 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"diagnostic: {DebugLabel} NOT stamped - no out.color0.w to insert after");
+                }
+                else
+                {
+                    // Placed after the last colour write, so it survives whatever the
+                    // shader computed, and keyed on the fragment position so it lands in
+                    // one corner rather than over the artefact being watched.
+                    code = code.Insert(eol + 1,
+                        $"    if (in.position.x < {MslFloat(stampSize)} && in.position.y < {MslFloat(stampSize)}) {{ " +
+                        "out.color0 = float4(1.0f, 0.0f, 1.0f, 1.0f); }\n");
+
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} stamps a {stampSize}x{stampSize} magenta corner");
                 }
             }
 
