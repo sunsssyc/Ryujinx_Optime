@@ -305,6 +305,8 @@ namespace Ryujinx.Graphics.Metal
                                 $"srcseq=0x{_slotSrc[(mid - 1) % Slots]:X}->0x{_slotSrc[midSlot]:X}<-0x{_slotSrc[(mid + 1) % Slots]:X} " +
                                 $"texid={_slotTexId[(mid - 1) % Slots]}->{_slotTexId[midSlot]}<-{_slotTexId[(mid + 1) % Slots]} " +
                                 $"{srcW}x{srcH}\n" +
+                                $"    WHITE targets: {HdrPassProbe.Describe(midSlot)}\n" +
+                                $"     prev targets: {HdrPassProbe.Describe((mid - 1) % Slots)}\n" +
                                 $"    WHITE passContent: {HdrPassProbe.DescribePassContent(midSlot)}\n" +
                                 $"     prev passContent: {HdrPassProbe.DescribePassContent((mid - 1) % Slots)}\n" +
                                 $"    WHITE inputs: {HdrPassProbe.DescribeInputs(midSlot)}\n" +

@@ -383,3 +383,32 @@ disappears into the +-300 frame-to-frame spread. "Same draw total" never ruled t
 Next: count draws into that target specifically, per frame, and compare flat frames
 against their immediate predecessor - the paired control, not a periodic sample from
 another scene.
+
+### Per-target draw counts, paired: still identical
+
+Counting draws into each full resolution target and comparing a flat frame against its
+immediate predecessor (the paired control):
+
+    WHITE 1920x1080:RG11B10Float p=4,d=97    prev p=4,d=97
+    WHITE 1920x1080:RG11B10Float p=4,d=95    prev p=4,d=95
+
+Same passes, same draws, frame after frame. The "a composite draw goes missing" idea that
+the white-canvas result suggested does not survive this.
+
+Also worth recording: no 1920x1080 RGBA8_sRGB target ever appears in this list, though
+that is the format the present source carries. It is not written by a render pass at all -
+it is filled by a copy. Anything that reasons about "the pass that writes the present
+source" is reasoning about a pass that does not exist.
+
+### Where this leaves it
+
+Every counter in this tree reports flat and ordinary frames as identical: passes, draws,
+dispatches, sampled texture identities, constant buffer statistics, pass end reasons, per
+pass content of the composite target. The difference is real and visible on screen, so it
+is in data those counters do not reach - most likely inside a shader's arithmetic, on a
+value that depends on view direction.
+
+The instruments that have actually earned trust are the two outside this codebase: macOS
+compositor screenshots, and raw texture dumps decoded straight out of a GPU trace bundle.
+Both are documented above. Anything measured with an in-process probe should be checked
+against one of them before it is believed.
