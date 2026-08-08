@@ -64,7 +64,14 @@ namespace Ryujinx.Graphics.Metal
         // resolution HDR target. A white frame carries exactly one more pass on it than
         // a good frame while the draw total is unchanged, so the extra pass is empty -
         // this records where in the sequence it falls and what ended it.
-        private const int MaxWatched = 12;
+        // The 1600x896 RG11B10Float stage takes about thirty passes carrying twenty-nine
+        // draws - roughly one draw per pass, a post-process chain rather than the scene
+        // geometry, which goes to the RGBA8 target at some 1500 draws. Twelve entries cut
+        // that chain off two thirds of the way through, so the walk could never reach the
+        // pass that matters. A flat frame also carries about nine more passes than its
+        // predecessor at the same draw total, and those empty passes are only visible if
+        // the whole sequence fits.
+        private const int MaxWatched = 40;
 
         // Which RG11B10Float stage the per-pass content sampling follows. It was fixed at
         // the full resolution composite; now that the composite has been shown to read an
@@ -602,6 +609,10 @@ namespace Ryujinx.Graphics.Metal
                     sb.Append(" -> ");
                 }
 
+                // The draw count belongs beside the content: a flat frame carries about
+                // nine more passes than its predecessor at the same draw total, so which
+                // entries are empty is half of what this sequence has to say.
+                sb.Append($"[{p}]d{_slotWatched[slot][p].Draws}:");
                 sb.Append(uniform ? $"UNIFORM(0x{px[0]:X8})" : "varied");
             }
 
@@ -1224,9 +1235,19 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 Texture t = k < _toneCount ? _toneTex[k] : null;
+
+                // The raw handle as well as the canonical one. A white frame carries two
+                // 1600x896 RG11B10Float textures - one taking 29 draws across 25 passes,
+                // and one with a single pass and no draws at all - and if they alias the
+                // same guest memory their canonical pointers are equal, so a report keyed
+                // on canonical identity cannot tell which of the two was sampled. That is
+                // the merge that has produced four wrong conclusions in these notes, and
+                // here it would hide exactly the case worth checking: the composite reading
+                // the one nothing ever drew into.
                 sb.Append(t == null
                     ? $" [{k}:none]"
-                    : $" [slot{_toneIdx[k]}:{t.Width}x{t.Height}:{t.MtlFormat}:root0x{RootOf(t):X}]");
+                    : $" [slot{_toneIdx[k]}:{t.Width}x{t.Height}:{t.MtlFormat}:" +
+                      $"handle0x{t.GetHandle().NativePtr:X}:root0x{RootOf(t):X}]");
                 sb.Append($"0x{min:X8}..0x{max:X8}");
             }
 

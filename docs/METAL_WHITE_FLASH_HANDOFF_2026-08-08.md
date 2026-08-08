@@ -1056,3 +1056,34 @@ Whatever comes next, keep the technique that worked tonight: draw the value rath
 test it, keep an artefact indicator in a spare channel so the bad frames are identifiable in
 the same picture, and never compare a magnitude against a threshold chosen without knowing
 the range.
+
+### The raw handle clears the two-texture suspicion, and points at ordering
+
+A flat frame carries two 1600x896 RG11B10Float textures - one taking 29 draws over 25
+passes, and one with a single pass and no draws at all. If the composite sampled the empty
+one, the frame would be whatever that texture holds, which is the right shape for the
+artefact, and a report keyed on canonical identity could not tell them apart because
+aliases of the same guest memory share it.
+
+Printing the raw MTLTexture handle beside the canonical one settles it:
+
+    WHITE  slot128 handle 0xB910A4000 root 0xB9109BC00  span 0x001C43BC..0x781D1B7B
+    prev   slot128 handle 0xB910A4000 root 0xB9109BC00  span 0x781DFBBF..0x781E03C0
+
+Same raw handle on both. The composite is not reaching a different texture, so the
+two-texture reading is out.
+
+What the spans say is more interesting, and it is the opposite way round from the guess:
+the near-uniform sample - 0x781DFBBF to 0x781E03C0, one quantisation step of one channel -
+lands on the frame *before* each white one, while the white frame itself samples varied.
+
+Those samples are taken at present, and the composite draws in the middle of the frame, so
+the two are not measuring the same moment. Read together they describe a texture that holds
+a uniform value when the composite reads it and the scene by the time the frame ends -
+which is a read-before-write ordering fault, not corrupted content. It also fits the one
+intervention that ever moved the rate: ending the pass after every draw measured 34.2%
+against a 49.1% baseline, a partial response of the kind an ordering fault gives.
+
+To confirm rather than adopt it, the input has to be sampled at the point of use instead of
+at present - either in the shader (which has been the reliable instrument all session) or
+by blitting the input immediately before the composite pass opens.
