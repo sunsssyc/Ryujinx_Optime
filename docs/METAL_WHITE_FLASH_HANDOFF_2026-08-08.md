@@ -688,3 +688,24 @@ save-list cursor may have moved and later runs may be loading a different save t
 one the flash was characterised on. Anything automating this should verify which save it
 loaded rather than assume, and prefer hot-swapped arms inside one session over relaunching
 - the window is about two minutes against eight to ten per launch.
+
+### A save that reproduces it
+
+There is now a manual save (top of the load list, the entry without an "Autosave" badge)
+taken while the fault was on screen. Loading it on a clean build reproduces: 267/2340 by
+the probe, 9 of 24 compositor screenshots. That replaces "launch, drive in, sweep the
+camera and hope" - which failed to catch a single flat frame in three separate experiments
+- with something deterministic.
+
+Two things to carry over about running experiments against it:
+
+  - verify the frame is not black before believing any measurement. The SHOW_BIG patch
+    blanks the whole image on this shader, and a run under it reported 0 flat frames out
+    of 11580 - which was read as "this build might suppress it" when it only meant the
+    probe was looking at a black screen. Check for black first, then read the result.
+  - the drive-in must confirm what it loaded. Pressing the confirm key blindly walks onto
+    whichever entry the cursor sits on, and the manual save is distinguishable only by the
+    absence of the Autosave badge.
+
+The SHOW_BIG patch's blanking is undiagnosed. Its insert is conditional and placed after
+the last out.color0 write, so on inspection it should leave ordinary pixels alone.
