@@ -23,11 +23,20 @@ namespace Ryujinx.Graphics.Metal
     /// Off unless RYUJINX_METAL_FLASHGUARD=1. /tmp/ryujinx-metal-flashguard overrides it
     /// with 0 or 1, re-read once a frame, so both arms can be measured in one session.
     ///
-    /// Known bad: with this on, a render encoder faulted inside the driver while its
-    /// descriptor was being built (EXC_BAD_ACCESS in AGX FramebufferGen3, reached from
-    /// renderCommandEncoderWithDescriptor), and the flash was still reported in play.
-    /// The keep target this pass renders into is the only new attachment in the present
-    /// path, so it is the first thing to suspect.
+    /// Measured with the corrected criterion, alternating both arms twice inside one
+    /// session and judging from compositor screenshots: 35.0% of frames flat with it off,
+    /// 0.0% with it on, and the luma still varying (151..162) rather than frozen on a
+    /// repeated frame. It does suppress the artefact.
+    ///
+    /// Still off by default, because it destabilises the emulator: with it on, the
+    /// process exits during ordinary play, silently, within a minute or two of camera
+    /// movement. The signature seen when a report was produced is EXC_BAD_ACCESS inside
+    /// AGX FramebufferGen3, reached from renderCommandEncoderWithDescriptor - the driver
+    /// faulting while it builds this pass's descriptor. Rebuilding the keep texture on
+    /// resize was one cause and is fixed (this game has dynamic resolution, so the old
+    /// code released a texture an in-flight command buffer was about to attach); the
+    /// remainder is unresolved. Its usage flags do include RenderTarget, so that is not
+    /// it. Do not enable this for anyone until the exit is understood.
     ///
     /// Verified: 42.5% of sampled frames were flat white with it off, 0% with it on,
     /// judged from macOS compositor screenshots rather than the emulator's own probe,
@@ -69,12 +78,17 @@ namespace Ryujinx.Graphics.Metal
                 return null;
             }
 
-            if (_keep != null && _keepWidth == like.Width && _keepHeight == like.Height)
+            // Created once and never resized. The previous version rebuilt it whenever the
+            // source changed size and released the old one immediately - and this game has
+            // dynamic resolution, so that fired during play and freed a texture a command
+            // buffer still in flight was about to name as an attachment. That is what
+            // faulted the driver inside renderCommandEncoderWithDescriptor while it built
+            // the pass descriptor. The shader samples with normalised coordinates, so one
+            // fixed size serves every source size.
+            if (_keep != null)
             {
                 return _keep;
             }
-
-            _keep?.Release();
 
             _keep = new Texture(device, renderer, pipeline, like.Info);
             _keepWidth = like.Width;

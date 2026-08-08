@@ -412,3 +412,24 @@ The instruments that have actually earned trust are the two outside this codebas
 compositor screenshots, and raw texture dumps decoded straight out of a GPU trace bundle.
 Both are documented above. Anything measured with an in-process probe should be checked
 against one of them before it is believed.
+
+### FlashGuard: suppresses the artefact, still destabilises the emulator
+
+With the saturation-count criterion in place, alternating both arms twice in one session
+and judging from compositor screenshots:
+
+    guard off: 21/60 flat = 35.0%, luma 152..248
+    guard on:   0/60 flat =  0.0%, luma 151..162
+
+Zero, and the luma still moves - it is not freezing on a repeated frame.
+
+It is still off by default because the process exits during play with it on, silently,
+within a minute or two of camera movement. One cause was found and fixed: the keep
+texture was rebuilt whenever the source changed size, and this game has dynamic
+resolution, so that released a texture an in-flight command buffer was about to name as
+an attachment - which matches the one crash report that was produced (EXC_BAD_ACCESS in
+AGX FramebufferGen3, from renderCommandEncoderWithDescriptor). The remaining exits are
+not explained; the texture's usage flags do include RenderTarget, so that is not it.
+
+Anyone picking this up: the visual result is already there. What stands between it and
+being usable is that exit, not the suppression.
