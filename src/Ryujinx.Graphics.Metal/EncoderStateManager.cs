@@ -1096,8 +1096,21 @@ namespace Ryujinx.Graphics.Metal
                 for (int j = 0; j < i; j++)
                 {
                     // Check each binding for a duplicate binding before it.
+                    //
+                    // By storage, not by reference: two views of one storage are different
+                    // ITexture objects, so reference equality misses exactly the case this
+                    // dedup exists for - and with both slots left attached, the fragment
+                    // shader stores a defined value through one and an undefined value
+                    // through the other, into the same memory. That is the profile of the
+                    // TOTK white flash measured on 2026-08-09: intermittent, invisible to
+                    // every identity-keyed probe, no copy, no clear, no compute, and
+                    // landing exactly at the zero-draw mask passes at the end of the frame.
+                    bool sameStorage = colors[i] == colors[j] ||
+                        (!_dedupByReferenceOnly &&
+                            colors[i] is Texture ti && colors[j] is Texture tj &&
+                            ti.CanonicalPtr != IntPtr.Zero && ti.CanonicalPtr == tj.CanonicalPtr);
 
-                    if (colors[i] == colors[j])
+                    if (sameStorage)
                     {
                         // Prefer the binding with no write mask.
 
@@ -1851,6 +1864,12 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private static readonly string _inputWatchLabel =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_INPUT_WATCH") ?? "3ebc3a8f6b77cc8f";
+
+        // Kill switch for the storage-identity duplicate check, in case a game relies on
+        // genuinely distinct views at two slots: RYUJINX_METAL_DEDUP_BY_REF=1 restores the
+        // old reference-only comparison.
+        private static readonly bool _dedupByReferenceOnly =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_DEDUP_BY_REF") == "1";
 
         private static bool _identitySampling;
 
