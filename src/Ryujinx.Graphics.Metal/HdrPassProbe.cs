@@ -887,15 +887,12 @@ namespace Ryujinx.Graphics.Metal
             for (int p = 0; p < count && p < MaxWatched; p++)
             {
                 uint* px = words + (slot * MaxWatched + p) * SamplePixels;
-                bool uniform = true;
+                uint min = uint.MaxValue, max = 0;
 
-                for (int i = 1; i < SamplePixels; i++)
+                for (int i = 0; i < SamplePixels; i++)
                 {
-                    if (px[i] != px[0])
-                    {
-                        uniform = false;
-                        break;
-                    }
+                    if (px[i] < min) min = px[i];
+                    if (px[i] > max) max = px[i];
                 }
 
                 if (sb.Length > 0)
@@ -903,11 +900,17 @@ namespace Ryujinx.Graphics.Metal
                     sb.Append(" -> ");
                 }
 
-                // The draw count belongs beside the content: a flat frame carries about
-                // nine more passes than its predecessor at the same draw total, so which
-                // entries are empty is half of what this sequence has to say.
                 sb.Append($"[@{_slotWatched[slot][p].Ordinal}]d{_slotWatched[slot][p].Draws}:");
-                sb.Append(uniform ? $"UNIFORM(0x{px[0]:X8})" : "varied");
+
+                // Strict equality could not tell the scene from the flat state: the flat
+                // value spans one quantisation step (0x800), which fails equality just as
+                // a real scene does, so every entry printed "varied" and the sequence said
+                // nothing. Classify by span instead - the scene spans hundreds of steps.
+                ulong span = (ulong)max - min;
+
+                sb.Append(span == 0 ? $"UNIFORM(0x{px[0]:X8})"
+                    : span <= 0x1000 ? $"STEP(0x{min:X8})"
+                    : "varied");
             }
 
             return sb.Length == 0 ? "none" : sb.ToString();
