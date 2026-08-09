@@ -2044,3 +2044,26 @@ RYUJINX_METAL_SHARED_TEXTURES=1 as the revert. The remaining Vulkan differential
 pass-structure fragmentation (25-30 Load/Store round trips per texture per frame against
 MoltenVK's handful) and the blanket PixelFormatView on colour targets - both structural,
 neither cheap. The mitigation remains the shipped answer.
+
+# The next root-cause avenue (user-directed): diff the two translations
+
+The user's question stands: the flash exists on Vulkan too, rarely - so the trigger may be
+in guest shader semantics that BOTH translations mishandle, with the MSL translation
+mishandling it 175x harder. The MSL codegen has already yielded two real bugs this week
+(signed-overflow UB, invalid float literals), which makes it the prior suspect.
+
+Bounded plan:
+  1. hdrcomposite already names the ~15 programs that draw into the scene texture. Dump
+     both translations for each: MSL from /tmp/ryujinx-metal-shaders, SPIR-V by running
+     the same save once under the Vulkan backend with shader dumping on.
+  2. Diff not the text but the semantic classes where the APIs genuinely differ and the
+     translators must compensate:
+       - NaN/Inf propagation and fast-math contraction (MSL default fast-math vs SPIR-V)
+       - denormal flush behaviour
+       - discard vs demote (derivative correctness after discard)
+       - blend state and output-mask emulation (the Metal side emulates write masks)
+       - precision of the transcendental/reciprocal helpers (the bit-trick sites)
+  3. Any divergence found gets the marker treatment that worked this week: draw the value,
+     artefact flag in a spare channel, no thresholds.
+
+This is the honest root-cause path. The mitigation stays only until it lands.
