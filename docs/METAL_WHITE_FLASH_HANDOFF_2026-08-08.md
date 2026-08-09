@@ -1804,3 +1804,39 @@ Two honesty notes, recorded before any celebration this time:
 
 Status: root cause mechanism CONFIRMED at the operation level (empty-pass store), fix
 candidate works when it does not stall, stall diagnosis is the next task.
+
+### The wedge is reversible on demand, and that rewrites the mechanism
+
+On the live wedge: toggle off - presents resume instantly (0/960 to 2451/5940, whites
+flooding at ~49%); toggle on - frozen again; off - flows again. Deterministic within this
+game state, while the first window ran 1500 clean frames - so whether elision wedges
+depends on which passes the frame mix contains.
+
+Two conclusions, one practical, one structural:
+
+  1. Blanket elision is NOT shippable: some zero-draw pass's store is load-bearing for
+     guest progress (the guest spin-waits on content it produces, and resumes the moment
+     stores return). DontCare also formally marks contents undefined, which is wrong for a
+     pass whose semantics are "preserve".
+  2. The structural one. For a d0 pass, store writes back exactly what load brought in.
+     Elision stopping the flash therefore proves: on flash frames THE LOAD BRINGS IN WHITE
+     while memory still holds the scene, and the store then overwrites good memory with
+     it. The fault is in the load. A load that returns white instead of content is a
+     texture whose contents are UNDEFINED - and a freshly created MTLTexture is exactly
+     that. The texture cache recreates scene-sized textures constantly (the alias churn
+     measured at ~90 creates/second in the OOM notes); a recreation whose
+     content-preserving copy has not landed before the first Load/Store pass reads
+     undefined tile data (white on this driver), crystallises it, and the composite
+     consumes it one frame later.
+
+That one mechanism covers every axiom at once: intermittent (churn-dependent), immune to
+guest barriers (no ordering violation inside the command stream), invisible to every write
+hook (nothing writes - the texture is simply new), the two-allocation census (the fresh
+allocation IS the second identity), Vulkan 175x rarer (undefined memory there is usually
+the old allocation's bytes - the old scene, which is invisible), and elision suppressing
+the symptom by refusing to crystallise the undefined load.
+
+Next and final localisation step: log texture-cache recreations of 1600x896 RG11B10Float
+storages with frame numbers, and correlate against flash frames. If they line up, the fix
+is in the shared layer: guarantee the content copy (or a clear) executes before any
+Load-action pass on a freshly created texture - a real ordering bug, fixable narrowly.
