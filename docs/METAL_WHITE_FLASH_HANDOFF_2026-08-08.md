@@ -2152,3 +2152,17 @@ If this is picked up again, the two things worth doing first, in order:
      reproduction case and no further emulator-side work is implied by it
 
 Diagnostics all default off. tools/satmark_run.sh drives the reproducing save.
+
+### Narrowing the feedback check: 65,000 -> 10,000, still not discriminating
+
+Restricting the match to the same level and the same layer cut the count by 6.5x but left
+it constant rather than rare. The reason is structural: base textures carry FirstLevel and
+FirstLayer of zero, so the narrowing only separates views, and the check still compares
+against every non-null entry of _currentState.RenderTargets - which can hold targets bound
+for an earlier pass rather than the attachments of the pass actually open.
+
+Making this discriminate would mean comparing against the live pass descriptor's
+attachments only. That is the next refinement if anyone returns to it, and it is the third
+iteration of the same instrument - each previous one buried the signal under legal traffic.
+
+The narrowing stays regardless: it strictly reduces unnecessary pass splits.
