@@ -1663,3 +1663,38 @@ aborts in Metal validation on camera movement (IOGPUMetalCommandBuffer validate 
 MTLReportFailure), the signature of an attachment nulled while the pipeline still declares
 it. Defaulted back to reference-only; /tmp/ryujinx-metal-dedup-by-storage=1 re-enables it
 for experiments.
+
+# The localisation plan (2026-08-09, designed before further experiments)
+
+Axioms (survived all retractions): A1 the composite fetches a near-white uniform from the
+scene texture mid-frame while the same texture is varied at that frame's present; A2 the
+flip happens between two specific zero-draw passes at the tail of frame N-1 (charted); A3
+every enumerable command-stream write path reports zero in that window; A4 the only
+rate-moving intervention is per-draw serialisation (49->34%), and Vulkan shows the fault at
+175x lower rate.
+
+Inference: A2 bounds the writer to a finite interval; A3 says no hooked command writes
+there. Either an unhooked command does, or the writer is not in the command stream at all -
+which is physically possible only if the texture lives in CPU-writable memory.
+
+Phase 0 (code read) - RESOLVED: MTLTextureDescriptor never sets StorageMode (Texture.cs
+ctor), so every texture defaults to Shared on Apple silicon; every buffer is explicitly
+Shared (BufferManager.cs:68,126). The CPU branch is alive: any mis-offset staging/mirror
+write can rewrite texture bytes with no GPU command, invisibly to every instrument used so
+far, timing-sensitive, and impossible on Vulkan's device-local images - matching A3 and A4
+in one stroke.
+
+Phase 1 (one run): a global operation-sequence ring - every pass begin (target), blit
+copy (src/dst), dispatch, SetData, buffer-to-texture upload, with frame and sequence
+number. When the pass-content chart sees the varied->UNIFORM flip on the watched texture,
+dump the ring slice between the two sample points. The writer is either in the slice
+(named directly) or absent (CPU branch confirmed).
+
+Phase 2 (one run, if CPU branch): hash the texture content via blit at each op boundary
+inside the slice to pin the flip between two adjacent GPU ops; content changing with no op
+between means a CPU write, then audit CPU writers by address range (BufferMirror,
+StagingBuffer, PersistentFlushBuffer) - all Shared, all able to reach texture memory.
+
+Termination: each phase halves the space; at most three instrumented runs to a named
+writer. Detection stays on the deterministic uniform test (packed-word min==max), no
+thresholds anywhere.
