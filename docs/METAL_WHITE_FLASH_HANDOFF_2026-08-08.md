@@ -1776,3 +1776,31 @@ Next, one experiment, two candidate implementations:
   - or, cheaper probe first: log which call path opens these d0 passes (stack or caller
     flag on GetOrCreateRenderEncoder(forDraw=false)) - if they come from a state setter
     that forces the encoder open, lazy opening is a small patch.
+
+### The elision experiment: causal - and the implementation stalls intermittently
+
+In-session, single variable, reproduction verified hot on both sides:
+
+    baseline   602/1560 = 38.6%   luma 163
+    ELIDE        0/1500 =  0.0%   luma 158    (full frame rate, 1500 presents)
+    baseline   694/1620 = 42.8%   luma 154    (reverts on switch-off - reversible)
+
+Zero flat frames in 1500 with the picture alive, bracketed by hot baselines. The white
+crystallises at the store of zero-draw Load/Store passes; suppress those stores and the
+flash is gone. That is the causal answer the whole plan was built to produce.
+
+Two honesty notes, recorded before any celebration this time:
+
+  - the second ELIDE window stalled: presents stopped advancing (14 identical compositor
+    screenshots, presentprobe counter frozen) and resumed when the toggle came off. The
+    first window ran 1500 frames at full rate, so the stall is intermittent. Most likely
+    some encoder-end path bypasses the store-action fixup, leaving Unknown at EndEncoding -
+    a validation failure that wedges the command buffer and everything waiting on it.
+    Find it before calling this a fix: audit every path that ends a render encoder, and
+    have the fixup log if it ever runs with nothing to set.
+  - the elision is still a mitigation of the crystallisation point, not an explanation of
+    why tile memory holds white on load. The compression-metadata reading fits everything
+    but is unproven. Upstreaming should present both.
+
+Status: root cause mechanism CONFIRMED at the operation level (empty-pass store), fix
+candidate works when it does not stall, stall diagnosis is the next task.
