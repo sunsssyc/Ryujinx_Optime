@@ -1840,6 +1840,18 @@ namespace Ryujinx.Graphics.Metal
             return (gpuAddress, nativePtr);
         }
 
+        /// <summary>
+        /// Which program's texture bindings the input report follows.
+        ///
+        /// It was hardcoded to 3ebc3a8f6b77cc8f - the tonemap - in three places, while the
+        /// shader being measured in-shader all session is ee89b4e471373459, the composite.
+        /// So every "WHITE inputs" line described a different program's bindings than the
+        /// fetch measurement it was being read alongside, and the two were never about the
+        /// same texture.
+        /// </summary>
+        private static readonly string _inputWatchLabel =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_INPUT_WATCH") ?? "3ebc3a8f6b77cc8f";
+
         private static bool _identitySampling;
 
         /// <summary>
@@ -2027,7 +2039,7 @@ namespace Ryujinx.Graphics.Metal
                             (ulong gpuAddress, IntPtr nativePtr) = AddressForBuffer(ref buffer);
 
                             if (HdrPassProbe.Enabled && buffer.Buffer != null && index == 20 &&
-                                program.DebugLabel == "3ebc3a8f6b77cc8f")
+                                program.DebugLabel == _inputWatchLabel)
                             {
                                 MTLBuffer tb = buffer.Buffer.GetUnsafe().Value;
                                 HdrPassProbe.NoteToneMapWeights(tb.Contents, buffer.Range?.Offset ?? 0);
@@ -2145,7 +2157,7 @@ namespace Ryujinx.Graphics.Metal
                                     HdrPassProbe.NoteCompositeDraw(
                                         program.DebugLabel, _currentState.RenderTargets[0]);
 
-                                    if (program.DebugLabel == "3ebc3a8f6b77cc8f")
+                                    if (program.DebugLabel == _inputWatchLabel)
                                     {
                                         HdrPassProbe.NoteToneMapSlotId(index, gpuAddress, texture.Storage);
                                     }
@@ -2228,7 +2240,7 @@ namespace Ryujinx.Graphics.Metal
                                     // array segment, everything compared so far was a
                                     // different texture than the one the shader samples.
                                     if (HdrPassProbe.Enabled && hasTexture &&
-                                        program.DebugLabel == "3ebc3a8f6b77cc8f")
+                                        program.DebugLabel == _inputWatchLabel)
                                     {
                                         HdrPassProbe.NoteToneMapInput(1000 + binding + i, texture.Storage);
                                     }

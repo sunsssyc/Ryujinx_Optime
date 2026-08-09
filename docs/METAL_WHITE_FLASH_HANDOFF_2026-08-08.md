@@ -1291,3 +1291,34 @@ tex_fp_t_tcb_8 actually resolves to, at the moment the shader reads it:
 The composite's input is white when it is fetched. Which host texture that is remains
 unidentified, and identifying it is the next step: record the binding for this shader only,
 rather than every texture bound to any draw on the target.
+
+### The input report was following a different program the whole time
+
+NoteToneMapInput's call sites were hardcoded to program.DebugLabel == "3ebc3a8f6b77cc8f" in
+three places. That is the tonemap. The shader measured in-shader all session is
+ee89b4e471373459, the composite. So every "WHITE inputs" and "prev inputs" line printed the
+tonemap's bindings while being read alongside a fetch measurement from the composite - two
+different programs, never the same texture.
+
+The label is now RYUJINX_METAL_INPUT_WATCH, defaulting to the old value. Pointed at the
+composite it reports:
+
+    slot128 -> root 0xC9BBCC000 -> census p=1,  d=0
+    slot136 -> root 0xC9BB15E00 -> census p=25, d=1528
+
+Two entries for a shader whose Textures struct declares one texture, because the array and
+non-array binding branches both record.
+
+Which one it samples follows without another run. The p=1 d=0 texture is cleared to black
+every frame and written by nothing else, so a shader sampling it would produce a black
+screen. Ordinary frames show the scene. Therefore the composite samples 0xC9BB15E00 - the
+scene texture, with its 1528 draws.
+
+That closes the identity question and returns the statement to its stable form, now about a
+properly identified texture: at the moment the composite fetches it, the scene texture reads
+white on flat frames, and by the end of the frame it holds the scene.
+
+The CPU-side spans cannot corroborate that either way. They are sampled at present, after
+the frame's rendering has finished, and across pairs they come out inconsistent - narrow on
+the predecessor in some, narrow on both in others. Only the in-shader measurement is taken
+at the point of use, and it is the one to trust.
