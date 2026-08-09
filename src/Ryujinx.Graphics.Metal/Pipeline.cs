@@ -826,7 +826,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void DispatchCompute(int groupsX, int groupsY, int groupsZ)
         {
-            OpRing.NoteDispatch();
+            OpRing.NoteDispatch(_encoderStateManager.ComputeProgram?.DebugLabel);
             DispatchCompute(groupsX, groupsY, groupsZ, String.Empty);
         }
 

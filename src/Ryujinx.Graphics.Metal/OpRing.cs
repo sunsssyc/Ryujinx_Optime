@@ -28,6 +28,7 @@ namespace Ryujinx.Graphics.Metal
             public byte Kind; // 1 pass, 2 blit tex->tex, 3 buf->tex, 4 setdata, 5 dispatch, 6 tex->buf
             public IntPtr A;
             public IntPtr B;
+            public string Label;
         }
 
         private static readonly Entry[] _ring = new Entry[Size];
@@ -41,7 +42,7 @@ namespace Ryujinx.Graphics.Metal
             _frame++;
         }
 
-        private static void Note(byte kind, IntPtr a, IntPtr b)
+        private static void Note(byte kind, IntPtr a, IntPtr b, string label = null)
         {
             if (!PresentProbe.Enabled)
             {
@@ -54,13 +55,14 @@ namespace Ryujinx.Graphics.Metal
             e.Kind = kind;
             e.A = a;
             e.B = b;
+            e.Label = label;
         }
 
         public static void NotePass(IntPtr rt0, IntPtr depth) => Note(1, rt0, depth);
         public static void NoteTexCopy(IntPtr src, IntPtr dst) => Note(2, src, dst);
         public static void NoteBufToTex(IntPtr dst) => Note(3, IntPtr.Zero, dst);
         public static void NoteSetData(IntPtr dst) => Note(4, IntPtr.Zero, dst);
-        public static void NoteDispatch() => Note(5, IntPtr.Zero, IntPtr.Zero);
+        public static void NoteDispatch(string label) => Note(5, IntPtr.Zero, IntPtr.Zero, label);
         public static void NoteTexToBuf(IntPtr src) => Note(6, src, IntPtr.Zero);
 
         private static string KindName(byte k) => k switch
@@ -109,6 +111,11 @@ namespace Ryujinx.Graphics.Metal
                 if (e.B != IntPtr.Zero)
                 {
                     sb.Append($"->0x{e.B:X}");
+                }
+
+                if (e.Label != null)
+                {
+                    sb.Append($"({e.Label})");
                 }
             }
 

@@ -1062,7 +1062,12 @@ namespace Ryujinx.Graphics.Metal
                 }
                 else if (prevVaried >= 0)
                 {
-                    return $"flip@{prevVaried}->{p}(0x{px[0]:X8}) ops:" +
+                    // The flipped-to pass's own draw count and load action, inline: d0
+                    // with clr=False makes that pass's load action the prime suspect for
+                    // this one pass, whatever the global audit said about the others.
+                    PassDetail d = p < MaxWatched ? _slotWatched[slot][p] : default;
+
+                    return $"flip@{prevVaried}->{p}(0x{px[0]:X8},d{d.Draws},clr={d.Cleared}) ops:" +
                         OpRing.Describe(_slotSampleSeq[slot][prevVaried], _slotSampleSeq[slot][p]);
                 }
             }
