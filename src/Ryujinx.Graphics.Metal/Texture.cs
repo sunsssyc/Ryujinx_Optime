@@ -62,7 +62,16 @@ namespace Ryujinx.Graphics.Metal
                 TextureType = Info.Target.Convert(),
                 Width = (ulong)Info.Width,
                 Height = (ulong)Info.Height,
-                MipmapLevelCount = (ulong)Info.Levels
+                MipmapLevelCount = (ulong)Info.Levels,
+
+                // Private, matching what MoltenVK allocates for VkImages. Left unset this
+                // defaulted to Shared on Apple silicon, routing every texture through the
+                // driver's CPU-coherent tile paths - the region where the load fault
+                // lives. MoltenVK on the same driver shows the artefact at 1/175th the
+                // rate, and device-local storage is its sharpest usage difference. All
+                // texture data movement here already goes through blit encoders.
+                // RYUJINX_METAL_SHARED_TEXTURES=1 restores the old default.
+                StorageMode = _sharedTextures ? MTLStorageMode.Shared : MTLStorageMode.Private,
             };
 
             if (info.Target == Target.Texture3D)
@@ -204,6 +213,9 @@ namespace Ryujinx.Graphics.Metal
 
             return usage;
         }
+
+        private static readonly bool _sharedTextures =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_SHARED_TEXTURES") == "1";
 
         private static readonly bool _depthPixelFormatView =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_DEPTH_PFV") == "1";
