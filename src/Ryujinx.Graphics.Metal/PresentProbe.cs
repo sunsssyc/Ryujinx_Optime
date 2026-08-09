@@ -321,6 +321,8 @@ namespace Ryujinx.Graphics.Metal
                                 $"    WHITE nonRenderWrites: {HdrPassProbe.DescribeWrites(midSlot)}\n" +
                                 $"    WHITE coverage:{CoverageProbe.Describe(midSlot)}\n" +
                                 $"     prev coverage:{CoverageProbe.Describe((mid - 1) % Slots)}\n" +
+                                $"    WHITE order: {HdrPassProbe.DescribeOrdinals(midSlot)}\n" +
+                                $"     prev order: {HdrPassProbe.DescribeOrdinals((mid - 1) % Slots)}\n" +
                                 $"    WHITE sceneCopies:{HdrPassProbe.DescribeSceneCopies(midSlot)}\n" +
                                 $"     prev sceneCopies:{HdrPassProbe.DescribeSceneCopies((mid - 1) % Slots)}\n" +
                                 $"     prev presentSrc: {HdrPassProbe.DescribePresentWritten((mid - 1) % Slots)}");

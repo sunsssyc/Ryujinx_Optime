@@ -1338,3 +1338,42 @@ About 1800 samples an arm, both rendering. No effect.
 Four mechanisms are now ruled out at adequate power against this reproduction: guest
 texture barriers, argument-buffer residency on the parent, command buffer splitting, and
 every property of the composite shader itself.
+
+## The composite is pass 2 of every frame, so every instrument was one frame late
+
+Counting pass ordinals within a frame and printing them paired:
+
+    WHITE order: composite@2 lastScene@167 of 169
+    prev  order: composite@2 lastScene@175 of 177
+    WHITE order: composite@2 lastScene@162 of 164
+    prev  order: composite@2 lastScene@170 of 172
+
+The composite is the second pass of the frame, always, on flat frames and ordinary ones
+alike, while the last scene pass is around the 167th. So frame N's composite consumes the
+scene buffer as frame N-1 left it. That is ordinary structure for a pipeline that composites
+the previous frame's scene - and it inverts the causal direction this investigation has been
+reading all along.
+
+It also resolves the observation that looked backwards. The input sampler reported the
+near-uniform span on the frame *before* each white one, which made no sense while the white
+frame was assumed to be where the fault happened. It is exactly right: the present-time
+sample of frame N-1 is what frame N's composite goes on to read, because the composite runs
+at ordinal 2 and nothing writes that texture in between. Three pairs out of three.
+
+So the question is no longer "why does the composite read white". It is:
+
+    why does the scene buffer end about 40% of frames holding a uniform value,
+    on frames that themselves display correctly?
+
+Every probe aimed at the flat frame was aimed one frame too late. The chain content walk,
+the coverage counts, the in-shader markers - all of them measured the frame that displays
+the fault rather than the frame that creates it. What they established about the composite
+still stands (it covers, it does not saturate, it faithfully reproduces its input), and that
+is now the expected result rather than a puzzle: the composite is innocent because the
+damage was already done a frame earlier.
+
+Next: point the per-pass content walk at the scene texture the composite actually samples -
+the 1600x896 RG11B10Float with ~1528 draws, not the one that only takes a clear - and find
+which of its ~167 passes leaves it uniform. The walk already exists; it has been following
+the wrong one of the two, because IsWatchedTarget matches on width and format and there are
+two textures answering to both.

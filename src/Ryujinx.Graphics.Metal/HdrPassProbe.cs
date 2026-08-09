@@ -471,8 +471,62 @@ namespace Ryujinx.Graphics.Metal
         private static readonly int[] _openIndices = new int[Constants.MaxColorAttachments];
         private static int _openIndexCount;
 
+        /// <summary>
+        /// Where the composite pass falls in the frame relative to the scene passes.
+        ///
+        /// The one fact that survives every check is that the composite fetches white out of
+        /// the scene texture while that same texture holds the scene by the end of the
+        /// frame. Barriers, residency and command buffer splitting have all been ruled out
+        /// at adequate power, which leaves the plain ordering of the passes themselves: if
+        /// the composite is encoded before the scene has finished writing, it reads what was
+        /// there before.
+        ///
+        /// Counting ordinals is enough to answer it and costs nothing - no Metal call, no
+        /// pass split. A flat frame whose composite ordinal sits below its last scene
+        /// ordinal, against a predecessor where it sits above, is the fault stated in one
+        /// line.
+        /// </summary>
+        private static int _passOrdinal;
+        private static int _pendingCompositeOrdinal = -1;
+        private static int _pendingLastSceneOrdinal = -1;
+        private static readonly int[] _slotCompositeOrdinal = new int[Slots];
+        private static readonly int[] _slotLastSceneOrdinal = new int[Slots];
+        private static readonly int[] _slotPassTotal = new int[Slots];
+
+        public static string DescribeOrdinals(int slot)
+        {
+            return $"composite@{_slotCompositeOrdinal[slot]} lastScene@{_slotLastSceneOrdinal[slot]} of {_slotPassTotal[slot]}" +
+                (_slotCompositeOrdinal[slot] >= 0 && _slotLastSceneOrdinal[slot] > _slotCompositeOrdinal[slot]
+                    ? "  <-- composite encoded BEFORE the last scene pass"
+                    : string.Empty);
+        }
+
+        private static void NoteOrdinal(Texture target)
+        {
+            if (target == null || target.MtlFormat != MTLPixelFormat.RG11B10Float)
+            {
+                return;
+            }
+
+            if (target.Width >= 1900 && _pendingCompositeOrdinal < 0)
+            {
+                _pendingCompositeOrdinal = _passOrdinal;
+            }
+            else if (target.Width == 1600)
+            {
+                _pendingLastSceneOrdinal = _passOrdinal;
+            }
+        }
+
         public static void BeginPassAll(Texture[] targets, bool clearLoadAction)
         {
+            _passOrdinal++;
+
+            for (int i = 0; i < targets.Length; i++)
+            {
+                NoteOrdinal(targets[i]);
+            }
+
             _openIndexCount = 0;
 
             BeginPass(targets.Length > 0 ? targets[0] : null, clearLoadAction);
@@ -822,6 +876,13 @@ namespace Ryujinx.Graphics.Metal
             {
                 sceneCopies[i] = _pendingSceneCopy[i];
             }
+
+            _slotCompositeOrdinal[slot] = _pendingCompositeOrdinal;
+            _slotLastSceneOrdinal[slot] = _pendingLastSceneOrdinal;
+            _slotPassTotal[slot] = _passOrdinal;
+            _pendingCompositeOrdinal = -1;
+            _pendingLastSceneOrdinal = -1;
+            _passOrdinal = 0;
 
             _slotSceneCopyCount[slot] = _pendingSceneCopyCount;
             _slotSceneCopyDropped[slot] = _pendingSceneCopyDropped;
