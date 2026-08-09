@@ -1051,13 +1051,18 @@ namespace Ryujinx.Graphics.Metal
                     continue; // not freshly sampled this frame - stale pixels, skip
                 }
 
-                if (!uniform)
+                // Only the white signature counts as a flip. The first uniform of any
+                // value is the frame's ordinary black clear, and returning on it hid the
+                // white flip behind it on every frame.
+                bool white = uniform && px[0] >= 0x77D00000u && px[0] <= 0x78200000u;
+
+                if (!white)
                 {
                     prevVaried = p;
                 }
                 else if (prevVaried >= 0)
                 {
-                    return $"flip@{prevVaried}->{p} ops:" +
+                    return $"flip@{prevVaried}->{p}(0x{px[0]:X8}) ops:" +
                         OpRing.Describe(_slotSampleSeq[slot][prevVaried], _slotSampleSeq[slot][p]);
                 }
             }
