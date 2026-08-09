@@ -135,24 +135,25 @@ namespace Ryujinx.Graphics.Metal
                 _encoderStateManager.SignalRenderDirty();
             }
 
+            // A draw that samples one of its own attachments reads undefined data on
+            // Metal. End the pass first so it reads finished writes instead. Decided from
+            // bound state before the prepass runs and before any encoder is acquired: the
+            // previous version decided during the prepass and had to end the pass from
+            // inside encoder acquisition, which faulted the driver at drawIndexedPrimitives.
+            // Only when the pass already carries draws - with none there is nothing to
+            // order, and that also stops this looping, since the feedback does not go away.
+            if (forDraw && (FeedbackProbe.Fix || FeedbackProbe.FixLive) &&
+                Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
+                DrawCount != _drawCountAtPassStart &&
+                _encoderStateManager.SamplesOwnAttachment())
+            {
+                EndCurrentPass(PassEndReason.FragmentDependency);
+                _encoderStateManager.SignalRenderDirty();
+            }
+
             if (forDraw)
             {
-                FeedbackProbe.TakeDetected();
-
                 _encoderStateManager.RenderResourcesPrepass();
-
-                // A draw that samples one of its own attachments reads undefined data on
-                // Metal. Ending the pass first turns that into finished writes. Only when
-                // the pass already carries draws: with none there is nothing to order, and
-                // that condition also stops this from looping, since the feedback itself
-                // does not go away.
-                if (FeedbackProbe.Fix && FeedbackProbe.TakeDetected() &&
-                    Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
-                    DrawCount != _drawCountAtPassStart)
-                {
-                    EndCurrentPass(PassEndReason.FragmentDependency);
-                    _encoderStateManager.RenderResourcesPrepass();
-                }
             }
 
             // Before the pass opens, while switching encoders is still legal, record what
@@ -405,6 +406,7 @@ namespace Ryujinx.Graphics.Metal
 
             AppliedRenderState.RefreshToggle();
             EncoderStateManager.RefreshDedupToggle();
+            FeedbackProbe.RefreshToggle();
             RefreshSkipDispatch();
             OpRing.OnPresent();
             FlashGuard.RefreshToggle();

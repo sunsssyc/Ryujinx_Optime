@@ -2033,21 +2033,36 @@ namespace Ryujinx.Graphics.Metal
         /// guest barriers per frame as no-ops, which is exactly the population that could
         /// leave a sampled texture still attached.
         /// </summary>
-        private readonly void CheckFeedback(TextureBase storage)
+        /// <summary>
+        /// Whether any texture currently bound for sampling is also an attachment of the
+        /// pass that is open. Reads bound state only, so it can be answered before
+        /// RenderResourcesPrepass runs - which is the whole point: the previous version
+        /// answered it during the prepass and had to end the pass from inside encoder
+        /// acquisition, which faulted the driver.
+        /// </summary>
+        public readonly bool SamplesOwnAttachment()
         {
-            if (!FeedbackProbe.Enabled || storage is not Texture sampled)
+            if (!FeedbackProbe.Enabled)
             {
-                return;
+                return false;
             }
 
-            FeedbackProbe.CheckAgainstLiveAttachments(sampled);
+            bool any = false;
+
+            foreach (TextureRef reference in _currentState.TextureRefs)
+            {
+                if (reference.Storage is Texture sampled && FeedbackProbe.CheckAgainstLiveAttachments(sampled))
+                {
+                    any = true;
+                }
+            }
+
+            return any;
         }
 
         private readonly (ulong gpuAddress, IntPtr nativePtr) AddressForTexture(ref TextureRef texture)
         {
             TextureBase storage = texture.Storage;
-
-            CheckFeedback(storage);
 
             ulong gpuAddress = 0;
             IntPtr nativePtr = IntPtr.Zero;

@@ -22,7 +22,24 @@ namespace Ryujinx.Graphics.Metal
     {
         // Detection runs whenever either the report or the fix is wanted.
         public static readonly bool Enabled =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_FEEDBACK") == "1" || Fix;
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FEEDBACK") != "0";
+
+        // Hot-swappable so both arms run in one session against the same save.
+        private static bool _fixLive;
+
+        public static void RefreshToggle()
+        {
+            try
+            {
+                _fixLive = System.IO.File.Exists("/tmp/ryujinx-metal-feedback-fix") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-feedback-fix").Trim() == "1";
+            }
+            catch (System.IO.IOException)
+            {
+            }
+        }
+
+        public static bool FixLive => _fixLive;
 
         private static readonly bool _report =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_FEEDBACK") == "1";
@@ -95,11 +112,11 @@ namespace Ryujinx.Graphics.Metal
         /// attachment of the pass that is actually open - not one left in the state from
         /// an earlier pass, which is what two previous versions of this counted.
         /// </summary>
-        public static void CheckAgainstLiveAttachments(Texture sampled)
+        public static bool CheckAgainstLiveAttachments(Texture sampled)
         {
             if (!Enabled || _liveRoot == null || sampled == null)
             {
-                return;
+                return false;
             }
 
             IntPtr sampledRoot = sampled.CanonicalPtr != IntPtr.Zero ? sampled.CanonicalPtr : sampled.GetHandle().NativePtr;
@@ -111,8 +128,12 @@ namespace Ryujinx.Graphics.Metal
                     _liveLayer[i] == sampled.FirstLayer)
                 {
                     Note(i, sampled.Width, sampled.Height, sampled.MtlFormat.ToString(), sampledRoot);
+
+                    return true;
                 }
             }
+
+            return false;
         }
 
         public static void Note(int attachmentIndex, int width, int height, string format, IntPtr root)
