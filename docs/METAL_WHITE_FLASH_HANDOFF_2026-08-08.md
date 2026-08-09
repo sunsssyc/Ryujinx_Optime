@@ -1870,3 +1870,29 @@ Next session, two measurements:
      proves metadata desync at the driver level
   2. correlate SM:u upload events targeting this texture with flash frames - the counter
      is already per-frame in the probe line; per-texture attribution is one hook away
+
+### Plain-play verdict: elision does not fix the real game
+
+Narrow elision (scene-class only), plain launch, no probes, judged from compositor
+screenshots: the game flows (23 of 30 frames distinct - the wedge was probe interaction,
+both blanket and narrow) but the flash persists at 8 of 30, mean 255.
+
+So the elision result was real but probe-scoped: under the probe environment the white
+crystallises in the d0 pass fragments the probes themselves split off, and eliding their
+stores suppresses it. In plain play the same white tile content enters through passes that
+carry draws, whose stores cannot be elided. Store-side fixes are closed.
+
+What every configuration agrees on: tile memory starts WHITE on a load that should have
+brought in the scene. The fix has to address the load. Remaining suspects for a skipped or
+wrong load on a long-lived uncompressed texture: the pass descriptor's texture handle
+being a different view/slice of the storage than the one the content lives in (the
+identity trap, fifth appearance), or a driver-level load elision triggered by something
+this backend sets. Next instrument: log the attachment's raw MTLTexture pointer + level +
+slice for scene-class passes on flash frames and compare against where the content
+actually resides.
+
+One honest note on confidence, asked directly by the user tonight: the localisation is
+strong and every step is instrumented, but no shippable fix exists yet, and the last three
+candidate mechanisms (metadata desync, fresh textures, store crystallisation) each died
+under one more measurement. The next session starts at the attachment-identity check, not
+at a fix.
