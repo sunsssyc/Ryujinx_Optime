@@ -2094,3 +2094,32 @@ splits the scene texture's rendering into 25-30 Load/Store round trips per frame
 MoltenVK maps Vulkan renderpasses roughly 1:1 and takes a handful. The fault crystallises
 at Load/Store boundaries, so the dice are rolled an order of magnitude more often here.
 That is the last standing structural difference and the only one not yet measured.
+
+### Attachment feedback: real, constant, and not the flash
+
+A draw sampling a texture that is simultaneously one of its own colour attachments is
+undefined in Metal, returns garbage that reads near-white on this hardware, and involves no
+write at all - which would explain why every write-side hook came back empty. The probe
+(RYUJINX_METAL_FEEDBACK=1, comparing storage roots) finds it constantly: 65,000
+occurrences in twenty seconds, across attachment indices 0-7 and every size class
+including 1600x896.
+
+Treating it as the implicit barrier the guest expects - end the pass before such a draw
+when the pass already carries draws - measured 11/30 flat against a 14-15/30 baseline.
+Inside the swing. Not the flash.
+
+The count itself explains why: at ~108 per frame this is ordinary, legal behaviour being
+flagged. The check compares storage roots, so a texture attached at one mip and sampled at
+another - mip generation, the commonest pattern in any post chain - counts as feedback
+while being perfectly defined. A version that discriminated level and slice would report a
+far smaller number, and only that residue could be the fault.
+
+The pass-split fix stays on (RYUJINX_METAL_FEEDBACK_FIX=0 opts out): where the levels do
+overlap it is genuinely required, and it costs only passes that already had draws.
+
+Also settled this round, on the user's report that the build felt slow: the mitigation
+costs no frame rate at all - 29.9 fps with it, 30.0 without, measured from the 120-frame
+sync-stat interval. What it costs is motion. At this location the flash rate is ~47%, so
+nearly half of all frames are replaced by the previous good one, which is 16 fps of real
+movement inside a 30 fps stream. That is the judder, and it is inherent to repeating a
+frame rather than repairing it.
