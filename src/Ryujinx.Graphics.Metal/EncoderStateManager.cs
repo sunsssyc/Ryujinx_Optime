@@ -2016,9 +2016,46 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        /// <summary>
+        /// Sampling a texture that is simultaneously a colour attachment is undefined in
+        /// Metal, and undefined reads on this hardware come back near-white - the flash's
+        /// exact signature. It also fits every other constraint at once: no write happens
+        /// so every write hook is blind, it is intermittent because it depends on whether
+        /// the guest's barrier was honoured, and MoltenVK does not expose it because
+        /// Vulkan's own feedback rules force a different structure. This backend skips 89
+        /// guest barriers per frame as no-ops, which is exactly the population that could
+        /// leave a sampled texture still attached.
+        /// </summary>
+        private readonly void CheckFeedback(TextureBase storage)
+        {
+            if (!FeedbackProbe.Enabled || storage is not Texture sampled)
+            {
+                return;
+            }
+
+            IntPtr sampledRoot = sampled.CanonicalPtr != IntPtr.Zero ? sampled.CanonicalPtr : sampled.GetHandle().NativePtr;
+
+            for (int i = 0; i < _currentState.RenderTargets.Length; i++)
+            {
+                if (_currentState.RenderTargets[i] is not Texture target)
+                {
+                    continue;
+                }
+
+                IntPtr targetRoot = target.CanonicalPtr != IntPtr.Zero ? target.CanonicalPtr : target.GetHandle().NativePtr;
+
+                if (targetRoot == sampledRoot)
+                {
+                    FeedbackProbe.Note(i, sampled.Width, sampled.Height, sampled.MtlFormat.ToString(), targetRoot);
+                }
+            }
+        }
+
         private readonly (ulong gpuAddress, IntPtr nativePtr) AddressForTexture(ref TextureRef texture)
         {
             TextureBase storage = texture.Storage;
+
+            CheckFeedback(storage);
 
             ulong gpuAddress = 0;
             IntPtr nativePtr = IntPtr.Zero;
