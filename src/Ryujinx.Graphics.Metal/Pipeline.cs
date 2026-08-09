@@ -377,6 +377,7 @@ namespace Ryujinx.Graphics.Metal
 
             AppliedRenderState.RefreshToggle();
             EncoderStateManager.RefreshDedupToggle();
+            OpRing.OnPresent();
             FlashGuard.RefreshToggle();
             RefreshBarrierToggle();
             EncoderStateManager.RefreshSamplingToggle();
@@ -817,6 +818,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void DispatchCompute(int groupsX, int groupsY, int groupsZ)
         {
+            OpRing.NoteDispatch();
             DispatchCompute(groupsX, groupsY, groupsZ, String.Empty);
         }
 

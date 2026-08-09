@@ -97,6 +97,23 @@ namespace Ryujinx.Graphics.Metal
         }
 
         private static readonly PassDetail[][] _slotWatched = CreateWatched();
+
+        // The op-ring sequence at each chart sample point, so the flip between two
+        // samples names an interval of actual operations rather than a span of time.
+        private static readonly long[][] _slotSampleSeq = CreateSampleSeq();
+        private static readonly long[] _pendingSampleSeq = new long[MaxWatched + 1];
+
+        private static long[][] CreateSampleSeq()
+        {
+            long[][] slots = new long[Slots][];
+
+            for (int i = 0; i < Slots; i++)
+            {
+                slots[i] = new long[MaxWatched + 1];
+            }
+
+            return slots;
+        }
         private static readonly int[] _slotWatchedCount = new int[Slots];
 
         private static readonly PassDetail[] _pendingWatched = new PassDetail[MaxWatched];
@@ -888,6 +905,11 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            if (passIndex <= MaxWatched)
+            {
+                _pendingSampleSeq[passIndex] = OpRing.Seq;
+            }
+
             _openWatchedTarget = target;
 
             if (passIndex >= MaxWatched)
@@ -971,6 +993,50 @@ namespace Ryujinx.Graphics.Metal
             return sb.Length == 0 ? "none" : sb.ToString();
         }
 
+        /// <summary>
+        /// The operation slice between the last varied sample and the first uniform one -
+        /// the interval that contains the writer, whoever it is. "none" with a non-empty
+        /// interval is itself the answer: no command wrote it, so the CPU did.
+        /// </summary>
+        public static unsafe string DescribeFlipOps(int slot)
+        {
+            if (_sampleBuf.NativePtr == IntPtr.Zero)
+            {
+                return "n/a";
+            }
+
+            int count = _slotWatchedCount[slot];
+            uint* words = (uint*)_sampleBuf.Contents;
+            int prevVaried = -1;
+
+            for (int p = 0; p < count && p < MaxWatched; p++)
+            {
+                uint* px = words + (slot * MaxWatched + p) * SamplePixels;
+                bool uniform = true;
+
+                for (int i = 1; i < SamplePixels; i++)
+                {
+                    if (px[i] != px[0])
+                    {
+                        uniform = false;
+                        break;
+                    }
+                }
+
+                if (!uniform)
+                {
+                    prevVaried = p;
+                }
+                else if (prevVaried >= 0)
+                {
+                    return $"flip@{prevVaried}->{p} ops:" +
+                        OpRing.Describe(_slotSampleSeq[slot][prevVaried], _slotSampleSeq[slot][p]);
+                }
+            }
+
+            return "no flip";
+        }
+
         public static void EndPass(ulong drawsInPass, PassEndReason reason)
         {
             // Credit the draws to every attachment of this pass, not just colour target 0.
@@ -1016,6 +1082,13 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _slotWatchedCount[slot] = _pendingWatchedCount;
+
+            long[] seqs = _slotSampleSeq[slot];
+
+            for (int i = 0; i <= MaxWatched; i++)
+            {
+                seqs[i] = _pendingSampleSeq[i];
+            }
 
             IntPtr[] toneHandles = _slotToneHandle[slot];
 

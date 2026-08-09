@@ -585,6 +585,10 @@ namespace Ryujinx.Graphics.Metal
                 FrameProbe.NotePass(_currentState.RenderTargets, _currentState.DepthStencil);
             }
 
+            OpRing.NotePass(
+                _currentState.RenderTargets[0]?.GetHandle().NativePtr ?? IntPtr.Zero,
+                _currentState.DepthStencil?.GetHandle().NativePtr ?? IntPtr.Zero);
+
             if (HdrPassProbe.Enabled)
             {
                 HdrPassProbe.BeginPassAll(_currentState.RenderTargets, _currentState.ClearLoadAction);

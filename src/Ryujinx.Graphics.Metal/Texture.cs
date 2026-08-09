@@ -368,6 +368,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int firstLayer, int firstLevel)
         {
+            OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
@@ -427,6 +428,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int srcLayer, int dstLayer, int srcLevel, int dstLevel)
         {
+            OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
@@ -488,6 +490,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, Extents2D srcRegion, Extents2D dstRegion, bool linearFilter)
         {
+            OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
@@ -753,6 +756,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data)
         {
+            OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
             HdrPassProbe.NoteNonRenderWrite(this, "upload");
 
@@ -839,6 +843,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data, int layer, int level)
         {
+            OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
             SetData(data.Memory.Span, layer, level, 1, 1, singleSlice: true);
 
@@ -847,6 +852,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data, int layer, int level, Rectangle<int> region)
         {
+            OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
             CommandBufferScoped cbs = Pipeline.Cbs;
             MTLBlitCommandEncoder blitCommandEncoder = Pipeline.GetOrCreateBlitEncoder();
