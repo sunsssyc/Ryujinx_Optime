@@ -2032,3 +2032,15 @@ collapse), downstream gain, coverage and fixed-function state, guest barriers,
 argument-buffer residency, MRT dedup, occlusion counters, store elision, birth content,
 alias-sync propagation, and depth usage flags. The remaining space is Apple's driver; the
 exclusion ledger above is the reproduction case for that report.
+
+### Private storage: no effect on the raw flash
+
+Answering why MoltenVK on the same driver is 175x cleaner, its sharpest usage difference -
+device-local images - was replicated: standalone textures now allocate Private instead of
+the Shared default. Guard off, reproducing save: 15/30 flat. The storage mode is not the
+trigger either. The change stays (it is what MoltenVK does, texture data already moves
+only through blits, and CPU-coherent texture memory bought nothing) with
+RYUJINX_METAL_SHARED_TEXTURES=1 as the revert. The remaining Vulkan differentials are
+pass-structure fragmentation (25-30 Load/Store round trips per texture per frame against
+MoltenVK's handful) and the blanket PixelFormatView on colour targets - both structural,
+neither cheap. The mitigation remains the shipped answer.
