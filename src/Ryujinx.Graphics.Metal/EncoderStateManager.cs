@@ -2044,7 +2044,13 @@ namespace Ryujinx.Graphics.Metal
 
                 IntPtr targetRoot = target.CanonicalPtr != IntPtr.Zero ? target.CanonicalPtr : target.GetHandle().NativePtr;
 
-                if (targetRoot == sampledRoot)
+                // Same storage is not enough: a texture attached at one mip and sampled
+                // at another is the ordinary mip-generation pattern and perfectly defined,
+                // and counting those buried the real cases under ~108 hits a frame. Only
+                // an overlap of the same level and the same layer is undefined.
+                if (targetRoot == sampledRoot &&
+                    target.FirstLevel == sampled.FirstLevel &&
+                    target.FirstLayer == sampled.FirstLayer)
                 {
                     FeedbackProbe.Note(i, sampled.Width, sampled.Height, sampled.MtlFormat.ToString(), targetRoot);
                 }
