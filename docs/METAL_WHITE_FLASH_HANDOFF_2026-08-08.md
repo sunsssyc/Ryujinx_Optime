@@ -1970,3 +1970,18 @@ against flash frames. If a frame-start sync copies sibling->rendered before the 
 the white's circulation is closed and the break point is choosing NOT to sync FROM a
 sibling whose content is stale tile garbage - a shared-layer fix, which is also what the
 Vulkan echo has demanded all along.
+
+### Two fix candidates, both measured dead at the save
+
+  - clear-at-birth (zero every new colour target at creation, default on): 14/30 flat.
+    Also falsifies the birth-content seed: with no undefined content anywhere, the white
+    is GENERATED during play, not circulated from creation.
+  - RYUJINX_METAL_DISABLE_SAMPLES_PASSED=1 (macOS 26 accumulate-visibility off): 14/30.
+    The macOS-26-only visibility mode - the tightest Vulkan-differential suspect - is not
+    the trigger either.
+
+The clear-at-birth change stays (harmless, removes a real undefined-content class); the
+counters stay on. What remains standing after both: the white is generated during play, in
+tile memory, on textures whose contents are defined, entering through draw-carrying
+passes, on all host copies at once. The unexecuted measurement is still the alias-sync
+path log in the shared texture cache - direction and timing against flash frames.
