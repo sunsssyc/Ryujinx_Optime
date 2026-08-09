@@ -160,11 +160,51 @@ namespace Ryujinx.Graphics.Metal
             return t.CanonicalPtr != IntPtr.Zero ? t.CanonicalPtr : t.GetHandle().NativePtr;
         }
 
+        /// <summary>
+        /// The scene texture actually worth following, latched by how much is drawn into
+        /// it rather than by size and format.
+        ///
+        /// Two 1600x896 RG11B10Float textures exist per frame - one taking around 1528
+        /// draws and one taking only a clear - so matching on width and format picks
+        /// whichever the current pass happens to target, and the content walk has been
+        /// following them interchangeably. Latching the one with draws makes the walk
+        /// follow the texture the composite samples, which is the one whose end-of-frame
+        /// state becomes the next frame's picture.
+        /// </summary>
+        private static IntPtr _watchRoot;
+
         public static bool IsWatchedTarget(Texture target)
         {
-            return target != null &&
-                target.Width == WatchedWidth &&
-                target.MtlFormat == MTLPixelFormat.RG11B10Float;
+            if (target == null || target.Width != WatchedWidth ||
+                target.MtlFormat != MTLPixelFormat.RG11B10Float)
+            {
+                return false;
+            }
+
+            return _watchRoot == IntPtr.Zero || RootOf(target) == _watchRoot;
+        }
+
+        private static void LatchWatchRoot(int slot)
+        {
+            Entry[] entries = _slots[slot];
+
+            for (int i = 0; i < _slotCount[slot]; i++)
+            {
+                if (entries[i].Width == WatchedWidth &&
+                    entries[i].Format == MTLPixelFormat.RG11B10Float &&
+                    entries[i].Draws > 100)
+                {
+                    if (_watchRoot != entries[i].Target)
+                    {
+                        _watchRoot = entries[i].Target;
+
+                        Logger.Warning?.PrintMsg(LogClass.Gpu,
+                            $"hdrwatch: following 0x{_watchRoot:X} ({entries[i].Draws} draws over {entries[i].Passes} passes)");
+                    }
+
+                    return;
+                }
+            }
         }
 
         // The GPU memory dumps put the fault between the 1600x896 scene targets, none of
@@ -853,6 +893,8 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _slotCount[slot] = _pendingCount;
+
+            LatchWatchRoot(slot);
 
             PassDetail[] watched = _slotWatched[slot];
 

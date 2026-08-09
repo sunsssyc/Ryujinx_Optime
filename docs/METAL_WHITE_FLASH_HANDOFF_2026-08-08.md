@@ -1377,3 +1377,36 @@ the 1600x896 RG11B10Float with ~1528 draws, not the one that only takes a clear 
 which of its ~167 passes leaves it uniform. The walk already exists; it has been following
 the wrong one of the two, because IsWatchedTarget matches on width and format and there are
 two textures answering to both.
+
+### Following the right scene texture, and an instrument disagreement to settle first
+
+IsWatchedTarget matched on width and format, and two 1600x896 RG11B10Float textures answer
+to both, so the content walk had been following them interchangeably. It now latches the one
+with draws:
+
+    hdrwatch: following 0x9369F2D00 (2184 draws over 511 passes)
+
+The latch works, but that number does not reconcile with the ordinal counter, which reports
+about 169 passes in a whole frame. Both are per-frame and both reset in Commit, so one of
+them is wrong, and until that is settled neither the census pass counts nor the ordinals
+should be quoted.
+
+The walk itself still returns eight entries, all varied, identical on flat frames and their
+predecessors - and its last entry is the at-present sample, which says varied at end of
+frame while the input sampler says near-uniform for the same texture at the same moment.
+That is a second disagreement between two CPU-side instruments.
+
+Eight entries out of hundreds of passes is also expected rather than surprising:
+SampleBeforePass only fires when the encoder is not already a render encoder, so
+consecutive render passes are invisible to it. Following a chain of this length needs
+sampling that does not depend on encoder transitions.
+
+So the next session starts with instrument reconciliation, not with a new hypothesis:
+
+  1. Why the per-target pass count and the frame ordinal count disagree by 3x
+  2. Why the at-present sample and the input sampler disagree about the same texture
+  3. Sampling that reaches every pass, not only those that follow a non-render encoder
+
+The reframing above does not depend on any of that. It rests on the composite's ordinal
+being 2 on every frame, which is a single integer read at pass creation, and on the
+in-shader fetch measurement, which is taken at the point of use.
