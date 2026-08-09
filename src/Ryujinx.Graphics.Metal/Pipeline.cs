@@ -385,6 +385,7 @@ namespace Ryujinx.Graphics.Metal
 
             AppliedRenderState.RefreshToggle();
             EncoderStateManager.RefreshDedupToggle();
+            RefreshSkipDispatch();
             OpRing.OnPresent();
             FlashGuard.RefreshToggle();
             RefreshBarrierToggle();
@@ -824,9 +825,41 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        // The flip interval holds exactly two dispatches and a zero-draw pass. Skipping
+        // dispatches by label splits them: the rate collapsing names the writer.
+        // /tmp/ryujinx-metal-skip-dispatch holds comma-separated label prefixes.
+        private static string[] _skipDispatchLabels = System.Array.Empty<string>();
+
+        internal static void RefreshSkipDispatch()
+        {
+            try
+            {
+                _skipDispatchLabels = System.IO.File.Exists("/tmp/ryujinx-metal-skip-dispatch")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-skip-dispatch")
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    : System.Array.Empty<string>();
+            }
+            catch (System.IO.IOException)
+            {
+            }
+        }
+
         public void DispatchCompute(int groupsX, int groupsY, int groupsZ)
         {
-            OpRing.NoteDispatch(_encoderStateManager.ComputeProgram?.DebugLabel);
+            string computeLabel = _encoderStateManager.ComputeProgram?.DebugLabel;
+
+            if (_skipDispatchLabels.Length != 0 && computeLabel != null)
+            {
+                foreach (string skip in _skipDispatchLabels)
+                {
+                    if (computeLabel.StartsWith(skip, StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+                }
+            }
+
+            OpRing.NoteDispatch(computeLabel);
             DispatchCompute(groupsX, groupsY, groupsZ, String.Empty);
         }
 
