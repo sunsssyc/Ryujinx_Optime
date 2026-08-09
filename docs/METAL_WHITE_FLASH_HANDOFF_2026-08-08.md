@@ -1263,3 +1263,31 @@ identities, which would make the whole picture an ordering question again - the 
 sampling while the scene draws are still in flight. Settling that needs the two entries
 tied together or told apart by something other than RootOf, which is the comparison that
 has produced every identity error in this file.
+
+### Retraction: "the composite samples a texture nothing draws into"
+
+The input report lists two 1600x896 RG11B10Float slots, and reading their identities:
+
+    slot136 -> root 0xACE9FAF80 -> census p=24, d=1527    the drawn scene texture
+    slot128 -> root 0xACEB5F980 -> census p=1,  d=0       the one only ever cleared
+
+Both are recorded as inputs. The claim above - that the composite samples the texture
+nothing draws into - was made by reading slot128 and treating it as "the" input. That was an
+arbitrary pick between two, and the shader itself settles that it cannot be both: its
+Textures struct declares exactly one texture, tex_fp_t_tcb_8. So one of the two recorded
+slots is not this shader's input at all; NoteToneMapInput is not filtered per shader, and
+other programs draw into the same watched target.
+
+Two commits asserted that claim and both are withdrawn. What it was built on - a d=0 that
+turned out to be a draw-attribution artefact, then a slot chosen without checking which one
+the shader uses - is the same failure twice in one session.
+
+What survives untouched is the in-shader measurement, because it reads whatever
+tex_fp_t_tcb_8 actually resolves to, at the moment the shader reads it:
+
+    flat frames    fetched R mean 254, G mean 254
+    ordinary       fetched R mean 151-163, G mean 149-158
+
+The composite's input is white when it is fetched. Which host texture that is remains
+unidentified, and identifying it is the next step: record the binding for this shader only,
+rather than every texture bound to any draw on the target.
