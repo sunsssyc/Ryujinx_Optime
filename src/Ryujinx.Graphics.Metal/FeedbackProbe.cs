@@ -32,10 +32,15 @@ namespace Ryujinx.Graphics.Metal
         /// already encoded draws, end it so the sampled content is finished writes rather
         /// than undefined. Guest code written against an API that permits this without an
         /// explicit barrier gets undefined data on Metal otherwise.
-        /// RYUJINX_METAL_FEEDBACK_FIX=0 opts out.
+        /// OFF by default: splitting from inside GetOrCreateRenderEncoder, which is itself
+        /// half way through acquiring an encoder, faults the driver in
+        /// drawIndexedPrimitives with the same signature as the encoder-ABA bug fixed at
+        /// the start of this investigation. A correct version has to decide before the
+        /// prepass runs, from bound state alone. It also measured no effect on the flash
+        /// when detection was over-broad. RYUJINX_METAL_FEEDBACK_FIX=1 opts in.
         /// </summary>
         public static readonly bool Fix =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_FEEDBACK_FIX") != "0";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FEEDBACK_FIX") == "1";
 
         [ThreadStatic]
         private static bool _detected;
