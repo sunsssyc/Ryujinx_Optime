@@ -11,6 +11,11 @@ interface IEncoderFactory
     MTLComputeCommandEncoder CreateComputeCommandEncoder();
 
     /// <summary>
+    /// Resolve deferred store actions on a render encoder that is about to end.
+    /// </summary>
+    void FixupStoreActions(MTLRenderCommandEncoder encoder);
+
+    /// <summary>
     /// Diagnostic: called whenever a render pass actually ends, so every path that
     /// splits one is accounted for, including those that bypass the pipeline.
     /// </summary>
@@ -149,6 +154,7 @@ class CommandBufferEncoder
                     CurrentEncoder = null;
                     break;
                 case EncoderType.Render:
+                    _encoderFactory?.FixupStoreActions(RenderEncoder);
                     RenderEncoder.EndEncoding();
                     ObjcOwnership.Release(RenderEncoder.NativePtr);
                     CurrentEncoder = null;

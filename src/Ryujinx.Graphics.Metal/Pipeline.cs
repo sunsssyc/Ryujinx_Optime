@@ -329,6 +329,11 @@ namespace Ryujinx.Graphics.Metal
             return _encoderStateManager.CreateComputeCommandEncoder();
         }
 
+        public void FixupStoreActions(MTLRenderCommandEncoder encoder)
+        {
+            _encoderStateManager.FixupStoreActions(encoder, DrawCount - _drawCountAtPassStart);
+        }
+
         // Diagnostic: RYUJINX_METAL_LOG_PRESENT=1 logs the source texture of every
         // presented frame with a wall clock stamp, so single-frame artefacts caught on
         // a screen recording can be correlated with dynamic resolution switches.

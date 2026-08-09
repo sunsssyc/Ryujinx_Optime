@@ -491,6 +491,12 @@ namespace Ryujinx.Graphics.Metal
             // Initialise Pass & State
             using MTLRenderPassDescriptor renderPassDescriptor = new();
 
+            _passStoreUnknown = _elideEmptyStore;
+            _passColorMask = 0;
+            _passHasDepth = false;
+            _passHasStencil = false;
+            _passCleared = _currentState.ClearLoadAction;
+
             for (int i = 0; i < Constants.MaxColorAttachments; i++)
             {
                 if (_currentState.RenderTargets[i] is Texture tex)
@@ -498,7 +504,8 @@ namespace Ryujinx.Graphics.Metal
                     MTLRenderPassColorAttachmentDescriptor passAttachment = renderPassDescriptor.ColorAttachments.Object((ulong)i);
                     tex.PopulateRenderPassAttachment(passAttachment, _pipeline.Cbs);
                     passAttachment.LoadAction = _currentState.ClearLoadAction ? MTLLoadAction.Clear : MTLLoadAction.Load;
-                    passAttachment.StoreAction = MTLStoreAction.Store;
+                    passAttachment.StoreAction = _passStoreUnknown ? MTLStoreAction.Unknown : MTLStoreAction.Store;
+                    _passColorMask |= 1ul << i;
                 }
             }
 
@@ -519,14 +526,16 @@ namespace Ryujinx.Graphics.Metal
                         // Colour attachments already use the identity handle.
                         depthAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle(_pipeline.Cbs);
                         depthAttachment.LoadAction = MTLLoadAction.Load;
-                        depthAttachment.StoreAction = MTLStoreAction.Store;
+                        depthAttachment.StoreAction = _passStoreUnknown ? MTLStoreAction.Unknown : MTLStoreAction.Store;
+                        _passHasDepth = true;
                         break;
 
                     // Stencil Only Attachment
                     case MTLPixelFormat.Stencil8:
                         stencilAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle(_pipeline.Cbs);
                         stencilAttachment.LoadAction = MTLLoadAction.Load;
-                        stencilAttachment.StoreAction = MTLStoreAction.Store;
+                        stencilAttachment.StoreAction = _passStoreUnknown ? MTLStoreAction.Unknown : MTLStoreAction.Store;
+                        _passHasStencil = true;
                         break;
 
                     // Combined Attachment
@@ -534,11 +543,13 @@ namespace Ryujinx.Graphics.Metal
                     case MTLPixelFormat.Depth32FloatStencil8:
                         depthAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle(_pipeline.Cbs);
                         depthAttachment.LoadAction = MTLLoadAction.Load;
-                        depthAttachment.StoreAction = MTLStoreAction.Store;
+                        depthAttachment.StoreAction = _passStoreUnknown ? MTLStoreAction.Unknown : MTLStoreAction.Store;
+                        _passHasDepth = true;
 
                         stencilAttachment.Texture = _currentState.DepthStencil.GetIdentityHandle(_pipeline.Cbs);
                         stencilAttachment.LoadAction = MTLLoadAction.Load;
-                        stencilAttachment.StoreAction = MTLStoreAction.Store;
+                        stencilAttachment.StoreAction = _passStoreUnknown ? MTLStoreAction.Unknown : MTLStoreAction.Store;
+                        _passHasStencil = true;
                         break;
                     default:
                         Logger.Error?.PrintMsg(LogClass.Gpu, $"Unsupported Depth/Stencil Format: {_currentState.DepthStencil.GetHandle().PixelFormat}!");
@@ -633,6 +644,43 @@ namespace Ryujinx.Graphics.Metal
             }
 
             return renderCommandEncoder;
+        }
+
+        /// <summary>
+        /// Resolves the deferred store actions when the pass ends. Zero draws and nothing
+        /// cleared means nothing in tile memory can differ from what the load brought in,
+        /// so DontCare skips the write-back entirely - the pass stops touching memory.
+        /// </summary>
+        public readonly void FixupStoreActions(MTLRenderCommandEncoder encoder, ulong drawsInPass)
+        {
+            if (!_passStoreUnknown)
+            {
+                return;
+            }
+
+            MTLStoreAction action = drawsInPass == 0 && !_passCleared
+                ? MTLStoreAction.DontCare
+                : MTLStoreAction.Store;
+
+            for (int i = 0; i < Constants.MaxColorAttachments; i++)
+            {
+                if ((_passColorMask & (1ul << i)) != 0)
+                {
+                    encoder.SetColorStoreAction(action, (ulong)i);
+                }
+            }
+
+            if (_passHasDepth)
+            {
+                encoder.SetDepthStoreAction(action);
+            }
+
+            if (_passHasStencil)
+            {
+                encoder.SetStencilStoreAction(action);
+            }
+
+            _passStoreUnknown = false;
         }
 
         public readonly MTLComputeCommandEncoder CreateComputeCommandEncoder()
@@ -1921,6 +1969,24 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private static bool _residencyOnParent;
 
+        /// <summary>
+        /// The verdict experiment for the zero-draw Load/Store pass, and its fix if it
+        /// holds. Passes are created with StoreAction Unknown and the real store action is
+        /// chosen when the pass ends: Store normally, DontCare when the pass encoded no
+        /// draws and cleared nothing - a pass like that is a pure tile round trip, and the
+        /// white flip interval contains exactly one of them and nothing else that writes.
+        /// /tmp/ryujinx-metal-elide-empty-store, re-read once a frame; the per-pass flag
+        /// remembers which convention the descriptor was built with, because a pass
+        /// created with a fixed action must not be fixed up.
+        /// </summary>
+        private static bool _elideEmptyStore;
+
+        private static bool _passStoreUnknown;
+        private static ulong _passColorMask;
+        private static bool _passHasDepth;
+        private static bool _passHasStencil;
+        private static bool _passCleared;
+
         internal static void RefreshSamplingToggle()
         {
             try
@@ -1930,6 +1996,9 @@ namespace Ryujinx.Graphics.Metal
 
                 _residencyOnParent = System.IO.File.Exists("/tmp/ryujinx-metal-parent-residency") &&
                     System.IO.File.ReadAllText("/tmp/ryujinx-metal-parent-residency").Trim() == "1";
+
+                _elideEmptyStore = System.IO.File.Exists("/tmp/ryujinx-metal-elide-empty-store") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-elide-empty-store").Trim() == "1";
             }
             catch (System.IO.IOException)
             {
