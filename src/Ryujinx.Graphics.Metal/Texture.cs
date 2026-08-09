@@ -98,6 +98,20 @@ namespace Ryujinx.Graphics.Metal
                     $"handle=0x{GetHandle().NativePtr:X}");
             }
 
+            // A new MTLTexture holds undefined content, and on this driver undefined tile
+            // data reads as near-white - the exact constant the flash carries. The scene
+            // texture the composite samples was created at level load and never drawn
+            // directly; its birth content circulates through the cache's alias sync. Zero
+            // it at birth so no undefined content exists to circulate. Render-target
+            // colour textures only, and the cost is one fill per creation.
+            // RYUJINX_METAL_NO_CLEAR_INIT=1 restores the old behaviour.
+            if (!_noClearInit && !Info.Format.IsDepthOrStencil &&
+                (GetHandle().Usage & MTLTextureUsage.RenderTarget) != 0 &&
+                Info.Target == Target.Texture2D && Info.Levels == 1 && Info.Samples <= 1)
+            {
+                ClearToZeroAtBirth(pipeline);
+            }
+
             if (SwizzleIsIdentity(swizzle))
             {
                 MtlTextureAuto = _identitySwizzleHandle;
@@ -186,6 +200,31 @@ namespace Ryujinx.Graphics.Metal
             }
 
             return usage;
+        }
+
+        private static readonly bool _noClearInit =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_NO_CLEAR_INIT") == "1";
+
+        /// <summary>
+        /// Writes zeros over the whole of a newly created colour target through a render
+        /// pass clear, so its first Load brings in defined content instead of tile
+        /// garbage. Uses its own descriptor and encoder: the pipeline's current pass
+        /// state must not be disturbed by texture creation.
+        /// </summary>
+        private void ClearToZeroAtBirth(Pipeline pipeline)
+        {
+            using MTLRenderPassDescriptor descriptor = new();
+
+            MTLRenderPassColorAttachmentDescriptor attachment = descriptor.ColorAttachments.Object(0);
+            attachment.Texture = GetHandle();
+            attachment.LoadAction = MTLLoadAction.Clear;
+            attachment.StoreAction = MTLStoreAction.Store;
+            attachment.ClearColor = new MTLClearColor { red = 0, green = 0, blue = 0, alpha = 0 };
+
+            pipeline.EndCurrentPass();
+
+            MTLRenderCommandEncoder encoder = pipeline.CommandBuffer.RenderCommandEncoder(descriptor);
+            encoder.EndEncoding();
         }
 
         public Texture(MTLDevice device, MetalRenderer renderer, Pipeline pipeline, TextureCreateInfo info, MTLTexture sourceTexture, int firstLayer, int firstLevel) :
