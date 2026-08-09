@@ -1548,3 +1548,35 @@ The settled chain, for whoever picks this up:
     hook misses writes through the other identities - match by size+format, never by root
   - the reproducing save is the top entry without the Autosave badge; ~40% flat in the
     trigger view; tools/satmark_run.sh drives everything
+
+## Final state of this session: the flip crosses two back-to-back zero-draw passes
+
+With both identities charted, the causing frame's tail reads:
+
+    [@162]d10:varied -> [@163]d0 -> [@164]d0 -> present: STEP or exactly UNIFORM
+
+Two adjacent zero-draw passes - one per identity - sit at the very end of the frame, and
+the content flips from scene to flat across that boundary. A zero-draw load/store pass
+cannot change bytes, so whatever those passes actually do is not the plain load/store the
+census assumes. One backend mechanism fits: the colour-write-mask emulation
+(PreMaskRenderTargets in EncoderState), which swaps attachments to emulate masks and
+restores them afterwards - a path in which a zero-draw pass on this storage can
+legitimately store content that came from somewhere else.
+
+Where to pick up:
+
+  1. Read the PreMask swap/restore path end to end. If a masked operation late in the
+     frame swaps the scene storage out and restores the wrong content - or restores from a
+     texture that holds near-white - that is the writer with every property measured
+     tonight: no draws, no clear, no copy, beats the stain, flips content between two
+     zero-draw passes.
+  2. Log SetPreMaskRenderTargets calls naming the scene storage with the frame ordinal,
+     paired white-vs-good. One session, one answer.
+  3. If PreMask is innocent, the remaining space is the load action of those two passes at
+     encoder-creation time (log the actual MTLLoadAction written into the descriptor for
+     the watched attachment, not the probe's flag).
+
+Everything else about the fault is settled and documented above: composite at pass 2,
+frame N shows frame N-1's end state, causing frames hold the scene until the last passes,
+the flat value is ~(1.0, 1.0, 0.94), and the storage is one allocation under multiple
+identities - match by size and format, never by root.
