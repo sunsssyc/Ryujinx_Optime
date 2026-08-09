@@ -1865,11 +1865,23 @@ namespace Ryujinx.Graphics.Metal
         private static readonly string _inputWatchLabel =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_INPUT_WATCH") ?? "3ebc3a8f6b77cc8f";
 
-        // Kill switch for the storage-identity duplicate check, in case a game relies on
-        // genuinely distinct views at two slots: RYUJINX_METAL_DEDUP_BY_REF=1 restores the
-        // old reference-only comparison.
-        private static readonly bool _dedupByReferenceOnly =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_DEDUP_BY_REF") == "1";
+        // Hot-swappable so both arms run inside one session with everything else equal.
+        // The first validation of this change compared arms that differed in their probe
+        // environment as well, and the 0% it reported was the probes' doing, not the fix's
+        // - the exact single-variable rule these notes keep re-learning.
+        private static bool _dedupByReferenceOnly;
+
+        internal static void RefreshDedupToggle()
+        {
+            try
+            {
+                _dedupByReferenceOnly = System.IO.File.Exists("/tmp/ryujinx-metal-dedup-by-ref") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-dedup-by-ref").Trim() == "1";
+            }
+            catch (System.IO.IOException)
+            {
+            }
+        }
 
         private static bool _identitySampling;
 

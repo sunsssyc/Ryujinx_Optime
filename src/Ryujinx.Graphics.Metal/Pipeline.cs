@@ -376,6 +376,7 @@ namespace Ryujinx.Graphics.Metal
             _renderer.FrameCapture.OnPresentBegin();
 
             AppliedRenderState.RefreshToggle();
+            EncoderStateManager.RefreshDedupToggle();
             FlashGuard.RefreshToggle();
             RefreshBarrierToggle();
             EncoderStateManager.RefreshSamplingToggle();
