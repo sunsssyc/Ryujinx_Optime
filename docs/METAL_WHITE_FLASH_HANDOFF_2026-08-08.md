@@ -1492,3 +1492,31 @@ What is left is why a frame that does identical work - 1524 draws over 23 passes
 ends that way. Two directions, in order of cost: whether the last passes to write it differ
 in what they read, and whether the draws that write it are the same draws on both kinds of
 frame rather than merely the same count.
+
+## The write lands in the last two passes of the frame, and only compute is left
+
+With span classification and the clear flag in the bracketed chain, the shape is finally
+crisp, pair after pair:
+
+    causing frame:  [@47]varied -> scene all the way -> [@163]d0:varied -> present STEP(0x781DFBC0)
+    white frame:    [@39]d0:STEP(0x781DFBC0) -> scene overwrites -> varied by mid-frame
+
+The frame that causes a flash holds the scene at every sample through pass ~161 and turns
+into the one-step flat state between the last mid-frame sample and present - a window of
+about two passes at the end of the frame. The white frame then begins with that flat state,
+which is exactly what its composite reads at pass 2, and its own scene rendering overwrites
+it by mid-frame. The two halves finally agree with each other and with every earlier
+measurement.
+
+Inside that window sits a render pass on the storage with zero draws and no clear flag - it
+cannot change content. No clear fires there (no 'c' anywhere in the sequences). Copies,
+render blits and SetData are all hooked and silent. The one mechanism in this backend that
+none of the enumeration covers and that can write a texture without any of those paths is a
+compute dispatch writing it as an image - and the frame runs about 38 dispatches. It is also
+the writer that would have beaten the creation-time stain.
+
+So the next session has one concrete task: hook compute image bindings for the watched
+storage - which dispatch binds it as a writable image, at which ordinal, and with which
+pipeline - and pair that against flash-causing frames. If a dispatch in that end-of-frame
+window binds it on causing frames, that dispatch is the fault, and the question of why it
+writes near-1.0 white (an exposure or sky value, by the look of 0x781DFBC0) has an owner.
