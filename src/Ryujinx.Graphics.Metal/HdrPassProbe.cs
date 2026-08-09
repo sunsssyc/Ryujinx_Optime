@@ -1473,7 +1473,17 @@ namespace Ryujinx.Graphics.Metal
                 {
                     blit.CopyFromTexture(
                         tex, 0, 0,
-                        new MTLOrigin { x = (ulong)(t.Width * (i % 3 + 1) / 4), y = (ulong)(t.Height * (i / 3 + 1) / 4), z = 0 },
+                        new MTLOrigin
+                        {
+                            // 5x5 to match InputPixels = 25. The old 3x3 indexing sent
+                            // samples 12..24 past the texture's height - thirteen of the
+                            // twenty-five reads were out of bounds garbage, identical for
+                            // every source, which made three distinct textures report
+                            // byte-identical spans and poisoned every per-slot comparison.
+                            x = (ulong)(t.Width * (i % 5 + 1) / 6),
+                            y = (ulong)(t.Height * (i / 5 + 1) / 6),
+                            z = 0,
+                        },
                         new MTLSize { width = 1, height = 1, depth = 1 },
                         _inputBuf, baseOffset + (ulong)(i * 4), 4, 4);
                 }
@@ -1505,7 +1515,17 @@ namespace Ryujinx.Graphics.Metal
                 {
                     blit.CopyFromTexture(
                         tex, 0, 0,
-                        new MTLOrigin { x = (ulong)(t.Width * (i % 3 + 1) / 4), y = (ulong)(t.Height * (i / 3 + 1) / 4), z = 0 },
+                        new MTLOrigin
+                        {
+                            // 5x5 to match InputPixels = 25. The old 3x3 indexing sent
+                            // samples 12..24 past the texture's height - thirteen of the
+                            // twenty-five reads were out of bounds garbage, identical for
+                            // every source, which made three distinct textures report
+                            // byte-identical spans and poisoned every per-slot comparison.
+                            x = (ulong)(t.Width * (i % 5 + 1) / 6),
+                            y = (ulong)(t.Height * (i / 5 + 1) / 6),
+                            z = 0,
+                        },
                         new MTLSize { width = 1, height = 1, depth = 1 },
                         _inputBuf, baseOffset + (ulong)(i * 4), 4, 4);
                 }
