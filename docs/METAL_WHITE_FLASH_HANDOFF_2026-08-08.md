@@ -1647,3 +1647,19 @@ What genuinely stands after everything:
   - next: instrument the tail window itself - log the MTLLoadAction actually written into
     the descriptor for the watched attachment on those final passes, and the game's own
     end-of-frame operations (what the guest submits between the last scene pass and vsync)
+
+### DontCare load actions: audited and excluded
+
+Every MTLRenderPassDescriptor construction site: the main path always writes Load/Clear +
+Store for colour and Load + Store for depth/stencil; the four raw-descriptor sites in
+Pipeline.cs are diagnostic passes, gated off in plain play, and explicitly Clear + Store
+anyway; HelperShader builds no descriptors of its own. Unconfigured attachment slots keep
+the DontCare default but carry no texture. No active pass attaches the scene storage with
+an undefined load, so tile garbage through a default load action is excluded.
+
+Also excluded today, the hard way: the duplicate-MRT storage dedup - no effect on the flash
+in a clean in-session A/B (38/30 vs 32/32 over 50-shot arms), and with it active the game
+aborts in Metal validation on camera movement (IOGPUMetalCommandBuffer validate ->
+MTLReportFailure), the signature of an attachment nulled while the pipeline still declares
+it. Defaulted back to reference-only; /tmp/ryujinx-metal-dedup-by-storage=1 re-enables it
+for experiments.

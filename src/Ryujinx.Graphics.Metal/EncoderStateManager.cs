@@ -1869,14 +1869,20 @@ namespace Ryujinx.Graphics.Metal
         // The first validation of this change compared arms that differed in their probe
         // environment as well, and the 0% it reported was the probes' doing, not the fix's
         // - the exact single-variable rule these notes keep re-learning.
-        private static bool _dedupByReferenceOnly;
+        private static bool _dedupByReferenceOnly = true;
 
         internal static void RefreshDedupToggle()
         {
+            // Default ON (reference-only, the original behaviour). The storage-identity
+            // comparison measured no effect on the flash in a clean in-session A/B, and
+            // with it active the game aborts in Metal validation on camera movement -
+            // IOGPUMetalCommandBuffer validate -> MTLReportFailure -> abort - which is the
+            // signature of an attachment nulled while the pipeline still declares it.
+            // Opt back in with /tmp/ryujinx-metal-dedup-by-storage=1 for experiments only.
             try
             {
-                _dedupByReferenceOnly = System.IO.File.Exists("/tmp/ryujinx-metal-dedup-by-ref") &&
-                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-dedup-by-ref").Trim() == "1";
+                _dedupByReferenceOnly = !(System.IO.File.Exists("/tmp/ryujinx-metal-dedup-by-storage") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-dedup-by-storage").Trim() == "1");
             }
             catch (System.IO.IOException)
             {
