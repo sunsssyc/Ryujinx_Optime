@@ -1433,3 +1433,32 @@ What remains for the next session is the sampling reach, and only that: SampleBe
 fires only when the encoder is not already a render encoder, so it sees eight of the
 hundreds of passes writing the scene texture. Following which pass leaves that texture in a
 one-step range needs sampling that does not depend on encoder transitions.
+
+### The frame that causes a flash does identical work on the scene texture
+
+Mined from the log already on disk - no new run, no added instrument, so nothing perturbed.
+For each white frame, its own census against the census of the frame before it, which is the
+frame whose end state the composite goes on to read:
+
+    frame N (white)        frame N-1 (causes it)
+    p=22 d=1532            p=24 d=1530
+    p=24 d=1524            p=24 d=1530
+    p=23 d=1524            p=23 d=1523
+    ...twelve pairs, all within the same few counts
+
+The frame that leaves the scene texture in a one-step range draws into it exactly as much
+as any other - about 1524 draws over 23 passes either way. So "a draw goes missing" is closed
+at this stage too, the same way it closed one stage up.
+
+Note also what the corrected attachment crediting reveals about the target set: three
+1600x896 targets report 1502 draws over 18 passes each, which makes them MRT siblings of one
+pass set, while the RG11B10Float the composite samples sits at 22-24 passes and 1523-1532
+draws - attached to a few passes more. So it is a G-buffer attachment, not a separate
+post-process stage.
+
+That sharpens the question one more turn: on a frame that causes a flash, one attachment
+ends in a one-step range while the frame it belongs to displays correctly - so its siblings
+presumably do not. Sampling two of those siblings at present, alongside the one already
+sampled, would establish whether the fault is specific to this attachment or shared across
+the pass set. That is bookkeeping plus two more blits at present, which is where the
+existing sampling already happens, so it costs nothing in timing.
