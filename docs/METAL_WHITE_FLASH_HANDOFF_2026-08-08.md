@@ -1698,3 +1698,22 @@ StagingBuffer, PersistentFlushBuffer) - all Shared, all able to reach texture me
 Termination: each phase halves the space; at most three instrumented runs to a named
 writer. Detection stays on the deterministic uniform test (packed-word min==max), no
 thresholds anywhere.
+
+### Phase 1 first run: the trap fires, the interval recording is broken
+
+Reproduction fine (18/2400 and climbing), WHITE-RUN blocks carry flipOps - but every one
+reads "flip@0->1 ops:empty". Two instrument faults, both must be fixed before any reading:
+
+  1. _pendingSampleSeq is never reset per frame, so chart entries not freshly sampled this
+     frame carry a stale sequence, and a stale toSeq below a fresh fromSeq prints "empty".
+  2. flip@0->1 contradicts the established tail localisation, which means some chart
+     entries' pixel content is also stale - SampleBeforePass only fires on encoder
+     transitions (non-render to render), NOT once per watched pass. Entries between
+     transitions were never sampled this frame; the chart mixes this frame's pixels with
+     the previous frame's. This has been true of every chart read so far, including the
+     one the tail localisation came from - re-derive that after the fix.
+
+Fix for next session: initialise the per-frame sample seq array to -1 at Commit, have
+DescribeFlipOps skip entries without a fresh sample, and verify NotePass lands in the ring
+(print OpRing.Seq per frame once). Then rerun. The plan itself is unchanged - the flip
+interval still decides between a named command and the CPU branch.
