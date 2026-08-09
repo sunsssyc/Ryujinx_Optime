@@ -1580,3 +1580,22 @@ Everything else about the fault is settled and documented above: composite at pa
 frame N shows frame N-1's end state, causing frames hold the scene until the last passes,
 the flat value is ~(1.0, 1.0, 0.94), and the storage is one allocation under multiple
 identities - match by size and format, never by root.
+
+## The precise suspect: duplicate MRT dedup defeated by views
+
+UpdateRenderTargets dedups the case the mask emulation exists for - the same texture bound
+at two colour slots with one slot's write mask zero - by comparing `colors[i] == colors[j]`.
+That is REFERENCE equality on ITexture. Two views of one storage are different ITexture
+objects, so for exactly the case measured all session (the scene storage bound under two
+identities), the dedup never fires, both slots stay attached, and the fragment shader
+writes a defined value to one slot and an UNDEFINED value to the other - into the same
+storage through the second identity.
+
+Every property measured tonight fits: intermittent (depends on that frame's binding
+pattern), invisible to every root-keyed hook, no copy, no clear, no compute, beats the
+creation-time stain, and the flip sits at passes whose census identity is the second view.
+
+Test: make the duplicate check compare storage identity - resolve both to the base
+MTLTexture, not the view object, and not CanonicalPtr (which stops at the intermediate view)
+- then A/B against the reproducing save with the probe counts. If the rate collapses, this
+was it; the fix is the comparison, plus an audit of MaskOut/restore for the same assumption.
