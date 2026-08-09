@@ -1840,3 +1840,33 @@ Next and final localisation step: log texture-cache recreations of 1600x896 RG11
 storages with frame numbers, and correlate against flash frames. If they line up, the fix
 is in the shared layer: guarantee the content copy (or a clear) executes before any
 Load-action pass on a freshly created texture - a real ordering bug, fixable narrowly.
+
+### Recreation falsified by direct correlation
+
+texcreate logging against the reproducing save: exactly two creations of the 1600x896
+RG11B10Float class, both at frame 154 (level load), then thirty white runs from frame 991
+onward with zero further creations. The textures are long-lived; the fresh-undefined-
+content reading is dead.
+
+What survives is sharper for it. Established by elision (causal, reversible): the d0
+Load/Store pass's STORE writes the white. Established now: the texture is 800+ frames old.
+Therefore the LOAD returns white from a texture whose memory holds the scene - load and
+memory disagree on a long-lived texture. On this hardware that is one thing: the texture's
+lossless-compression metadata disagreeing with its pixel data, so the load decodes a
+constant while the bytes underneath are fine. The store then writes the decoded constant
+back as real pixels, and the composite consumes it.
+
+What desynchronises metadata from data on a Shared-storage texture is the next and
+probably final question. The known writers of texture bytes outside render passes are the
+SynchronizeMemory upload path (SM:u counts 2-10 every frame in the probe line) and any
+CPU-side write into Shared memory. An upload that writes pixel bytes without going through
+the driver's compression path - or a stale-dirty upload racing the frame, the mechanism
+the retracted SynchronizeMemory hypothesis described at the wrong layer - would do exactly
+this.
+
+Next session, two measurements:
+  1. at the flip, read the texture's raw MEMORY bytes (the trusted decode path from the
+     gputrace work) and compare against what the load returned: memory=scene + load=white
+     proves metadata desync at the driver level
+  2. correlate SM:u upload events targeting this texture with flash frames - the counter
+     is already per-frame in the probe line; per-texture attribution is one hook away
