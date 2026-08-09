@@ -304,7 +304,7 @@ namespace Ryujinx.Graphics.Metal
                         if (_runCount <= DetailedRuns)
                         {
                             Logger.Warning?.PrintMsg(LogClass.Gpu,
-                                $"presentprobe WHITE-RUN #{_runCount} starts f={mid} " +
+                                $"presentprobe WHITE-RUN #{_runCount} starts f={mid} t={Environment.TickCount64} " +
                                 $"luma={lumaPrev:F0}->{lumaMid:F0}<-{lumaNext:F0} spread={spread:F0} " +
                                 $"D={_slotDraws[midSlot]}(good~{_goodDraws}) " +
                                 $"C={_slotDispatches[midSlot]}(good~{_goodDispatches}) " +

@@ -602,6 +602,18 @@ namespace Ryujinx.Graphics.Gpu.Image
                 Texture from = fromHandle._group.Storage;
                 Texture to = _group.Storage;
 
+                // The white-flash investigation's last unexecuted measurement: every
+                // alias-sync copy on the scene-sized class, with a monotonic tick the
+                // Metal probe also stamps, so copy timing and direction line up against
+                // flash frames directly.
+                if (to.Info.Width >= 1500 && to.Info.Width <= 1700 && to.Info.Height >= 800)
+                {
+                    Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu,
+                        $"aliascopy t={Environment.TickCount64} {from.Info.Width}x{from.Info.Height}" +
+                        $"->{to.Info.Width}x{to.Info.Height} fromMod={fromHandle.Modified} toMod={Modified} " +
+                        $"deferred={fromHandle == DeferredCopy}");
+                }
+
                 if (from.ScaleFactor != to.ScaleFactor)
                 {
                     to.PropagateScale(from);
