@@ -85,6 +85,19 @@ namespace Ryujinx.Graphics.Metal
 
             _identitySwizzleHandle = new Auto<DisposableTexture>(new DisposableTexture(Device.NewTexture(descriptor)));
 
+            // A freshly created texture holds undefined content, and the elision
+            // experiment proved the flash IS undefined content crystallised by the first
+            // Load/Store pass. This logs every creation of the scene-shaped class with the
+            // probe's frame number, so creations can be correlated against flash frames
+            // directly: damage at creation frame N should display at N+1.
+            if (PresentProbe.Enabled && Info.Width >= 1500 && Info.Width <= 1700 &&
+                pixelFormat == MTLPixelFormat.RG11B10Float)
+            {
+                Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(Ryujinx.Common.Logging.LogClass.Gpu,
+                    $"texcreate f={PresentProbe.Frame} {Info.Width}x{Info.Height} RG11B10Float " +
+                    $"handle=0x{GetHandle().NativePtr:X}");
+            }
+
             if (SwizzleIsIdentity(swizzle))
             {
                 MtlTextureAuto = _identitySwizzleHandle;
