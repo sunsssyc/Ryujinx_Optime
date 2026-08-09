@@ -87,6 +87,13 @@ namespace Ryujinx.Graphics.Metal
             public ulong Draws;
             public PassEndReason Reason;
             public bool Cleared;
+
+            // Which pass of the frame this sample was taken before, so the sequence
+            // brackets where in the frame the content changed. The walk only fires on
+            // encoder transitions - eight samples across ~170 passes - so without the
+            // ordinal the reading "varied ... varied, then white at present" cannot say
+            // what ran in between.
+            public int Ordinal;
         }
 
         private static readonly PassDetail[][] _slotWatched = CreateWatched();
@@ -693,7 +700,7 @@ namespace Ryujinx.Graphics.Metal
 
             if (IsWatchedTarget(target) && _pendingWatchedCount < MaxWatched)
             {
-                _pendingWatched[_pendingWatchedCount] = new PassDetail { Cleared = clearLoadAction };
+                _pendingWatched[_pendingWatchedCount] = new PassDetail { Cleared = clearLoadAction, Ordinal = _passOrdinal };
                 _openWatched = true;
                 _openWatchedTarget = target;
             }
@@ -801,7 +808,7 @@ namespace Ryujinx.Graphics.Metal
 
             // Claim the slot so Commit carries it and DescribePassContent prints it as the
             // final entry. It belongs to no pass, hence the zero draws.
-            _pendingWatched[_pendingWatchedCount] = new PassDetail();
+            _pendingWatched[_pendingWatchedCount] = new PassDetail { Ordinal = _passOrdinal };
             _pendingWatchedCount++;
             _lastWatchedTarget = null;
         }
@@ -899,7 +906,7 @@ namespace Ryujinx.Graphics.Metal
                 // The draw count belongs beside the content: a flat frame carries about
                 // nine more passes than its predecessor at the same draw total, so which
                 // entries are empty is half of what this sequence has to say.
-                sb.Append($"[{p}]d{_slotWatched[slot][p].Draws}:");
+                sb.Append($"[@{_slotWatched[slot][p].Ordinal}]d{_slotWatched[slot][p].Draws}:");
                 sb.Append(uniform ? $"UNIFORM(0x{px[0]:X8})" : "varied");
             }
 
