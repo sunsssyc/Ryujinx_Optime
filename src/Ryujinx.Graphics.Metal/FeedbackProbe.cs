@@ -20,15 +20,48 @@ namespace Ryujinx.Graphics.Metal
     [SupportedOSPlatform("macos")]
     static class FeedbackProbe
     {
+        // Detection runs whenever either the report or the fix is wanted.
         public static readonly bool Enabled =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FEEDBACK") == "1" || Fix;
+
+        private static readonly bool _report =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_FEEDBACK") == "1";
+
+        /// <summary>
+        /// Treat a detected feedback as an implicit texture barrier: if the pass has
+        /// already encoded draws, end it so the sampled content is finished writes rather
+        /// than undefined. Guest code written against an API that permits this without an
+        /// explicit barrier gets undefined data on Metal otherwise.
+        /// RYUJINX_METAL_FEEDBACK_FIX=0 opts out.
+        /// </summary>
+        public static readonly bool Fix =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FEEDBACK_FIX") != "0";
+
+        [ThreadStatic]
+        private static bool _detected;
+
+        public static void Detect() => _detected = true;
+
+        public static bool TakeDetected()
+        {
+            bool value = _detected;
+            _detected = false;
+
+            return value;
+        }
 
         private static readonly HashSet<string> _seen = [];
         private static long _total;
 
         public static void Note(int attachmentIndex, int width, int height, string format, IntPtr root)
         {
+            _detected = true;
             _total++;
+
+            if (!_report)
+            {
+                return;
+            }
 
             string key = $"{attachmentIndex}:{width}x{height}:{format}";
 

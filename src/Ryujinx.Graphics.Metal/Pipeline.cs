@@ -137,7 +137,22 @@ namespace Ryujinx.Graphics.Metal
 
             if (forDraw)
             {
+                FeedbackProbe.TakeDetected();
+
                 _encoderStateManager.RenderResourcesPrepass();
+
+                // A draw that samples one of its own attachments reads undefined data on
+                // Metal. Ending the pass first turns that into finished writes. Only when
+                // the pass already carries draws: with none there is nothing to order, and
+                // that condition also stops this from looping, since the feedback itself
+                // does not go away.
+                if (FeedbackProbe.Fix && FeedbackProbe.TakeDetected() &&
+                    Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
+                    DrawCount != _drawCountAtPassStart)
+                {
+                    EndCurrentPass(PassEndReason.FragmentDependency);
+                    _encoderStateManager.RenderResourcesPrepass();
+                }
             }
 
             // Before the pass opens, while switching encoders is still legal, record what
