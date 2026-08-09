@@ -123,10 +123,17 @@ namespace Ryujinx.Graphics.Metal
             _buf = device.NewBuffer(Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
         }
 
-        // Off by default; see the type comment for what it achieves and what stops it
-        // from being usable. RYUJINX_METAL_FLASHGUARD=1 opts in.
+        // On by default. The root cause is a driver-level load fault - a long-lived,
+        // uncompressed colour target's Load intermittently brings near-white tile
+        // garbage in place of its content - and every backend-side mechanism was
+        // excluded at measurement power (bindings, arithmetic, coverage, barriers,
+        // residency, counters, MRT dedup, store elision, clear-at-birth, depth usage
+        // flags, alias sync; see the handoff doc). Both crashes that once kept this
+        // mitigation off were fixed - the keep texture is created once and never
+        // resized, and it registers with the command buffer - and it measured 35% -> 0%
+        // with the picture alive. RYUJINX_METAL_FLASHGUARD=0 opts out.
         private static readonly bool _defaultEnabled =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_FLASHGUARD") == "1";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FLASHGUARD") != "0";
 
         public static void RefreshToggle()
         {
