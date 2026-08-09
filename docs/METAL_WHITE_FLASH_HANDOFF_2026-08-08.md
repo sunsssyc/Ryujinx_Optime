@@ -2323,3 +2323,46 @@ Vulkan-rate difference reads as pass-boundary count (197/frame vs MoltenVK's han
 aba revisits 14/frame), which is the workload shape that churns tile load/store the
 hardest. The instrument stays in the tree; the correlator costs nothing measurable and
 its table is the first thing to re-check on any future driver or OS change.
+
+## 2026-08-09 night: the partial-render discriminator, and what the sunset added
+
+The only published mechanism that matches this fault's family is Rosenzweig's AGX
+partial render (the "Impossible Bug" write-up): when a pass's tiled vertex buffer
+fills, the hardware stores all tiles mid-pass, reloads, and continues - through
+auxiliary load/store programs distinct from the ordinary end-of-pass path, and getting
+those programs wrong yields exactly "attachments come back garbage". On macOS that
+path is the driver's. Only the scene pass here (~1524 draws; every other pass averages
+13) could plausibly overflow. The workaround catalogues were also checked: Dawn's
+toggle list has two dozen Metal entries (none matching), ANGLE and MoltenVK surface
+nothing closer, wgpu #6647 is a different fault.
+
+The discriminator: cap draws per render pass (hot file /tmp/ryujinx-metal-pass-split-draws,
+env RYUJINX_METAL_PASS_SPLIT_DRAWS, PassEndReason.DrawBudget), so no single pass can
+reach the overflow point and the implicit partial-render store/reload is replaced by
+the explicit path. Verified engaged: DrawBudget=5 splits/frame, 197 -> 203 passes,
+no frame-rate cost.
+
+Single-session hot A/B at the reproducing save, correlator as the counter:
+
+    split OFF   236.0/600 flat per interval (n=7)   39.3%
+    split ON    235.8/600 flat per interval (n=5)   39.3%    difference 0.04 SE
+
+Null. Capping at 200 draws does not move the rate at all. A partial render triggered
+by under 200 draws of accumulated geometry remains conceivable but strained - MoltenVK
+runs the same 1524-draw pass unsplit at 1/175th the rate.
+
+The run ended with better evidence than it started for: the sun set mid-experiment
+(minimap clock 8:35 PM) and the flat rate collapsed 244 -> 264 -> 221 -> 90 -> 0 within
+five intervals, then held at zero - while draws per frame stayed at 2510-2520
+throughout, split off. The day/night gate (11.2% vs 0.006%, previously recorded) is
+therefore NOT workload-volume gating: the same pass structure, the same draw count,
+the same geometry, and the fault vanishes when the lighting content changes. Whatever
+manufactures the white on the read side is gated by what the frame contains, not by
+how much work produces it.
+
+Next discriminators, each needing a fresh daylight window (reloading the save resets
+game time to 4:45 PM, giving roughly seven minutes of day):
+  - extreme split (N=25) to finish the TVB question,
+  - RG11B10Float -> RGBA16Float for the scene-texture class (packed-format read path),
+  - bouncing the composite's input through a blit copy (the CPU-side evidence says the
+    blit engine reads this texture correctly at the same moments the sampler does not).

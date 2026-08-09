@@ -31,6 +31,7 @@ namespace Ryujinx.Graphics.Metal
         BlitEncoder,
         ComputeEncoder,
         Dispose,
+        DrawBudget,
     }
 
     public enum EncoderType
@@ -69,6 +70,38 @@ namespace Ryujinx.Graphics.Metal
         private ulong _lastStatsRenderPassCount;
         private readonly int[] _passEndReasons = new int[Enum.GetValues<PassEndReason>().Length];
         private ulong _drawCountAtPassStart;
+
+        // Draws allowed in one render pass before it is split (0 = never). Seeded from
+        // RYUJINX_METAL_PASS_SPLIT_DRAWS; /tmp/ryujinx-metal-pass-split-draws overrides
+        // it hot, re-read once per frame, so both arms run inside one session.
+        private static int _passSplitDraws =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_PASS_SPLIT_DRAWS"), out int passSplitDraws)
+                ? passSplitDraws
+                : 0;
+
+        private static readonly int _passSplitDrawsDefault = _passSplitDraws;
+
+        private static void RefreshPassSplit()
+        {
+            try
+            {
+                if (System.IO.File.Exists("/tmp/ryujinx-metal-pass-split-draws"))
+                {
+                    _passSplitDraws =
+                        int.TryParse(System.IO.File.ReadAllText("/tmp/ryujinx-metal-pass-split-draws").Trim(), out int value)
+                            ? value
+                            : _passSplitDrawsDefault;
+                }
+                else
+                {
+                    _passSplitDraws = _passSplitDrawsDefault;
+                }
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
 
         public ulong DrawCount { get; private set; }
         public ulong DispatchCount { get; private set; }
@@ -148,6 +181,26 @@ namespace Ryujinx.Graphics.Metal
                 _encoderStateManager.SamplesOwnAttachment())
             {
                 EndCurrentPass(PassEndReason.FragmentDependency);
+                _encoderStateManager.SignalRenderDirty();
+            }
+
+            // Partial-render discriminator. AGX splits a render pass by itself when the
+            // tiled vertex buffer fills - store all tiles, reload, continue - through
+            // auxiliary load/store programs distinct from the ordinary end-of-pass path
+            // (Rosenzweig, "The Impossible Bug": get those programs wrong and attachments
+            // come back garbage). Only the scene pass here carries enough geometry to
+            // overflow (~1524 draws; every other pass averages 13). Capping draws per
+            // pass keeps any single pass below the overflow point, so the driver's
+            // implicit partial-render store/reload is replaced by the explicit path this
+            // backend already exercises 197 times a frame. If the flash rate collapses
+            // under the cap, the fault lives in the partial-render path; the cap is then
+            // also a shippable workaround. Same safe split pattern as the feedback fix:
+            // decided from counters alone, before the prepass, never inside acquisition.
+            if (forDraw && _passSplitDraws > 0 &&
+                Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
+                DrawCount - _drawCountAtPassStart >= (ulong)_passSplitDraws)
+            {
+                EndCurrentPass(PassEndReason.DrawBudget);
                 _encoderStateManager.SignalRenderDirty();
             }
 
@@ -410,6 +463,7 @@ namespace Ryujinx.Graphics.Metal
             RefreshSkipDispatch();
             OpRing.OnPresent();
             FlashGuard.RefreshToggle();
+            RefreshPassSplit();
             RefreshBarrierToggle();
             EncoderStateManager.RefreshSamplingToggle();
 
