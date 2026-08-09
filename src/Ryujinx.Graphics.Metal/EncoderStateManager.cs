@@ -491,6 +491,8 @@ namespace Ryujinx.Graphics.Metal
             // Initialise Pass & State
             using MTLRenderPassDescriptor renderPassDescriptor = new();
 
+            FeedbackProbe.BeginPass();
+
             _passStoreUnknown = _elideEmptyStore;
             _passColorMask = 0;
             _passHasDepth = false;
@@ -511,6 +513,11 @@ namespace Ryujinx.Graphics.Metal
                     passAttachment.LoadAction = _currentState.ClearLoadAction ? MTLLoadAction.Clear : MTLLoadAction.Load;
                     passAttachment.StoreAction = _passStoreUnknown ? MTLStoreAction.Unknown : MTLStoreAction.Store;
                     _passColorMask |= 1ul << i;
+
+                    // The attachments this pass really carries. Comparing against
+                    // _currentState.RenderTargets instead counted targets bound for an
+                    // earlier pass, which is what buried the feedback signal twice.
+                    FeedbackProbe.NoteAttachment(i, tex);
                 }
             }
 
@@ -2033,28 +2040,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            IntPtr sampledRoot = sampled.CanonicalPtr != IntPtr.Zero ? sampled.CanonicalPtr : sampled.GetHandle().NativePtr;
-
-            for (int i = 0; i < _currentState.RenderTargets.Length; i++)
-            {
-                if (_currentState.RenderTargets[i] is not Texture target)
-                {
-                    continue;
-                }
-
-                IntPtr targetRoot = target.CanonicalPtr != IntPtr.Zero ? target.CanonicalPtr : target.GetHandle().NativePtr;
-
-                // Same storage is not enough: a texture attached at one mip and sampled
-                // at another is the ordinary mip-generation pattern and perfectly defined,
-                // and counting those buried the real cases under ~108 hits a frame. Only
-                // an overlap of the same level and the same layer is undefined.
-                if (targetRoot == sampledRoot &&
-                    target.FirstLevel == sampled.FirstLevel &&
-                    target.FirstLayer == sampled.FirstLayer)
-                {
-                    FeedbackProbe.Note(i, sampled.Width, sampled.Height, sampled.MtlFormat.ToString(), targetRoot);
-                }
-            }
+            FeedbackProbe.CheckAgainstLiveAttachments(sampled);
         }
 
         private readonly (ulong gpuAddress, IntPtr nativePtr) AddressForTexture(ref TextureRef texture)

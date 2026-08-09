@@ -53,6 +53,63 @@ namespace Ryujinx.Graphics.Metal
         private static readonly HashSet<string> _seen = [];
         private static long _total;
 
+        // The live pass's attachments, snapshotted as its descriptor is built.
+        private const int MaxAttachments = 8;
+
+        [ThreadStatic] private static IntPtr[] _liveRoot;
+        [ThreadStatic] private static int[] _liveLevel;
+        [ThreadStatic] private static int[] _liveLayer;
+
+        public static void BeginPass()
+        {
+            _liveRoot ??= new IntPtr[MaxAttachments];
+            _liveLevel ??= new int[MaxAttachments];
+            _liveLayer ??= new int[MaxAttachments];
+
+            Array.Clear(_liveRoot);
+        }
+
+        public static void NoteAttachment(int index, Texture target)
+        {
+            if (!Enabled || index >= MaxAttachments || target == null)
+            {
+                return;
+            }
+
+            _liveRoot ??= new IntPtr[MaxAttachments];
+            _liveLevel ??= new int[MaxAttachments];
+            _liveLayer ??= new int[MaxAttachments];
+
+            _liveRoot[index] = target.CanonicalPtr != IntPtr.Zero ? target.CanonicalPtr : target.GetHandle().NativePtr;
+            _liveLevel[index] = target.FirstLevel;
+            _liveLayer[index] = target.FirstLayer;
+        }
+
+        /// <summary>
+        /// True feedback: same storage, same level, same layer, and the target is an
+        /// attachment of the pass that is actually open - not one left in the state from
+        /// an earlier pass, which is what two previous versions of this counted.
+        /// </summary>
+        public static void CheckAgainstLiveAttachments(Texture sampled)
+        {
+            if (!Enabled || _liveRoot == null || sampled == null)
+            {
+                return;
+            }
+
+            IntPtr sampledRoot = sampled.CanonicalPtr != IntPtr.Zero ? sampled.CanonicalPtr : sampled.GetHandle().NativePtr;
+
+            for (int i = 0; i < MaxAttachments; i++)
+            {
+                if (_liveRoot[i] == sampledRoot &&
+                    _liveLevel[i] == sampled.FirstLevel &&
+                    _liveLayer[i] == sampled.FirstLayer)
+                {
+                    Note(i, sampled.Width, sampled.Height, sampled.MtlFormat.ToString(), sampledRoot);
+                }
+            }
+        }
+
         public static void Note(int attachmentIndex, int width, int height, string format, IntPtr root)
         {
             _detected = true;
