@@ -1985,3 +1985,26 @@ counters stay on. What remains standing after both: the white is generated durin
 tile memory, on textures whose contents are defined, entering through draw-carrying
 passes, on all host copies at once. The unexecuted measurement is still the alias-sync
 path log in the shared texture cache - direction and timing against flash frames.
+
+### Zero alias copies: the sync amplifier dies, and the siblings were phantoms
+
+TextureGroupHandle.Copy - the one path that syncs aliased host textures - executed ZERO
+times on scene-sized textures across 30 white runs. Nothing propagates content between
+host copies. Three "distinct" textures with permanently identical content and no sync
+path means they are almost certainly ONE storage wearing three names: CanonicalPtr
+resolves view-of-view a single hop, so second-hop views manufacture phantom siblings.
+Seventh appearance of the identity lesson, inverted - not hiding a writer this time,
+inventing witnesses.
+
+The model collapses back to the simple one: ONE scene texture, written by ordinary draw
+passes, read by the composite, and on flash frames its LOAD brings white into tile memory
+while its bytes hold the scene. Every propagation, creation, binding, arithmetic, barrier,
+residency, counter and store-side mechanism is now excluded at power. What has never been
+tested, because no instrument here can see it, is the driver's own load path - and the one
+input to that path nobody has varied is the DEPTH attachment loaded alongside the colour
+(depth textures get PixelFormatView usage too, line 174, which is at minimum unusual for
+depth on Metal).
+
+Next session: strip PixelFormatView from depth-stencil texture usage (a one-line, correct-
+on-its-own-terms change - reinterpreting depth formats is not supported anyway) and
+measure. After that, the remaining space is a driver reproduction case for Apple.
