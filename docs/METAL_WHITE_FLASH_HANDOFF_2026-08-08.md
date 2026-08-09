@@ -1744,3 +1744,35 @@ Next (one run each, or one run with both):
   - log the compute pipeline labels of dispatches adjacent to a white flip, then skip
     those dispatches under a file toggle: rate collapses -> the dispatch is the writer;
     unchanged -> the pass is, and its load action gets the treatment
+
+### The two dispatches are excluded; the zero-draw pass remains
+
+Hot-swapped skip-by-label against the reproducing save, ~1500 samples per arm, both arms
+rendering (luma 149-159):
+
+    baseline   43.3% / 41.5%
+    SKIP both  43.8% / 39.4%
+
+The skip matches on the same DebugLabel string the interval printed, so it engaged by
+construction. Both compute shaders are out - their raw-pointer buffer writes were the
+obvious suspect and they are not it.
+
+What remains of the three-operation interval is the render pass itself:
+
+    pass rt0=<the watched scene texture> depth=<paired depth>, d0, clr=False
+
+Zero draws, LoadAction Load, StoreAction Store. Byte-idempotent in theory - which means
+the mechanism is in what load/store DOES on this hardware: a tile-memory round trip that
+re-encodes the texture's lossless compression. If an earlier unsynchronised write left the
+compression metadata inconsistent, this pass is where garbage crystallises into the stored
+image - and a metadata-level fault decodes as a near-constant, which is exactly the
+uniform white. That would also be invisible to every content hook (they read through the
+sampler, post-decode).
+
+Next, one experiment, two candidate implementations:
+  - elide empty passes: never open a render encoder until the first draw actually arrives
+    (a d0 Load/Store pass then simply never exists). If the flash collapses, this is also
+    the fix, and a correct one - an empty load/store pass is pure cost.
+  - or, cheaper probe first: log which call path opens these d0 passes (stack or caller
+    flag on GetOrCreateRenderEncoder(forDraw=false)) - if they come from a state setter
+    that forces the encoder open, lazy opening is a small patch.
