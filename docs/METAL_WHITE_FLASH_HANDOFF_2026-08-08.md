@@ -1896,3 +1896,25 @@ strong and every step is instrumented, but no shippable fix exists yet, and the 
 candidate mechanisms (metadata desync, fresh textures, store crystallisation) each died
 under one more measurement. The next session starts at the attachment-identity check, not
 at a fix.
+
+### Refinement for the attachment-identity check: the chart may interleave two textures
+
+The "varied -> white flip" was read as one texture changing. But boundary samples follow
+whichever watched pass just ended, and the census shows the two 1600x896 textures taking
+wildly asymmetric traffic (A: ~25 passes/29 draws; B: 1 pass/0 draws). Entry 21 (varied)
+and entry 22 (white) may be A and B respectively - not a flip of one texture but an
+interleaving of two, with B WHITE CONTINUOUSLY since its undefined birth at level load,
+and the flash deciding by WHICH texture the composite samples that frame.
+
+That reading also revives the recorded lesson that CanonicalPtr resolves view-of-view only
+one hop: B's real writer (the per-frame scene copy that must exist, since good frames show
+the scene through the same binding) can be censused under a middle view's identity,
+invisible against B's root - the same trap, sixth appearance.
+
+First measurement next session, one log line per scene-class pass on flash frames:
+  frame, passIndex, rt0 raw handle, rt0 level/slice, draws - plus the composite's bound
+  input handle for the same frame. It answers in one run:
+  - flip entries 21/22 same handle -> one texture really flips; chase the load
+  - different handles -> B is永白, the flash is a BINDING alternation (which host texture
+    the composite's descriptor resolves to that frame), and the fix moves to the texture
+    cache's view resolution - a shared-layer bug matching the Vulkan echo directly
