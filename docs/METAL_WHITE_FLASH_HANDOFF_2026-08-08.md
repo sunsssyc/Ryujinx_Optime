@@ -1108,3 +1108,27 @@ screenshots and the criterion that was later withdrawn. It removes the obvious l
 the ordering reading without disposing of the reading itself - the ordering that matters
 would then be between render passes, which Metal sequences on its own, or somewhere the
 guest's barrier calls never reach.
+
+### Parent residency: ruled out, same method
+
+Sampled textures reach the shader through an argument buffer, so the encoder is told about
+them with useResource - and this backend names the handle it bound, which for a view is a
+distinct MTLTexture from the one the render pass wrote as an attachment. Apple's guidance
+for views is to declare the parent, and the composite's input is exactly that shape
+(handle 0xB910A4000 against root 0xB9109BC00). Naming the parent instead, hot-swapped
+through /tmp/ryujinx-metal-parent-residency:
+
+    residency = view      567/1380 = 41.1%   luma 156
+    residency = PARENT    509/1260 = 40.4%   luma 150
+    residency = view      511/1320 = 38.7%   luma 154
+    residency = PARENT    577/1380 = 41.8%   luma 155
+
+About 1300 samples an arm, both arms rendering, everything inside a standard error of
+about 1.4 points. No effect. The toggle stays in, off by default, since it is a correctness
+question on its own terms even though it is not this bug.
+
+Three mechanisms have now been ruled out at adequate power against the same reproduction:
+guest texture barriers, argument-buffer residency on the view, and everything in the
+composite shader itself. What still stands is the pair of measurements that disagree only
+about *when*: at the moment the composite fetches, its input is white; by the time the
+frame is presented, that same texture holds the scene.

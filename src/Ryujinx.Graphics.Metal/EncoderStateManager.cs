@@ -1842,12 +1842,41 @@ namespace Ryujinx.Graphics.Metal
 
         private static bool _identitySampling;
 
+        /// <summary>
+        /// Declare residency on a sampled texture's parent rather than on the view.
+        ///
+        /// Sampled textures reach the shader through an argument buffer, so the encoder has
+        /// to be told about them with useResource, and this backend passes the handle it
+        /// bound - which for a view is a distinct MTLTexture from the one the render pass
+        /// wrote as an attachment. Metal tracks residency and hazards against the
+        /// underlying allocation, and Apple's guidance for texture views is to declare the
+        /// parent; naming only the view can leave the dependency on those earlier writes
+        /// unestablished.
+        ///
+        /// The composite's input is exactly that shape - the log shows handle 0xB910A4000
+        /// against root 0xB9109BC00, so it is sampled through a view of the texture the
+        /// scene passes wrote. And the failure this predicts is the one measured: reading
+        /// content from before the writes landed, which is uniform, on a Metal backend
+        /// only, intermittently, and beyond the reach of the guest's own barriers - the
+        /// last of which was ruled out tonight at about 1300 samples an arm.
+        ///
+        /// The argument buffer still gets the view's GPU resource ID, so format and swizzle
+        /// are unaffected. Only what is named for residency changes.
+        ///
+        /// Hot-swapped through /tmp/ryujinx-metal-parent-residency so both arms can be
+        /// measured inside one reproduction window.
+        /// </summary>
+        private static bool _residencyOnParent;
+
         internal static void RefreshSamplingToggle()
         {
             try
             {
                 _identitySampling = System.IO.File.Exists("/tmp/ryujinx-metal-identity-sample") &&
                     System.IO.File.ReadAllText("/tmp/ryujinx-metal-identity-sample").Trim() == "1";
+
+                _residencyOnParent = System.IO.File.Exists("/tmp/ryujinx-metal-parent-residency") &&
+                    System.IO.File.ReadAllText("/tmp/ryujinx-metal-parent-residency").Trim() == "1";
             }
             catch (System.IO.IOException)
             {
@@ -1903,6 +1932,13 @@ namespace Ryujinx.Graphics.Metal
 
                 gpuAddress = mtlTexture.GpuResourceID._impl;
                 nativePtr = mtlTexture.NativePtr;
+
+                // The view carries the format and swizzle the shader needs, so it stays in
+                // the argument buffer; only the resource named for residency changes.
+                if (_residencyOnParent && storage is Texture t && t.CanonicalPtr != IntPtr.Zero)
+                {
+                    nativePtr = t.CanonicalPtr;
+                }
             }
 
             return (gpuAddress, nativePtr);
