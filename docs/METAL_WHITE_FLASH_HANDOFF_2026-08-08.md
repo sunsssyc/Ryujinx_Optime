@@ -1942,3 +1942,31 @@ Next session, in order: fix SampleInputs to blit from each slot's own bound text
 (assert distinct sources by construction), extend the chart to all attachments, then
 re-ask the binding-alternation question - it remains the best-shaped hypothesis and is
 still unanswered.
+
+### With the sampler fixed: all host copies are identical, white included
+
+5x5 in-bounds grid, sib1 (RGBA8) varying independently proves the instrument now reads
+each source. Result: slot128, slot136 and sib0 - three distinct roots - report identical
+spans on every line, scene frames and white frames alike. That is no longer an artefact:
+the texture cache keeps every host copy of the guest scene texture in sync, and on white
+frames ALL of them are white together.
+
+Binding alternation is dead - whichever copy the composite binds, it reads the same
+content. What replaces it is the sync amplifier: the white needs to originate on only ONE
+host copy (tile-garbage crystallisation in that copy's own passes - the mechanism elision
+proved under probes), and the cache's alias synchronisation propagates it to every sibling
+before the composite reads any of them. The [@48]d0:STEP(white) chart entry - the white
+signature already present at frame start on the rendered texture, before its clear - is
+consistent with a frame-start sync copying white IN from a sibling.
+
+Standing facts, all instrument-verified: one guest texture, three synced host copies,
+white everywhere at once on flash frames, white present at frame start before the clear,
+crystallisation-at-store proven causally under probes, store elision impossible in plain
+play because the white enters through draw-carrying passes there.
+
+Next: find the alias-sync copy path in the shared texture cache (it is none of the hooked
+backend copies - the sixth identity lesson applies) and log its direction and timing
+against flash frames. If a frame-start sync copies sibling->rendered before the clear,
+the white's circulation is closed and the break point is choosing NOT to sync FROM a
+sibling whose content is stale tile garbage - a shared-layer fix, which is also what the
+Vulkan echo has demanded all along.
