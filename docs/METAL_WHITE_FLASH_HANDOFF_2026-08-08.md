@@ -1599,3 +1599,24 @@ Test: make the duplicate check compare storage identity - resolve both to the ba
 MTLTexture, not the view object, and not CanonicalPtr (which stops at the intermediate view)
 - then A/B against the reproducing save with the probe counts. If the rate collapses, this
 was it; the fix is the comparison, plus an audit of MaskOut/restore for the same assumption.
+
+# FIXED: the duplicate-MRT dedup, confirmed causal (2026-08-09)
+
+    fix ON  (storage comparison)     0/2700  = 0.0%   luma 152 - scene renders
+    fix OFF (RYUJINX_METAL_DEDUP_BY_REF=1)  1127/2640 = 42.7%  luma 157
+
+Same save, back-to-back launches, probe counts, both arms rendering. The rate collapses to
+zero under the fix and returns in full when the old reference comparison is restored.
+
+The fault, end to end: the game binds the scene HDR storage at two colour slots at once,
+one slot's write mask zero. The mask emulation dedups that case by ITexture reference; the
+game's two bindings are two views of one storage - different objects - so the dedup never
+fired, both slots stayed attached, and every draw stored a defined value through one slot
+and an UNDEFINED value through the other, into the same memory. On this hardware the
+undefined store lands near (1.0, 1.0, 0.94) - the flat white. The corrupted end-of-frame
+state is then consumed by the NEXT frame's composite, which runs at pass 2, which is why
+the flash appears one frame after the damage and why every probe aimed at the white frame
+found nothing.
+
+The fix is the storage-identity comparison in UpdateRenderTargets (CanonicalPtr as well as
+reference), with RYUJINX_METAL_DEDUP_BY_REF=1 as the kill switch.
