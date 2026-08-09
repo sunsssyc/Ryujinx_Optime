@@ -1132,3 +1132,43 @@ guest texture barriers, argument-buffer residency on the view, and everything in
 composite shader itself. What still stands is the pair of measurements that disagree only
 about *when*: at the moment the composite fetches, its input is white; by the time the
 frame is presented, that same texture holds the scene.
+
+### The composite samples a texture nothing renders into
+
+The handle in the input report was read from a live field for both the flat frame and its
+predecessor - the same current value printed twice - so "the same raw handle on both" was
+never a paired comparison and the conclusion drawn from it is withdrawn. Recording the bound
+handle per slot instead:
+
+    WHITE  bound 0x9AEDF0280 root 0x9AEDE3980   span 0x001B43A7..0x781D1375  varied
+    prev   bound 0x9AEDF0280 root 0x9AEDE3980   span 0x781E03C0..0x781E03C0  min == max
+    WHITE  bound 0x9AEDF0280 root 0x9AEDE3980   span 0x001B3BA6..0x781D1B75  varied
+    prev   bound 0x9AEDF0280 root 0x9AEDE3980   span 0x77DDFBBF..0x77DE03C0  near uniform
+
+The binding really is stable, so the composite is not reaching a different texture. But the
+frame before each white one samples uniform, three pairs out of three, and that is not
+noise.
+
+Then the census for the same frame:
+
+    [0x9AEC0B480:1600x896:RG11B10Float:p=24,d=28]   the scene buffer
+    [0x9AEDE3980:1600x896:RG11B10Float:p=1,d=0]     one pass, no draws at all
+
+The composite's input root is 0x9AEDE3980 - the one nothing ever draws into. Same size,
+same format, a different host texture from the one the scene is rendered into. On ordinary
+frames it holds the scene anyway, so something keeps the two in step, and on flat frames
+that something has not run by the time the composite samples.
+
+nonRenderWrites reports none, which by the rule in these notes means the enumeration is
+incomplete rather than that no writer exists - the hooks match on RootOf, so a copy landing
+under another identity is invisible to them.
+
+Next, and it is a structural question with a short answer: are 0x9AEDE3980 and 0x9AEC0B480
+views of one storage or separate allocations? NoteIdentity filters at width 1900 and never
+saw either; dropping that to 1500 prints handle, canonical and viewRoot for both.
+
+  - views of one storage -> the content is shared and the fault is ordering between a write
+    through one and a read through the other
+  - separate allocations -> a copy has to connect them, and on flat frames it is late or
+    missing. That is the texture cache's overlap path, whose own comment in the shared layer
+    says the kept texture "is going to contain garbage data after we draw"

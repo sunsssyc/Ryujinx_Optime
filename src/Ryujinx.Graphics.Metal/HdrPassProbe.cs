@@ -660,6 +660,13 @@ namespace Ryujinx.Graphics.Metal
 
             _slotWatchedCount[slot] = _pendingWatchedCount;
 
+            IntPtr[] toneHandles = _slotToneHandle[slot];
+
+            for (int i = 0; i < MaxToneInputs; i++)
+            {
+                toneHandles[i] = _pendingToneHandle[i];
+            }
+
             IntPtr[] sampled = _slotSampled[slot];
 
             for (int i = 0; i < _pendingSampledCount; i++)
@@ -758,6 +765,31 @@ namespace Ryujinx.Graphics.Metal
         private static readonly int[] _toneIdx = new int[MaxToneInputs];
         private static readonly Texture[] _toneTex = new Texture[MaxToneInputs];
         private static int _toneCount;
+
+        /// <summary>
+        /// The handle actually bound each frame, kept per slot.
+        ///
+        /// The report used to read the live _toneTex field for both the flat frame and its
+        /// predecessor, which is the same current value printed twice - so "the same raw
+        /// handle on both" was never a paired comparison, and the conclusion drawn from it
+        /// (that the composite is not reaching a different texture) does not hold. Two
+        /// 1600x896 RG11B10Float textures exist on a flat frame, one of which takes no
+        /// draws at all, so which one was bound is exactly the question this has to answer.
+        /// </summary>
+        private static readonly IntPtr[][] _slotToneHandle = CreateToneHandles();
+        private static readonly IntPtr[] _pendingToneHandle = new IntPtr[MaxToneInputs];
+
+        private static IntPtr[][] CreateToneHandles()
+        {
+            IntPtr[][] slots = new IntPtr[Slots][];
+
+            for (int i = 0; i < Slots; i++)
+            {
+                slots[i] = new IntPtr[MaxToneInputs];
+            }
+
+            return slots;
+        }
 
         /// <summary>
         /// Every texture the tonemap program binds, latched on first sight. The slot
@@ -882,12 +914,15 @@ namespace Ryujinx.Graphics.Metal
                 if (_toneIdx[i] == index)
                 {
                     _toneTex[i] = t;
+                    _pendingToneHandle[i] = t.GetHandle().NativePtr;
+
                     return;
                 }
             }
 
             _toneIdx[_toneCount] = index;
             _toneTex[_toneCount] = t;
+            _pendingToneHandle[_toneCount] = t.GetHandle().NativePtr;
             _toneCount++;
         }
 
@@ -1247,7 +1282,7 @@ namespace Ryujinx.Graphics.Metal
                 sb.Append(t == null
                     ? $" [{k}:none]"
                     : $" [slot{_toneIdx[k]}:{t.Width}x{t.Height}:{t.MtlFormat}:" +
-                      $"handle0x{t.GetHandle().NativePtr:X}:root0x{RootOf(t):X}]");
+                      $"bound0x{_slotToneHandle[slot][k]:X}:root0x{RootOf(t):X}]");
                 sb.Append($"0x{min:X8}..0x{max:X8}");
             }
 
