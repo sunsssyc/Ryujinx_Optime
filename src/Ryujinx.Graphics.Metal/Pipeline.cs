@@ -733,6 +733,12 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            // A draw-based clear: it opens a pass on the target and writes the whole
+            // surface without going through the ordinary draw path, which is exactly the
+            // p=1 d=0 entry the census reports for the texture the composite samples. If
+            // that clear is white, a flat frame is the clear showing through.
+            HdrPassProbe.NoteSceneClear(dst, color);
+
             _renderer.HelperShader.ClearColor(index, colors, componentMask, dst.Width, dst.Height, dst.Info.Format);
         }
 

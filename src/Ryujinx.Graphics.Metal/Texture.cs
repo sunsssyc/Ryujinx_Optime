@@ -101,7 +101,50 @@ namespace Ryujinx.Graphics.Metal
             // Not a view: its own storage is the canonical identity.
             CanonicalPtr = _identitySwizzleHandle.GetUnsafe().Value.NativePtr;
 
+            StainOnCreate();
+
             descriptor.Dispose();
+        }
+
+        /// <summary>
+        /// Fills a newly created scene-sized RG11B10Float texture with a constant, so that
+        /// whether anything ever writes it can be answered positively instead of by
+        /// enumerating hooks.
+        ///
+        /// The composite samples one of these and reads the scene out of it on ordinary
+        /// frames, yet CopyTo, the render blit and SetData all report never touching it.
+        /// A negative assembled from hooks is not proof - this file records the same
+        /// conclusion being overturned once already, when four hook types with positive
+        /// controls agreed nothing wrote a texture and staining it green showed otherwise.
+        ///
+        /// 0x55 repeated packs to a constant that is neither the scene nor white, and a
+        /// byte fill is enough to place it. Read the screen after:
+        ///
+        ///   ordinary frames still show the scene -> a writer exists and is unhooked
+        ///   flat frames show the stain           -> a flat frame reads this texture before
+        ///                                           anything has written it
+        ///
+        /// RYUJINX_METAL_STAIN_SCENE=1, off by default - it destroys the image of any
+        /// texture it touches until something overwrites it.
+        /// </summary>
+        private static readonly bool _stainScene =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_STAIN_SCENE") == "1";
+
+        private void StainOnCreate()
+        {
+            if (!_stainScene || Info.Width != 1600 || MtlFormat != MTLPixelFormat.RG11B10Float)
+            {
+                return;
+            }
+
+            int bytes = Info.Width * Info.Height * 4;
+            MemoryOwner<byte> stain = MemoryOwner<byte>.Rent(bytes);
+            stain.Span.Fill(0x55);
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu,
+                $"stain: filling new {Info.Width}x{Info.Height} {MtlFormat} 0x{CanonicalPtr:X} with 0x55");
+
+            SetData(stain);
         }
 
         /// <summary>

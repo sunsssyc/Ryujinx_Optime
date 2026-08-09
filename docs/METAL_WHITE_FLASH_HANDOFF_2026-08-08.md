@@ -1234,3 +1234,32 @@ distinctive constant and read the screen:
 
 RG11B10Float packs to 32 bits, so magenta is 0x780003C0 and a filled staging buffer blitted
 in at creation is enough.
+
+### The sentinel says a writer exists; the clear is black, so it is not the clear
+
+Filling every newly created 1600x896 RG11B10Float with 0x55 at creation (a constant that
+decodes to a bright red, not white) and reading the screen: the scene renders normally and
+across 24 shots with 6 flat frames the stain appears on none of them - 0.0% red.
+
+So a writer exists and overwrites the stain, which is what the rule predicted and what
+retires the enumeration: CopyTo, the render blit and SetData reporting NONE meant the hooks
+were short a path, not that nothing wrote it. It also rules out the reading that a flat
+frame is this texture read before anything touched it. Something writes white.
+
+The draw-based clear was the obvious candidate for the p=1 d=0 pass - ClearRenderTargetColor
+goes through a helper draw rather than a load action, so it opens a pass the census counts
+and issues a draw it does not. Hooking it with its colour:
+
+    sceneclear 0xACE9FAF80: 0.000, 0.000, 0.000, 0.000
+    sceneclear 0xACEB5F980: 0.000, 0.000, 0.000, 0.000
+
+Both scene textures are cleared to black. So the clear explains the overwritten stain and
+the p=1 d=0 entry, but not the white.
+
+What remains unresolved is the identity split: one census entry takes 1533 draws and
+another takes none, and the composite samples the second while measurably reading the scene
+out of it on ordinary frames. Those two entries are most likely one storage under two
+identities, which would make the whole picture an ordering question again - the composite
+sampling while the scene draws are still in flight. Settling that needs the two entries
+tied together or told apart by something other than RootOf, which is the comparison that
+has produced every identity error in this file.

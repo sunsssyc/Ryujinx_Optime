@@ -303,6 +303,39 @@ namespace Ryujinx.Graphics.Metal
                 (source?.GetHandle().NativePtr ?? IntPtr.Zero, destination.GetHandle().NativePtr);
         }
 
+        /// <summary>
+        /// Clears landing on a scene-sized RG11B10Float target, with the colour.
+        ///
+        /// ClearRenderTargetColor goes through a helper draw rather than a load action, so
+        /// it opens a pass the census counts and issues a draw the census does not - which
+        /// is what p=1 d=0 means on the texture the composite samples, and why the stain
+        /// placed at creation is overwritten while no copy hook ever fires.
+        /// </summary>
+        private static readonly System.Collections.Generic.HashSet<string> _clearSeen = [];
+
+        public static void NoteSceneClear(Texture destination, Ryujinx.Graphics.GAL.ColorF color)
+        {
+            if (!Enabled || destination == null || destination.Width != 1600 ||
+                destination.MtlFormat != MTLPixelFormat.RG11B10Float)
+            {
+                return;
+            }
+
+            NoteSceneCopy(null, destination);
+
+            string key = $"0x{destination.GetHandle().NativePtr:X}:{color.Red:F3},{color.Green:F3},{color.Blue:F3},{color.Alpha:F3}";
+
+            lock (_clearSeen)
+            {
+                if (!_clearSeen.Add(key))
+                {
+                    return;
+                }
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu, $"sceneclear {key}");
+        }
+
         public static string DescribeSceneCopies(int slot)
         {
             int count = _slotSceneCopyCount[slot];
