@@ -236,6 +236,14 @@ namespace Ryujinx.Graphics.Metal
             Cbs.Encoders.EndCurrentPass();
 
             _pendingPassEndReason = PassEndReason.Unspecified;
+
+            // Sample the watched target right after a pass on it ends. Sampling only on
+            // encoder transitions left every chart entry between transitions holding the
+            // previous frame's pixels - the fault Phase 1's first run exposed.
+            if (HdrPassProbe.Enabled)
+            {
+                HdrPassProbe.SampleBoundary(Cbs, _presentCount % 4);
+            }
         }
 
         public void OnRenderPassEnded(EncoderType startingType)

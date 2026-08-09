@@ -864,6 +864,29 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private static Texture _lastWatchedTarget;
 
+        // The watched target whose pass just ended, consumed by SampleBoundary from
+        // Pipeline.EndCurrentPass - the only point where a blit is legal again and the
+        // pass's output actually exists.
+        private static Texture _justEndedWatched;
+
+        public static void SampleBoundary(CommandBufferScoped cbs, int frameSlot)
+        {
+            if (_justEndedWatched == null)
+            {
+                return;
+            }
+
+            Texture t = _justEndedWatched;
+            _justEndedWatched = null;
+
+            SampleWatched(cbs, t, frameSlot, _pendingWatchedCount);
+
+            if (_pendingWatchedCount <= MaxWatched)
+            {
+                _pendingSampleSeq[_pendingWatchedCount] = OpRing.Seq;
+            }
+        }
+
         public static void SampleAtPresent(CommandBufferScoped cbs, int frameSlot)
         {
             if (_lastWatchedTarget == null)
@@ -1023,6 +1046,11 @@ namespace Ryujinx.Graphics.Metal
                     }
                 }
 
+                if (_slotSampleSeq[slot][p] < 0)
+                {
+                    continue; // not freshly sampled this frame - stale pixels, skip
+                }
+
                 if (!uniform)
                 {
                     prevVaried = p;
@@ -1054,6 +1082,7 @@ namespace Ryujinx.Graphics.Metal
                 _pendingWatched[_pendingWatchedCount].Reason = reason;
                 _pendingWatchedCount++;
                 _openWatched = false;
+                _justEndedWatched = _openWatchedTarget;
                 _openWatchedTarget = null;
             }
         }
@@ -1088,6 +1117,7 @@ namespace Ryujinx.Graphics.Metal
             for (int i = 0; i <= MaxWatched; i++)
             {
                 seqs[i] = _pendingSampleSeq[i];
+                _pendingSampleSeq[i] = -1;
             }
 
             IntPtr[] toneHandles = _slotToneHandle[slot];

@@ -366,7 +366,7 @@ namespace Ryujinx.Graphics.Metal
                             $"luma={lumaMid:F0} spread={spread:F0} " +
                             $"D={drawsThisFrame} C={dispatchesThisFrame} " +
                             $"SM:u={smUploads},p={smProtected},f={smFlushAct} " +
-                            $"src=0x{srcTex.NativePtr:X}:{srcW}x{srcH}\n" +
+                            $"src=0x{srcTex.NativePtr:X}:{srcW}x{srcH} opSeq={OpRing.Seq}\n" +
                             $"     sweep: {DescribeSweep()}\n" +
                             $"     good coverage:{CoverageProbe.Describe(midSlot)}");
                     }
