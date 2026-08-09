@@ -1198,3 +1198,39 @@ Next: instrument the copy. Which call fills 0xA36857980, on which frames, and wh
 frame relative to the composite's pass. Texture.CopyTo and the texture cache's overlap
 handling are the places to hook, and the hooks must not key on RootOf - that is what made
 nonRenderWrites report none while a copy was evidently happening.
+
+### Draw attribution was wrong, and the copy hunt has gone as far as enumeration can
+
+The per-target census credited draws only to colour target 0, so any texture that is only
+ever a secondary MRT attachment reported d=0. That reads as "nothing ever draws into this"
+and it is a bookkeeping artefact - one which a conclusion here was briefly built on, now
+withdrawn. Fixed: draws are credited to every attachment of the pass, and the census reports
+truncation, which it also did not do.
+
+With that corrected the 1600x896 textures report 1500-odd draws each, and the one the
+composite samples still reports p=1, d=0 - so the observation survives the fix. That pass
+carries no draws and no clear, which makes it a no-op, and the texture's content has to
+arrive some other way.
+
+Hooked, all reporting NONE on flat and ordinary frames alike:
+
+    Texture.CopyTo (all three overloads)
+    HelperShader.BlitColor (the render blit, which fits p=1 d=0 exactly)
+    Texture.SetData (all three overloads)
+
+And yet the shader measurably reads the scene out of that texture on ordinary frames. So a
+writer exists and the enumeration is short one path - which is the point at which this
+file's own rule applies: a negative built from hooks is not proof, only a sentinel is.
+The rule is there because this exact conclusion was overturned once before, when four hook
+types with positive controls all said nothing wrote a texture and staining it green proved
+otherwise.
+
+So the next step is not another hook. Fill every newly created 1600x896 RG11B10Float with a
+distinctive constant and read the screen:
+
+  - ordinary frames still show the scene -> a writer exists, the enumeration is incomplete,
+    and the stain names when it is overwritten
+  - flat frames show the stain -> a flat frame is this texture read before anything wrote it
+
+RG11B10Float packs to 32 bits, so magenta is 0x780003C0 and a filled staging buffer blitted
+in at creation is enough.

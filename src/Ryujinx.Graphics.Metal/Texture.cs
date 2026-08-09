@@ -710,6 +710,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data)
         {
+            HdrPassProbe.NoteSceneCopy(null, this);
             HdrPassProbe.NoteNonRenderWrite(this, "upload");
 
             CommandBufferScoped cbs = Pipeline.Cbs;
@@ -795,6 +796,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data, int layer, int level)
         {
+            HdrPassProbe.NoteSceneCopy(null, this);
             SetData(data.Memory.Span, layer, level, 1, 1, singleSlice: true);
 
             data.Dispose();
@@ -802,6 +804,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data, int layer, int level, Rectangle<int> region)
         {
+            HdrPassProbe.NoteSceneCopy(null, this);
             CommandBufferScoped cbs = Pipeline.Cbs;
             MTLBlitCommandEncoder blitCommandEncoder = Pipeline.GetOrCreateBlitEncoder();
 
