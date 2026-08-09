@@ -900,7 +900,7 @@ namespace Ryujinx.Graphics.Metal
                     sb.Append(" -> ");
                 }
 
-                sb.Append($"[@{_slotWatched[slot][p].Ordinal}]d{_slotWatched[slot][p].Draws}:");
+                sb.Append($"[@{_slotWatched[slot][p].Ordinal}]d{_slotWatched[slot][p].Draws}{(_slotWatched[slot][p].Cleared ? "c" : "")}:");
 
                 // Strict equality could not tell the scene from the flat state: the flat
                 // value spans one quantisation step (0x800), which fails equality just as
