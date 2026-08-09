@@ -2606,6 +2606,8 @@ namespace Ryujinx.Graphics.Metal
 
                                 if ((segment.Stages & ResourceStages.Compute) != 0)
                                 {
+                                    HdrPassProbe.NoteComputeImage(image.Storage);
+
                                     AddResource(nativePtr, MTLResourceUsage.Read | MTLResourceUsage.Write, in bindings);
                                     resourceIds[resourceIdIndex] = gpuAddress;
                                     resourceIdIndex++;
@@ -2627,6 +2629,8 @@ namespace Ryujinx.Graphics.Metal
 
                                     if ((segment.Stages & ResourceStages.Compute) != 0)
                                     {
+                                        HdrPassProbe.NoteComputeImage(image.Storage as Texture);
+
                                         AddResource(nativePtr, MTLResourceUsage.Read | MTLResourceUsage.Write, in bindings);
                                         resourceIds[resourceIdIndex] = gpuAddress;
                                         resourceIdIndex++;

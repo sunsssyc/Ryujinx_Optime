@@ -383,6 +383,39 @@ namespace Ryujinx.Graphics.Metal
             Logger.Warning?.PrintMsg(LogClass.Gpu, $"sceneclear {key}");
         }
 
+        /// <summary>
+        /// Compute dispatches that bind the watched storage as a writable image, with the
+        /// pass ordinal counter's value at bind time.
+        ///
+        /// The flat state lands in the last two passes of the causing frame, in a window
+        /// whose only render pass has zero draws and no clear - which cannot change
+        /// content. Copies, render blits and SetData are hooked and silent. A compute
+        /// image write is the one mechanism none of that covers, it is what would have
+        /// beaten the creation-time stain, and the frame runs about 38 dispatches.
+        /// </summary>
+        private static int _pendingComputeImageBinds;
+        private static int _pendingComputeImageLastOrdinal = -1;
+        private static readonly int[] _slotComputeImageBinds = new int[Slots];
+        private static readonly int[] _slotComputeImageLastOrdinal = new int[Slots];
+
+        public static void NoteComputeImage(Texture storage)
+        {
+            if (!Enabled || storage == null || _watchRoot == IntPtr.Zero || RootOf(storage) != _watchRoot)
+            {
+                return;
+            }
+
+            _pendingComputeImageBinds++;
+            _pendingComputeImageLastOrdinal = _passOrdinal;
+        }
+
+        public static string DescribeComputeImage(int slot)
+        {
+            return _slotComputeImageBinds[slot] == 0
+                ? "never bound as image"
+                : $"bound as writable image {_slotComputeImageBinds[slot]}x, last at ordinal {_slotComputeImageLastOrdinal[slot]}";
+        }
+
         public static string DescribeSceneCopies(int slot)
         {
             int count = _slotSceneCopyCount[slot];
@@ -982,6 +1015,11 @@ namespace Ryujinx.Graphics.Metal
             _pendingCompositeOrdinal = -1;
             _pendingLastSceneOrdinal = -1;
             _passOrdinal = 0;
+
+            _slotComputeImageBinds[slot] = _pendingComputeImageBinds;
+            _slotComputeImageLastOrdinal[slot] = _pendingComputeImageLastOrdinal;
+            _pendingComputeImageBinds = 0;
+            _pendingComputeImageLastOrdinal = -1;
 
             _slotSceneCopyCount[slot] = _pendingSceneCopyCount;
             _slotSceneCopyDropped[slot] = _pendingSceneCopyDropped;
