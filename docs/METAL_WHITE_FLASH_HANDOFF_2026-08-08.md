@@ -1410,3 +1410,26 @@ So the next session starts with instrument reconciliation, not with a new hypoth
 The reframing above does not depend on any of that. It rests on the composite's ordinal
 being 2 on every frame, which is a single integer read at pass creation, and on the
 in-shader fetch measurement, which is taken at the point of use.
+
+### Both instrument disagreements were misreadings, and the numbers stand
+
+The pass-count gap: hdrwatch printed at 00:00:44, during loading, and the line only prints
+when the latched root changes - so it printed once, on a load frame. 511 passes and 2184
+draws is ordinary there; the ~169 it was compared against came from in-game frames. Nothing
+disagrees.
+
+The sampler gap: DescribePassContent tests nine words for strict equality and says "varied"
+the moment any two differ, while DescribeInputs prints min..max over twenty-five. A span of
+0x781DFBC0..0x781E03C0 is 0x800 wide - narrow, but not equal. Both readings are correct
+together, and "narrow span" was being read here as "uniform". Nothing disagrees.
+
+So neither figure needs discounting, and the reframing keeps its supporting data rather than
+resting on the ordinal alone. It does change one wording above: the scene texture at the end
+of the frames preceding white ones is *nearly* uniform - a span of one quantisation step of
+one channel - not literally constant. That is still a scene compressed into a single step,
+which is what the composite then reads and reproduces as flat.
+
+What remains for the next session is the sampling reach, and only that: SampleBeforePass
+fires only when the encoder is not already a render encoder, so it sees eight of the
+hundreds of passes writing the scene texture. Following which pass leaves that texture in a
+one-step range needs sampling that does not depend on encoder transitions.
