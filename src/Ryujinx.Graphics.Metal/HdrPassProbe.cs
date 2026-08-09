@@ -400,7 +400,13 @@ namespace Ryujinx.Graphics.Metal
 
         public static void NoteComputeImage(Texture storage)
         {
-            if (!Enabled || storage == null || _watchRoot == IntPtr.Zero || RootOf(storage) != _watchRoot)
+            // Width and format, not root. The sibling sampling proved two different roots
+            // share this content - CanonicalPtr on a view of a view names the intermediate
+            // view, not the base - so filtering on the latched root would miss a dispatch
+            // binding the same storage through another identity, exactly the way every
+            // other identity-keyed hook in these notes has missed its target.
+            if (!Enabled || storage == null || storage.Width != 1600 ||
+                storage.MtlFormat != MTLPixelFormat.RG11B10Float)
             {
                 return;
             }
