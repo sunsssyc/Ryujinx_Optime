@@ -764,22 +764,42 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _logTexReadback =
             System.Environment.GetEnvironmentVariable("RYUJINX_METAL_LOG_READBACK") == "1";
 
+        /// <summary>
+        /// The render-thread path flushes the main queue first, so its copy is ordered
+        /// against everything already recorded. The background path does neither: it
+        /// blits on a different queue with no MTLEvent or MTLFence between them, so it
+        /// reads whatever the texture happens to hold while the main queue is still
+        /// rendering into it. This says which path a readback actually took, and of
+        /// what, because the whole cross-queue race hypothesis is dead unless the
+        /// background path fires on frame-sized colour textures during play.
+        /// </summary>
+        private void LogReadback(bool background)
+        {
+            Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(
+                Ryujinx.Common.Logging.LogClass.Gpu,
+                $"readback {(background ? "BACKGROUND" : "render")} tex target={Info.Target} fmt={Info.Format} " +
+                $"{Info.Width}x{Info.Height}x{Info.Depth} levels={Info.Levels}");
+        }
+
         public PinnedSpan<byte> GetData()
         {
-            if (_logTexReadback)
-            {
-                Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(
-                    Ryujinx.Common.Logging.LogClass.Gpu,
-                    $"readback tex target={Info.Target} fmt={Info.Format} {Info.Width}x{Info.Height}x{Info.Depth} levels={Info.Levels}");
-            }
-
             BackgroundResource resources = Renderer.BackgroundResources.Get();
 
             if (Renderer.CommandBufferPool.OwnedByCurrentThread)
             {
+                if (_logTexReadback)
+                {
+                    LogReadback(false);
+                }
+
                 Renderer.FlushAllCommands();
 
                 return PinnedSpan<byte>.UnsafeFromSpan(GetData(Renderer.CommandBufferPool, resources.GetFlushBuffer()));
+            }
+
+            if (_logTexReadback)
+            {
+                LogReadback(true);
             }
 
             return PinnedSpan<byte>.UnsafeFromSpan(GetData(resources.GetPool(), resources.GetFlushBuffer()));
@@ -791,9 +811,19 @@ namespace Ryujinx.Graphics.Metal
 
             if (Renderer.CommandBufferPool.OwnedByCurrentThread)
             {
+                if (_logTexReadback)
+                {
+                    LogReadback(false);
+                }
+
                 Renderer.FlushAllCommands();
 
                 return PinnedSpan<byte>.UnsafeFromSpan(GetData(Renderer.CommandBufferPool, resources.GetFlushBuffer(), layer, level));
+            }
+
+            if (_logTexReadback)
+            {
+                LogReadback(true);
             }
 
             return PinnedSpan<byte>.UnsafeFromSpan(GetData(resources.GetPool(), resources.GetFlushBuffer(), layer, level));

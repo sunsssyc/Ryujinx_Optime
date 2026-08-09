@@ -2208,3 +2208,72 @@ nothing measurable here.
 
 With this, every mechanism this investigation could name inside the backend has been
 tested to conclusion.
+
+## 2026-08-09: cross-queue synchronisation, and why Vulkan structurally cannot do this
+
+Chasing the Vulkan/Metal divergence from the outside rather than from the shader end
+turned up something the ledger had never named: this backend runs two command queues.
+
+    _queue           = _device.NewCommandQueue(MaxCommandBuffers + 1);
+    BackgroundQueue  = _device.NewCommandQueue(MaxCommandBuffers);
+
+Metal orders command buffers only within a queue - "all command buffers sent to a single
+queue are guaranteed to execute in the order in which the command buffers were enqueued" -
+and there is no MTLEvent, no MTLSharedEvent and no MTLFence anywhere in this backend. Every
+"fence" here is Ryujinx's own CPU-side completion wait. So the two queues have no ordering
+relationship of any kind. The backend also never calls `enqueue`, so a command buffer takes
+its slot at `Commit()`, not at creation.
+
+The only user of BackgroundQueue is `Texture.GetData`. Its render-thread path calls
+`FlushAllCommands()` first and is properly ordered; its background-thread path does neither
+- it blits on the other queue while the main queue may still be rendering into the very
+texture it is copying.
+
+Vulkan never reaches this shape on macOS, and not by luck. MoltenVK pins queue count per
+family to one:
+
+    static constexpr uint32_t kMVKQueueCountPerQueueFamily = 1;  // Must be 1.
+
+so VulkanRenderer's `maxQueueCount >= 2` test fails, BackgroundQueue is never created, and
+BackgroundResources falls back to `_gd.Queue` under `_gd.QueueLock`. One timeline. (The
+Vulkan backend also disables the background queue on AMD by hand, which suggests the second
+queue had already caused trouble somewhere.)
+
+### It is a real race, and it is not the flash
+
+`RYUJINX_METAL_LOG_READBACK=1` now reports which path each readback took. On the
+reproducing save, in gameplay:
+
+    readback BACKGROUND  1152    Texture2D R8G8Unorm 260x260   (every single one)
+    readback render       452    small 3D LUTs and 1x1 surfaces
+
+So the unsynchronised cross-queue path is live and busy - but it only ever carries one
+260x260 two-channel texture, which is not the composite's input and cannot whiten a frame.
+Cross-queue ordering is excluded as the cause of the white flash.
+
+The race itself is real and worth removing on its own account, so BackgroundQueue now
+aliases the main queue by default, restoring exactly the guarantee Vulkan gets here.
+`RYUJINX_METAL_SPLIT_QUEUE=1` returns the old topology. Same save, same scene, same
+pass and draw counts, cross-process so not a fine-grained A/B - shared 129-150ms in
+357-369 waits per 120 frames, split 154-178ms in 369-376. No regression, no command
+buffer errors, no stall.
+
+### The sampler and LOD family, closed in one grep
+
+Never previously examined: nothing in this document mentions LOD, mip or sampler state.
+It is moot regardless. The composite reads its input with explicit texel fetches at a
+literal level 0 -
+
+    temp_38 = textures.tex_fp_t_tcb_8.read(uint2(temp_36, temp_37), 0).xyz;
+
+twelve of them, one texture2d<float>, no `sample()` anywhere in the shader. There is no
+sampler, no LOD selection and no mip filtering on this path, so none of it can be the
+mechanism. Axiom A1 stands unweakened: level 0 of that texture really does read white at
+the moment it is fetched.
+
+### Searched and absent
+
+No public report matches this fault: Ryujinx and Ryubing trackers, MoltenVK issues, Apple
+Developer Forums, wgpu. The nearest neighbours (wgpu #6647, white at mip distance on M4;
+the macOS 26 MPS and Metal 4 regressions) are different faults. There is no shortcut from
+outside; the exclusion ledger here remains the primary document.

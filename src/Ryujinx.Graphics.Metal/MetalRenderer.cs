@@ -57,8 +57,31 @@ namespace Ryujinx.Graphics.Metal
                 throw new NotSupportedException("Metal backend requires Tier 2 Argument Buffer support.");
             }
 
-            _queue = _device.NewCommandQueue(CommandBufferPool.MaxCommandBuffers + 1);
-            BackgroundQueue = _device.NewCommandQueue(CommandBufferPool.MaxCommandBuffers);
+            // Background texture readbacks used to run on a second MTLCommandQueue. Metal
+            // orders command buffers only within a queue, and this backend contains no
+            // MTLEvent and no MTLFence anywhere, so a readback issued from a background
+            // thread raced the main queue's render into the very texture it was copying -
+            // an unsynchronised read of a live render target, whose torn result is then
+            // written back into guest memory and can be uploaded again later.
+            //
+            // Vulkan never does this on macOS. MoltenVK fixes queue count per family at
+            // one (kMVKQueueCountPerQueueFamily = 1, "Must be 1"), so VulkanRenderer's
+            // `maxQueueCount >= 2` test fails, BackgroundQueue is never created, and
+            // BackgroundResources falls back to the main queue and its lock. Sharing the
+            // queue here restores that same guarantee: one timeline, commit order, and
+            // Metal's automatic hazard tracking across the whole submission stream.
+            bool splitQueue = Environment.GetEnvironmentVariable("RYUJINX_METAL_SPLIT_QUEUE") == "1";
+
+            // A shared queue carries the main pool and every per-thread background pool at
+            // once, so the ceiling on uncompleted command buffers has to cover both; asking
+            // for more than the queue allows blocks the caller until one retires.
+            _queue = _device.NewCommandQueue((ulong)(splitQueue
+                ? CommandBufferPool.MaxCommandBuffers + 1
+                : CommandBufferPool.MaxCommandBuffers * 2 + 8));
+
+            BackgroundQueue = splitQueue
+                ? _device.NewCommandQueue(CommandBufferPool.MaxCommandBuffers)
+                : _queue;
 
             _getMetalLayer = metalLayer;
         }
