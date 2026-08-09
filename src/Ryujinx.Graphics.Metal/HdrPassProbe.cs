@@ -682,6 +682,18 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            // The chain previously charted only passes where the watched storage is colour
+            // target 0 - seven per frame - while the census counts 22-24. The passes where
+            // it is a secondary attachment were neither charted nor sampled, and the flat
+            // writer can be one of them. Chart them all; content sampling still only
+            // happens at encoder transitions, so this adds bookkeeping and nothing else.
+            if (IsWatchedTarget(target) && _pendingWatchedCount < MaxWatched && !_openWatched)
+            {
+                _pendingWatched[_pendingWatchedCount] = new PassDetail { Cleared = clearLoadAction, Ordinal = _passOrdinal };
+                _openWatched = true;
+                _openWatchedTarget = target;
+            }
+
             IntPtr handle = RootOf(target);
 
             if (handle == IntPtr.Zero)
