@@ -2123,3 +2123,32 @@ sync-stat interval. What it costs is motion. At this location the flash rate is 
 nearly half of all frames are replaced by the previous good one, which is 16 fps of real
 movement inside a 30 fps stream. That is the judder, and it is inherent to repeating a
 frame rather than repairing it.
+
+# CLOSING STATE (2026-08-09)
+
+Not fixed at root. Everything reachable from inside this backend has been excluded at
+measurement power, each with a paired or reversible test: bindings and identity, shader
+arithmetic (saturation, NaN, coordinate collapse, output banding), shader translation
+(1771 MSL/GLSL pairs, operation-for-operation equivalence on the composite), coverage and
+fixed-function state, guest barriers, argument-buffer residency, storage mode, texture
+usage flags, occlusion counters, store elision, birth content, alias synchronisation, and
+attachment feedback. What remains is Apple's driver.
+
+Shipping state: FlashGuard default on. It removes the flash from the screen and costs no
+frame rate (29.9 against 30.0), but at a location flashing ~47% it replaces nearly half
+the frames with the previous good one - 16 fps of real motion inside 30. Anyone who
+prefers the flash to the judder sets RYUJINX_METAL_FLASHGUARD=0.
+
+Kept as correctness on their own terms, none of which moved the rate: Private storage for
+standalone textures, PixelFormatView stripped from depth usage, the pass split when a draw
+samples its own attachment, command-buffer errors read at recycle instead of wedging
+silently, and the encoder-generation fix that ended the drawPrimitives SIGSEGV.
+
+If this is picked up again, the two things worth doing first, in order:
+  1. narrow the feedback check to genuine level and slice overlap - the residue after
+     removing legal mip access is the only untested subset of a mechanism that otherwise
+     fits every constraint
+  2. file the exclusion ledger above with Apple as a driver report; it is a complete
+     reproduction case and no further emulator-side work is implied by it
+
+Diagnostics all default off. tools/satmark_run.sh drives the reproducing save.
