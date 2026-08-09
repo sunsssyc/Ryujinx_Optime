@@ -188,7 +188,11 @@ namespace Ryujinx.Graphics.Metal
                 return false;
             }
 
-            return _watchRoot == IntPtr.Zero || RootOf(target) == _watchRoot;
+            // Both identities chart. The census shows the storage under at least two roots,
+            // one taking a single zero-draw pass per frame, and a chart keyed to one root
+            // leaves that pass - which sits somewhere in the window where the content
+            // flips - off the map entirely.
+            return true;
         }
 
         private static void LatchWatchRoot(int slot)
