@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using SharpMetal.Metal;
 using System;
 using System.Collections.Generic;
@@ -271,6 +272,17 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 entry.InConsumption = false;
+
+                // The pool already requests EncoderExecutionStatus on every command
+                // buffer; this is where the answer is finally read. A buffer that failed
+                // used to wedge silently - fences never signalling, presents frozen, no
+                // message anywhere - which is precisely how the store-action experiment's
+                // intermittent stall presented. One line here names the violation instead.
+                if (entry.CommandBuffer.Status == MTLCommandBufferStatus.Error)
+                {
+                    Logger.Error?.PrintMsg(LogClass.Gpu,
+                        $"command buffer failed: {StringHelper.String(entry.CommandBuffer.Error.LocalizedDescription)}");
+                }
             }
 
             foreach (IAuto dependant in entry.Dependants)
