@@ -278,6 +278,11 @@ namespace Ryujinx.Graphics.Metal
             bool linearFilter,
             bool clear = false)
         {
+            // A render blit writes its destination without going through the ordinary draw
+            // path, which is why the scene-sized destination shows p=1 and d=0 in the
+            // per-target census and why the copy hooks on Texture.CopyTo never saw it.
+            HdrPassProbe.NoteSceneCopy(src, dst);
+
             _pipeline.SwapState(_helperShaderState);
 
             const int RegionBufferSize = 16;

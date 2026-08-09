@@ -248,6 +248,87 @@ namespace Ryujinx.Graphics.Metal
             Logger.Warning?.PrintMsg(LogClass.Gpu, $"hdrcomposite{sb}");
         }
 
+        /// <summary>
+        /// Every copy landing on a scene-sized RG11B10Float texture, per frame, keyed on
+        /// the raw handles.
+        ///
+        /// The scene renders into one 1600x896 RG11B10Float texture and the composite
+        /// samples a different one - both base textures, neither a view of the other - so a
+        /// copy has to connect them every frame, and on a flat frame the composite reads
+        /// before it lands or it never runs. This counts them.
+        ///
+        /// Two rules from these notes are deliberately applied. No identity matching: the
+        /// existing hooks compare RootOf against the tracked input list, which is how
+        /// nonRenderWrites reported none while a copy was evidently happening. And no width
+        /// filter above 1600: NoteCopy's own dstWidth >= 1900 is exactly what kept this
+        /// destination out of the log until now.
+        /// </summary>
+        private const int MaxSceneCopies = 8;
+
+        private static readonly (IntPtr Src, IntPtr Dst)[][] _slotSceneCopy = CreateSceneCopies();
+        private static readonly int[] _slotSceneCopyCount = new int[Slots];
+        private static readonly (IntPtr Src, IntPtr Dst)[] _pendingSceneCopy = new (IntPtr, IntPtr)[MaxSceneCopies];
+        private static int _pendingSceneCopyCount;
+        private static int _pendingSceneCopyDropped;
+        private static readonly int[] _slotSceneCopyDropped = new int[Slots];
+
+        private static (IntPtr, IntPtr)[][] CreateSceneCopies()
+        {
+            (IntPtr, IntPtr)[][] slots = new (IntPtr, IntPtr)[Slots][];
+
+            for (int i = 0; i < Slots; i++)
+            {
+                slots[i] = new (IntPtr, IntPtr)[MaxSceneCopies];
+            }
+
+            return slots;
+        }
+
+        public static void NoteSceneCopy(Texture source, Texture destination)
+        {
+            if (!Enabled || destination == null || destination.Width != 1600 ||
+                destination.MtlFormat != MTLPixelFormat.RG11B10Float)
+            {
+                return;
+            }
+
+            if (_pendingSceneCopyCount >= MaxSceneCopies)
+            {
+                _pendingSceneCopyDropped++;
+
+                return;
+            }
+
+            _pendingSceneCopy[_pendingSceneCopyCount++] =
+                (source?.GetHandle().NativePtr ?? IntPtr.Zero, destination.GetHandle().NativePtr);
+        }
+
+        public static string DescribeSceneCopies(int slot)
+        {
+            int count = _slotSceneCopyCount[slot];
+
+            if (count == 0)
+            {
+                return _slotSceneCopyDropped[slot] > 0
+                    ? $"none recorded (+{_slotSceneCopyDropped[slot]} past the limit)"
+                    : "NONE";
+            }
+
+            StringBuilder sb = new();
+
+            for (int i = 0; i < count; i++)
+            {
+                sb.Append($" 0x{_slotSceneCopy[slot][i].Src:X}->0x{_slotSceneCopy[slot][i].Dst:X}");
+            }
+
+            if (_slotSceneCopyDropped[slot] > 0)
+            {
+                sb.Append($" (+{_slotSceneCopyDropped[slot]} past the limit)");
+            }
+
+            return sb.ToString();
+        }
+
         public static void NoteCopy(int srcW, int srcH, string srcFmt, int dstW, int dstH, string dstFmt)
         {
             string key = $"{srcW}x{srcH}:{srcFmt}->{dstW}x{dstH}:{dstFmt}";
@@ -349,9 +430,24 @@ namespace Ryujinx.Graphics.Metal
         /// attachment 0 is why a good frame's present source appeared to have no writer:
         /// a pass that binds it at attachment 1 or above was invisible.
         /// </summary>
+        // Every target attached this pass, so EndPass can credit the draws to all of them.
+        // Crediting only colour target 0 made any texture that is exclusively a secondary
+        // attachment report d=0 - which reads as "nothing ever draws into this" and is a
+        // bookkeeping artefact, not a fact about the frame. A conclusion was nearly built
+        // on one of those zeroes.
+        private static readonly int[] _openIndices = new int[Constants.MaxColorAttachments];
+        private static int _openIndexCount;
+
         public static void BeginPassAll(Texture[] targets, bool clearLoadAction)
         {
+            _openIndexCount = 0;
+
             BeginPass(targets.Length > 0 ? targets[0] : null, clearLoadAction);
+
+            if (_openIndex >= 0)
+            {
+                _openIndices[_openIndexCount++] = _openIndex;
+            }
 
             for (int i = 1; i < targets.Length; i++)
             {
@@ -378,12 +474,14 @@ namespace Ryujinx.Graphics.Metal
                 if (_pending[i].Target == handle)
                 {
                     _pending[i].Passes++;
+                    NoteOpenIndex(i);
                     return;
                 }
             }
 
             if (_pendingCount == MaxTargets)
             {
+                _truncated++;
                 return;
             }
 
@@ -396,7 +494,17 @@ namespace Ryujinx.Graphics.Metal
                 Passes = 1,
             };
 
+            NoteOpenIndex(_pendingCount);
+
             _pendingCount++;
+        }
+
+        private static void NoteOpenIndex(int index)
+        {
+            if (_openIndexCount < _openIndices.Length)
+            {
+                _openIndices[_openIndexCount++] = index;
+            }
         }
 
         public static void BeginPass(Texture target, bool clearLoadAction)
@@ -626,11 +734,14 @@ namespace Ryujinx.Graphics.Metal
 
         public static void EndPass(ulong drawsInPass, PassEndReason reason)
         {
-            if (_openIndex >= 0)
+            // Credit the draws to every attachment of this pass, not just colour target 0.
+            for (int i = 0; i < _openIndexCount; i++)
             {
-                _pending[_openIndex].Draws += drawsInPass;
-                _openIndex = -1;
+                _pending[_openIndices[i]].Draws += drawsInPass;
             }
+
+            _openIndexCount = 0;
+            _openIndex = -1;
 
             if (_openWatched)
             {
@@ -671,6 +782,18 @@ namespace Ryujinx.Graphics.Metal
             {
                 toneHandles[i] = _pendingToneHandle[i];
             }
+
+            (IntPtr, IntPtr)[] sceneCopies = _slotSceneCopy[slot];
+
+            for (int i = 0; i < _pendingSceneCopyCount; i++)
+            {
+                sceneCopies[i] = _pendingSceneCopy[i];
+            }
+
+            _slotSceneCopyCount[slot] = _pendingSceneCopyCount;
+            _slotSceneCopyDropped[slot] = _pendingSceneCopyDropped;
+            _pendingSceneCopyCount = 0;
+            _pendingSceneCopyDropped = 0;
 
             IntPtr[] sampled = _slotSampled[slot];
 

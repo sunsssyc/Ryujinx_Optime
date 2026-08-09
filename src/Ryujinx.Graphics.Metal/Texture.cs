@@ -325,6 +325,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int firstLayer, int firstLevel)
         {
+            HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
             // This names the copies that land on a full resolution destination.
@@ -383,6 +384,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int srcLayer, int dstLayer, int srcLevel, int dstLevel)
         {
+            HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
             // This names the copies that land on a full resolution destination.
@@ -443,6 +445,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, Extents2D srcRegion, Extents2D dstRegion, bool linearFilter)
         {
+            HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
             // This names the copies that land on a full resolution destination.
