@@ -1322,3 +1322,19 @@ The CPU-side spans cannot corroborate that either way. They are sampled at prese
 the frame's rendering has finished, and across pairs they come out inconsistent - narrow on
 the predecessor in some, narrow on both in others. Only the in-shader measurement is taken
 at the point of use, and it is the one to trust.
+
+### Auto-flush: ruled out
+
+If the composite fetched the scene texture while the scene passes were still outstanding,
+the obvious Metal-side cause is command buffer splitting - the scene landing in one buffer
+and the composite in the next. RYUJINX_METAL_AUTO_FLUSH=0 disables it. Same save, camera
+untouched so both runs face the same view, probe counts:
+
+    autoflush = default   790/1860 = 42.5%   luma 153
+    autoflush = OFF       771/1800 = 42.8%   luma 157
+
+About 1800 samples an arm, both rendering. No effect.
+
+Four mechanisms are now ruled out at adequate power against this reproduction: guest
+texture barriers, argument-buffer residency on the parent, command buffer splitting, and
+every property of the composite shader itself.
