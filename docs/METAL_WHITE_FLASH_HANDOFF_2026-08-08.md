@@ -1462,3 +1462,33 @@ presumably do not. Sampling two of those siblings at present, alongside the one 
 sampled, would establish whether the fault is specific to this attachment or shared across
 the pass set. That is bookkeeping plus two more blits at present, which is where the
 existing sampling already happens, so it costs nothing in timing.
+
+### The two 1600x896 RG11B10Float textures are one storage
+
+Sampling two sibling attachments at present, beside the one the composite reads:
+
+    slot128 (root 0xA8E405180)   0x001C6BC0..0x781D1B7A
+    sib0    (root 0xA8E12A800)   0x001C6BC0..0x781D1B7A
+    slot128                      0x781DFBC0..0x781E03C0
+    sib0                         0x781DFBC0..0x781E03C0
+
+Byte-identical on every pair, frame after frame, from two different MTLTexture objects with
+different roots - while the RGBA8 sibling sampled from the same buffer reads something else
+entirely, so this is not the sampling writing over itself.
+
+They are one storage under two identities. That retires the missing-copy line completely:
+there was never a copy to find, because there is only one buffer, and the census reports it
+twice because the draws land through one identity and the composite binds the other. It also
+explains the p=1 d=0 entry that two withdrawn commits were built on - that is the second
+identity of a texture with 1524 draws on it.
+
+So the picture closes to one sentence, with every part of it measured:
+
+    the composite reads this storage at pass 2, the scene finishes writing it around pass
+    167, so frame N's picture is what frame N-1 left - and about 40% of frames leave it
+    inside a single quantisation step.
+
+What is left is why a frame that does identical work - 1524 draws over 23 passes either way -
+ends that way. Two directions, in order of cost: whether the last passes to write it differ
+in what they read, and whether the draws that write it are the same draws on both kinds of
+frame rather than merely the same count.

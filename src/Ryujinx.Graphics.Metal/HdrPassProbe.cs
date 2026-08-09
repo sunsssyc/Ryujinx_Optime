@@ -541,8 +541,55 @@ namespace Ryujinx.Graphics.Metal
                     : string.Empty);
         }
 
+        /// <summary>
+        /// Two other 1600-wide attachments of the same pass set, sampled at present beside
+        /// the one the composite reads.
+        ///
+        /// With attachment crediting corrected, three 1600x896 targets report 1502 draws
+        /// over 18 passes each - MRT siblings of one pass set - and the texture the
+        /// composite samples sits just above them. So on a frame that causes a flash, one
+        /// attachment ends in a one-step range while the frame it belongs to displays
+        /// correctly. Whether its siblings do the same separates a fault in this attachment
+        /// from one shared by the whole pass set.
+        ///
+        /// Sampled at present, where the blit encoder already exists, so this costs nothing
+        /// in timing - which matters, because per-pass sampling would cost about 170 encoder
+        /// switches a frame and that is the intervention already measured to move the rate.
+        /// </summary>
+        private static readonly Texture[] _siblingTex = new Texture[2];
+
+        private static void LatchSibling(Texture target)
+        {
+            if (target == null || target.Width != 1600 || RootOf(target) == _watchRoot)
+            {
+                return;
+            }
+
+            for (int i = 0; i < _siblingTex.Length; i++)
+            {
+                if (_siblingTex[i] != null)
+                {
+                    if (RootOf(_siblingTex[i]) == RootOf(target))
+                    {
+                        return;
+                    }
+
+                    continue;
+                }
+
+                _siblingTex[i] = target;
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"hdrsibling {i}: 0x{RootOf(target):X} {target.Width}x{target.Height} {target.MtlFormat}");
+
+                return;
+            }
+        }
+
         private static void NoteOrdinal(Texture target)
         {
+            LatchSibling(target);
+
             if (target == null || target.MtlFormat != MTLPixelFormat.RG11B10Float)
             {
                 return;
@@ -1224,7 +1271,41 @@ namespace Ryujinx.Graphics.Metal
                         _inputBuf, baseOffset + (ulong)(i * 4), 4, 4);
                 }
             }
+
+            // The spare slots carry the siblings, so one line compares all three.
+            for (int k = 0; k < _siblingTex.Length; k++)
+            {
+                Texture t = _siblingTex[k];
+                int slotIndex = 2 + k;
+
+                if (t == null || slotIndex >= InputsPerFrame)
+                {
+                    continue;
+                }
+
+                MTLTexture tex = t.GetHandle();
+
+                if (tex.NativePtr == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                _siblingLabel[k] = $"sib{k}:{t.Width}x{t.Height}:{t.MtlFormat}";
+
+                ulong baseOffset = (ulong)((slot * InputsPerFrame + slotIndex) * InputBytes);
+
+                for (int i = 0; i < InputPixels; i++)
+                {
+                    blit.CopyFromTexture(
+                        tex, 0, 0,
+                        new MTLOrigin { x = (ulong)(t.Width * (i % 3 + 1) / 4), y = (ulong)(t.Height * (i / 3 + 1) / 4), z = 0 },
+                        new MTLSize { width = 1, height = 1, depth = 1 },
+                        _inputBuf, baseOffset + (ulong)(i * 4), 4, 4);
+                }
+            }
         }
+
+        private static readonly string[] _siblingLabel = new string[2];
 
         // Non-render writes to the tonemap's scene input. No render pass ever names it
         // as an attachment, yet its contents change every frame - so whatever fills it
@@ -1534,6 +1615,13 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 Texture t = k < _toneCount ? _toneTex[k] : null;
+
+                if (t == null && k >= 2 && _siblingLabel[k - 2] != null)
+                {
+                    sb.Append($" [{_siblingLabel[k - 2]}]0x{min:X8}..0x{max:X8}");
+                    continue;
+                }
+
 
                 // The raw handle as well as the canonical one. A white frame carries two
                 // 1600x896 RG11B10Float textures - one taking 29 draws across 25 passes,
