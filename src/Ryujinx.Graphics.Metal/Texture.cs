@@ -189,7 +189,22 @@ namespace Ryujinx.Graphics.Metal
 
             if (info.Format.IsDepthOrStencil)
             {
-                // Depth/stencil formats are renderable but not shader-writable.
+                // Depth/stencil formats are renderable but not shader-writable. They are
+                // also not reinterpretable: Metal only permits view formats within a
+                // depth format's own family (the X32/X24 stencil views are created from
+                // the descriptor's own format, not through PixelFormatView), so the
+                // blanket PixelFormatView above is removed here. It is at minimum
+                // undefined for depth on this driver, it disables optimisations, and the
+                // depth attachment is loaded beside the colour in the very pass whose
+                // load returns white - the one input to that load nothing has varied.
+                // RYUJINX_METAL_DEPTH_PFV=1 restores the old flags.
+                usage &= ~MTLTextureUsage.PixelFormatView;
+
+                if (_depthPixelFormatView)
+                {
+                    usage |= MTLTextureUsage.PixelFormatView;
+                }
+
                 usage |= MTLTextureUsage.RenderTarget;
             }
             else if (!info.IsCompressed)
@@ -201,6 +216,9 @@ namespace Ryujinx.Graphics.Metal
 
             return usage;
         }
+
+        private static readonly bool _depthPixelFormatView =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_DEPTH_PFV") == "1";
 
         private static readonly bool _noClearInit =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_NO_CLEAR_INIT") == "1";
