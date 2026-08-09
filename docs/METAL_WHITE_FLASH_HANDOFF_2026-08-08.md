@@ -2187,3 +2187,24 @@ splits there. That is a contained piece of work and it is the one thing left wit
 untested mechanism behind it - the earlier "no effect" measurement was taken with
 detection over-broad by a factor of forty, so it does not stand as a negative for the
 narrow case.
+
+### Feedback split, relocated and finally measurable: no effect
+
+Deciding from bound state before the prepass and before encoder acquisition removes the
+crash, and the split then runs against accurate detection (~25 genuine same-storage,
+same-level, same-layer occurrences per frame). Hot-swapped in one session on the
+reproducing save, guard off, four arms:
+
+    FIX OFF   8/26, 9/26
+    FIX ON   10/26, 6/26
+
+Inside the swing, both directions. Attachment feedback is excluded properly this time -
+with a working fix, accurate detection, and no crash confounding it. The earlier
+"no effect" stands after all, for a better reason than it was first given.
+
+The split stays available (RYUJINX_METAL_FEEDBACK_FIX=1, or the hot file) and off by
+default: it is correct where levels genuinely overlap, but it costs passes and buys
+nothing measurable here.
+
+With this, every mechanism this investigation could name inside the backend has been
+tested to conclusion.
