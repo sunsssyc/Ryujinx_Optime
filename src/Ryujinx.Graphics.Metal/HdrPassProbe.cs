@@ -103,6 +103,25 @@ namespace Ryujinx.Graphics.Metal
         private static readonly long[][] _slotSampleSeq = CreateSampleSeq();
         private static readonly long[] _pendingSampleSeq = new long[MaxWatched + 1];
 
+        // The raw handle each chart entry actually sampled. The chart interleaves both
+        // 1600x896 textures - their traffic is wildly asymmetric - so "varied then white"
+        // may be texture A then texture B rather than one texture flipping. With the
+        // handle on every entry, one WHITE block decides it.
+        private static readonly IntPtr[][] _slotSampleHandle = CreateSampleHandles();
+        private static readonly IntPtr[] _pendingSampleHandle = new IntPtr[MaxWatched + 1];
+
+        private static IntPtr[][] CreateSampleHandles()
+        {
+            IntPtr[][] slots = new IntPtr[Slots][];
+
+            for (int i = 0; i < Slots; i++)
+            {
+                slots[i] = new IntPtr[MaxWatched + 1];
+            }
+
+            return slots;
+        }
+
         private static long[][] CreateSampleSeq()
         {
             long[][] slots = new long[Slots][];
@@ -931,6 +950,7 @@ namespace Ryujinx.Graphics.Metal
             if (passIndex <= MaxWatched)
             {
                 _pendingSampleSeq[passIndex] = OpRing.Seq;
+                _pendingSampleHandle[passIndex] = target.GetHandle().NativePtr;
             }
 
             _openWatchedTarget = target;
@@ -1000,7 +1020,7 @@ namespace Ryujinx.Graphics.Metal
                     sb.Append(" -> ");
                 }
 
-                sb.Append($"[@{_slotWatched[slot][p].Ordinal}]d{_slotWatched[slot][p].Draws}{(_slotWatched[slot][p].Cleared ? "c" : "")}:");
+                sb.Append($"[@{_slotWatched[slot][p].Ordinal}]0x{(ulong)_slotSampleHandle[slot][p]:X}:d{_slotWatched[slot][p].Draws}{(_slotWatched[slot][p].Cleared ? "c" : "")}:");
 
                 // Strict equality could not tell the scene from the flat state: the flat
                 // value spans one quantisation step (0x800), which fails equality just as
@@ -1124,10 +1144,14 @@ namespace Ryujinx.Graphics.Metal
 
             long[] seqs = _slotSampleSeq[slot];
 
+            IntPtr[] sampleHandles = _slotSampleHandle[slot];
+
             for (int i = 0; i <= MaxWatched; i++)
             {
                 seqs[i] = _pendingSampleSeq[i];
                 _pendingSampleSeq[i] = -1;
+                sampleHandles[i] = _pendingSampleHandle[i];
+                _pendingSampleHandle[i] = IntPtr.Zero;
             }
 
             IntPtr[] toneHandles = _slotToneHandle[slot];
