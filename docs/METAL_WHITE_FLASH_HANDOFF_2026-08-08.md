@@ -1918,3 +1918,27 @@ First measurement next session, one log line per scene-class pass on flash frame
   - different handles -> B is永白, the flash is a BINDING alternation (which host texture
     the composite's descriptor resolves to that frame), and the fix moves to the texture
     cache's view resolution - a shared-layer bug matching the Vulkan echo directly
+
+### Handle chart run: one instrument works, one is broken, and the question stands
+
+The handle-annotated chart works and says something real: on a WHITE frame the rendered
+texture (0xBFCC6D680, taking all the draw traffic) opens the frame ALREADY carrying the
+white signature - [@48]d0:STEP(0x781DFBC0) - before being cleared to black and redrawn.
+The white is present at frame start on the rendered texture, which is consistent with the
+damage-at-end-of-previous-frame localisation.
+
+The input sampler is broken, by its own tell: slot128, slot136 and sib0 - three distinct
+roots - report byte-identical spans on every line, WHITE and prev alike. Three separate
+textures do not have identical min/max every frame; the sampler is reading one source
+three times. Every conclusion drawn from per-slot input content (including tonight's
+"the composite reads a texture nothing renders into") is void until it is fixed.
+
+Also structural: the chart keys on colour target 0 only. The scene HDR texture can sit at
+attachment 1..7 of the G-buffer MRT passes, so "never appears in the chart" does not mean
+"never written". The chart must track every colour attachment before absence means
+anything.
+
+Next session, in order: fix SampleInputs to blit from each slot's own bound texture
+(assert distinct sources by construction), extend the chart to all attachments, then
+re-ask the binding-alternation question - it remains the best-shaped hypothesis and is
+still unanswered.
