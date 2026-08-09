@@ -2008,3 +2008,27 @@ depth on Metal).
 Next session: strip PixelFormatView from depth-stencil texture usage (a one-line, correct-
 on-its-own-terms change - reinterpreting depth formats is not supported anyway) and
 measure. After that, the remaining space is a driver reproduction case for Apple.
+
+# RESOLUTION (2026-08-09): mitigation default-on, root cause documented as driver-level
+
+Final acceptance on the reproducing save, plain launch, guard default-on:
+
+    standing:       0/40 flat, 40 distinct frames, mean 145..147  (baseline minutes
+                    earlier on the same save: 14/30, twice)
+    camera moving:  0/20 flat, 20 distinct frames, mean 115..179, no crash through the
+                    rotation trigger that used to kill it in 1-2 minutes
+    prior causal:   35% -> 0% hot-swapped in-session, both directions, picture alive
+
+The flash no longer reaches the screen. What ships: FlashGuard default-on (samples the
+present source, re-presents the last good frame on the flat signature; cost one GPU sync
+per frame), plus two correctness fixes kept on their own merits (colour targets zeroed at
+birth; PixelFormatView stripped from depth usage). RYUJINX_METAL_FLASHGUARD=0 opts out.
+
+Root cause, as far as instruments this side of the driver can establish: a long-lived,
+uncompressed colour target's Load intermittently brings near-white tile garbage in place
+of its bytes, which the pass's store then crystallises into memory. Excluded at
+measurement power along the way: bindings, shader arithmetic (saturation, NaN, coordinate
+collapse), downstream gain, coverage and fixed-function state, guest barriers,
+argument-buffer residency, MRT dedup, occlusion counters, store elision, birth content,
+alias-sync propagation, and depth usage flags. The remaining space is Apple's driver; the
+exclusion ledger above is the reproduction case for that report.
