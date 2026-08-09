@@ -186,7 +186,12 @@ namespace Ryujinx.Graphics.Metal
 
         public static void NoteIdentity(string role, Texture t)
         {
-            if (t == null || t.Width < 1900)
+            // 1500 rather than 1900, so the two 1600x896 RG11B10Float textures are both
+            // printed. One takes 28 draws and one takes none, the composite samples the
+            // second, and whether they are views of one storage or separate allocations
+            // decides which fault this is: an ordering problem between a write through one
+            // and a read through the other, or a copy that has to connect them and is late.
+            if (t == null || t.Width < 1500)
             {
                 return;
             }

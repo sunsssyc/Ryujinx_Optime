@@ -1172,3 +1172,29 @@ saw either; dropping that to 1500 prints handle, canonical and viewRoot for both
   - separate allocations -> a copy has to connect them, and on flat frames it is late or
     missing. That is the texture cache's overlap path, whose own comment in the shared layer
     says the kept texture "is going to contain garbage data after we draw"
+
+### They are two separate allocations, not two views of one
+
+With the identity filter lowered to width 1500, both 1600x896 RG11B10Float textures print:
+
+    hdrident target 1600x896 RG11B10Float handle=0xA36334A00 canonical=0xA36334A00 viewRoot=0x0
+    hdrident target 1600x896 RG11B10Float handle=0xA36857980 canonical=0xA36857980 viewRoot=0x0
+
+canonical equal to handle and no viewRoot on both: each is a base texture, neither a view of
+the other. So the scene renders into one host texture and the composite samples a different
+one, and the only thing that can put the scene into the sampled texture is a copy.
+
+That settles which of the two faults this is. It is not ordering between a write and a read
+of shared storage - there is no shared storage. Something has to copy 0xA36334A00 into
+0xA36857980 every frame, and on flat frames the composite samples before that copy lands,
+or it does not happen at all. The uniform value read on the frame before each white one is
+what the destination holds when it has not been filled.
+
+That also explains why three interventions came back at exactly no effect: guest texture
+barriers, argument-buffer residency on the parent, and every property of the composite
+shader are all irrelevant to a copy that has not been issued.
+
+Next: instrument the copy. Which call fills 0xA36857980, on which frames, and where in the
+frame relative to the composite's pass. Texture.CopyTo and the texture cache's overlap
+handling are the places to hook, and the hooks must not key on RootOf - that is what made
+nonRenderWrites report none while a copy was evidently happening.
