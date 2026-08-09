@@ -415,6 +415,7 @@ namespace Ryujinx.Graphics.Metal
         {
             OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
+            UploadCorrelator.NoteCopyIn(destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
             // This names the copies that land on a full resolution destination.
@@ -475,6 +476,7 @@ namespace Ryujinx.Graphics.Metal
         {
             OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
+            UploadCorrelator.NoteCopyIn(destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
             // This names the copies that land on a full resolution destination.
@@ -537,6 +539,7 @@ namespace Ryujinx.Graphics.Metal
         {
             OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
+            UploadCorrelator.NoteCopyIn(destination as Texture);
             // The flat white 1920x1080 surface is not written by any render pass - it
             // never appears in the per-target pass census - so it has to arrive by copy.
             // This names the copies that land on a full resolution destination.
@@ -834,6 +837,7 @@ namespace Ryujinx.Graphics.Metal
             OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
             HdrPassProbe.NoteNonRenderWrite(this, "upload");
+            UploadCorrelator.NoteUpload(this);
 
             CommandBufferScoped cbs = Pipeline.Cbs;
             MTLBlitCommandEncoder blitCommandEncoder = Pipeline.GetOrCreateBlitEncoder();
@@ -920,6 +924,7 @@ namespace Ryujinx.Graphics.Metal
         {
             OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
+            UploadCorrelator.NoteUpload(this);
             SetData(data.Memory.Span, layer, level, 1, 1, singleSlice: true);
 
             data.Dispose();
@@ -929,6 +934,7 @@ namespace Ryujinx.Graphics.Metal
         {
             OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
+            UploadCorrelator.NoteUpload(this);
             CommandBufferScoped cbs = Pipeline.Cbs;
             MTLBlitCommandEncoder blitCommandEncoder = Pipeline.GetOrCreateBlitEncoder();
 

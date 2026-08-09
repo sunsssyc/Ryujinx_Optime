@@ -108,6 +108,7 @@ namespace Ryujinx.Graphics.Metal
 
             PresentProbe.Init(_device);
             FlashGuard.Init(_device);
+            UploadCorrelator.Init(_device);
             CoverageProbe.Init(_device);
 
             if (HdrPassProbe.Enabled)

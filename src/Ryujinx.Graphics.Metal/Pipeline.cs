@@ -524,6 +524,10 @@ namespace Ryujinx.Graphics.Metal
                 FrameProbe.Capture(Cbs, src);
             }
 
+            // Same contract as FrameProbe.Capture: encode-only sampling here, classified
+            // several presents later, never waited on, never logged per frame.
+            UploadCorrelator.OnPresent(Cbs, src);
+
             // The per-present view of the drawable's texture was never released -
             // one native texture view leaked per frame. The Auto defers the native
             // release until the command buffer using it completes, so this is safe

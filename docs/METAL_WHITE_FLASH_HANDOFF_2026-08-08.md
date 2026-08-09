@@ -2277,3 +2277,49 @@ No public report matches this fault: Ryujinx and Ryubing trackers, MoltenVK issu
 Developer Forums, wgpu. The nearest neighbours (wgpu #6647, white at mip distance on M4;
 the macOS 26 MPS and Metal 4 regressions) are different faults. There is no shortcut from
 outside; the exclusion ledger here remains the primary document.
+
+## 2026-08-09 evening: the resurrection hypothesis, tested at power and dead
+
+The most economical story left standing had never been tested directly: the shared
+layer re-uploads stale guest memory into a live scene texture mid-frame (a dirty-page
+false positive resurrecting a captured white frame), the composite consumes it, the next
+frame's render restores the scene. It explained the 254-not-255 white, the white autosave
+thumbnails, the save-that-reproduces, the printf Heisenbug and the 175x backend ratio in
+one breath. It is now refuted at measurement power.
+
+`UploadCorrelator` (RYUJINX_METAL_UPLOAD_CORR=1) joins, per presented frame, "did a
+SetData or CopyTo land on a texture >= 512x512 this frame, and did it land on a texture
+that had already been a colour attachment this same frame" against a flat/normal label
+sampled with FlashGuard's calibrated criterion (25-point grid, >=6 saturated at 235).
+The label is taken with zero perturbation: encode-only sampling at present into an
+8-slot ring, classified 8 presents later off the fence, nothing waited on, nothing
+logged per frame. Internal validation: the load-screen fade - legitimately white -
+produced 13 flat-with-upload coincidences during load-in and not one more in ten minutes
+of gameplay; and the flat rate at the reproducing save sat at ~45% steady state while
+standing still, matching the guard's known suppression rate there.
+
+Verdict over 9,599 classified frames, 2,896 of them flat:
+
+    big upload   | flat 13/2896 (all during load-in)   normal 54/6703   - no correlation
+    upload->RT   | flat 0                              normal 3
+    big copy     | flat 0                              normal 12
+    copy->RT     | flat 0                              normal 4
+
+    shapes: 1600x896, 1920x1080 and the large atlases were each uploaded exactly once,
+    at load-in, and never on a flat frame.
+
+Zero resurrection signatures in ~2,900 flat frames. Combined with the existing pass
+census, draw attribution and the 0x55 sentinel, every host-side write channel - render,
+upload, copy - is now excluded on the same frames at power. The texture's memory holds
+the scene throughout; the white is manufactured on the read. The 2026-08-02 conflict
+between the CPU-side present-time sample ("varied on flat frames") and the in-shader
+fetch ("white at fetch time") dissolves: both were right, at different moments through
+different paths.
+
+What survives is the driver read-path account the FlashGuard comment already carries -
+an uncompressed colour target's load/sample intermittently returning near-white in place
+of its content - now standing on a complete exclusion rather than a default. The
+Vulkan-rate difference reads as pass-boundary count (197/frame vs MoltenVK's handful;
+aba revisits 14/frame), which is the workload shape that churns tile load/store the
+hardest. The instrument stays in the tree; the correlator costs nothing measurable and
+its table is the first thing to re-check on any future driver or OS change.
