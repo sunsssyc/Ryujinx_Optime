@@ -240,6 +240,8 @@ namespace Ryujinx.Graphics.Gpu
                     crop = new ImageCrop(left, right, top, bottom, crop.FlipX, crop.FlipY, crop.IsStretched, crop.AspectRatioX, crop.AspectRatioY);
                 }
 
+                Engine.Threed.DrawTrace.OnFrame();
+
                 _context.Renderer.Window.Present(texture.HostTexture, crop, swapBuffersCallback);
 
                 pt.ReleaseCallback(pt.UserObj);

@@ -782,6 +782,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                     _context.Renderer.Pipeline.Draw(count, instanceCount, firstVertex, firstInstance);
                 }
             }
+
+            if (DrawTrace.Enabled)
+            {
+                DrawTrace.AfterDraw(_channel.TextureManager);
+            }
         }
 
         /// <summary>
