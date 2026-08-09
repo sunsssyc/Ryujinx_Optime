@@ -1620,3 +1620,30 @@ found nothing.
 
 The fix is the storage-identity comparison in UpdateRenderTargets (CanonicalPtr as well as
 reference), with RYUJINX_METAL_DEDUP_BY_REF=1 as the kill switch.
+
+# RETRACTION OF THE FIX CLAIM: the dedup change does nothing
+
+In-session single-variable A/B, hot-swapped toggle, user-loaded save, compositor
+screenshots (the one instrument that has never lied here), 50 shots per arm, two rounds:
+
+    fix ON   38.0% / 30.0%
+    fix OFF  32.0% / 32.0%
+
+All four arms inside noise. The duplicate-MRT dedup comparison is not the cause. The
+0/2700 "confirmation" was a bad measurement twice over: its arms differed in probe
+environment, and its wait condition triggered on frame count rather than on reproduction,
+so it almost certainly counted zeros at a menu. The code change stays (reference equality
+on ITexture is wrong on its own terms) but it fixes nothing user-visible.
+
+What genuinely stands after everything:
+
+  - the fault: the scene storage ends ~40% of frames near-uniform white, the damage is done
+    at the END of frame N-1 across zero-draw passes, and frame N's composite (pass 2 of the
+    frame) displays it
+  - the only interventions that ever moved the rate: full draw serialisation (49->34%) -
+    a timing race remains the best-supported category
+  - every content/binding/arithmetic mechanism enumerable in this backend is excluded at
+    power; the writer operates through a path none of the hooks see
+  - next: instrument the tail window itself - log the MTLLoadAction actually written into
+    the descriptor for the watched attachment on those final passes, and the game's own
+    end-of-frame operations (what the guest submits between the last scene pass and vsync)
