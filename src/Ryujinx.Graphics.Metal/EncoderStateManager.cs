@@ -497,6 +497,11 @@ namespace Ryujinx.Graphics.Metal
             _passHasStencil = false;
             _passCleared = _currentState.ClearLoadAction;
 
+            Texture sceneCheck = _currentState.RenderTargets[0] as Texture;
+            _passSceneClass = sceneCheck != null &&
+                sceneCheck.Width >= 1500 && sceneCheck.Width <= 1700 &&
+                sceneCheck.MtlFormat == MTLPixelFormat.RG11B10Float;
+
             for (int i = 0; i < Constants.MaxColorAttachments; i++)
             {
                 if (_currentState.RenderTargets[i] is Texture tex)
@@ -658,7 +663,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            MTLStoreAction action = drawsInPass == 0 && !_passCleared
+            MTLStoreAction action = drawsInPass == 0 && !_passCleared && _passSceneClass
                 ? MTLStoreAction.DontCare
                 : MTLStoreAction.Store;
 
@@ -1986,6 +1991,11 @@ namespace Ryujinx.Graphics.Metal
         private static bool _passHasDepth;
         private static bool _passHasStencil;
         private static bool _passCleared;
+
+        // Whether this pass's colour target 0 is the scene-class texture the flash lives
+        // on. Blanket elision wedged the guest - some empty pass elsewhere is load-bearing
+        // - so the DontCare is confined to the class where the crystallisation was proven.
+        private static bool _passSceneClass;
 
         internal static void RefreshSamplingToggle()
         {
