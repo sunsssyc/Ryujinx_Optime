@@ -1520,3 +1520,31 @@ storage - which dispatch binds it as a writable image, at which ordinal, and wit
 pipeline - and pair that against flash-causing frames. If a dispatch in that end-of-frame
 window binds it on causing frames, that dispatch is the fault, and the question of why it
 writes near-1.0 white (an exposure or sky value, by the look of 0x781DFBC0) has an owner.
+
+## Where this stands at handoff (2026-08-09, ~10:00)
+
+Compute image bindings: never, even matched by size and format rather than root. So in the
+end-of-frame window nothing this backend can enumerate writes the storage: no draws, no
+clear, no copy, no blit, no SetData, no compute image.
+
+That forced a re-read of the chain's own construction, and the gap is there: chain entries
+are created only when the storage is COLOUR TARGET 0 (BeginPass path) - seven per frame,
+matching the coverage probe's seven. The census counts 22-24 passes per frame on this
+storage, so about SIXTEEN passes where it is a secondary MRT attachment are neither in the
+chain nor sampled. The flat writer can simply be one of those, running after ordinal ~163.
+
+NEXT (concrete, cheap, no perturbation): record PassDetail entries - ordinal, draws,
+cleared - for EVERY pass touching the watched storage, from RecordTarget as well as
+BeginPass. Bookkeeping only, no sampling, no encoder change. Then the sequence names the
+passes that run between the last varied sample and present, with their draw counts, and the
+writer is one of a handful of identified passes rather than "something".
+
+The settled chain, for whoever picks this up:
+  - composite reads the storage at pass 2; frame N shows what frame N-1 left
+  - causing frames hold the scene at every sample through ~@163 and end one-step-flat
+    (0x781DFBC0..0x781E03C0 = ~(1.0, 1.0, 0.94))
+  - white frames start flat and their own scene overwrites it by mid-frame
+  - the storage is one allocation under multiple view identities; every identity-keyed
+    hook misses writes through the other identities - match by size+format, never by root
+  - the reproducing save is the top entry without the Autosave badge; ~40% flat in the
+    trigger view; tools/satmark_run.sh drives everything
