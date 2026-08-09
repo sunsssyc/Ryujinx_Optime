@@ -714,6 +714,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
                     {
                         program = currentStage.Translate();
 
+                        ShaderTranslationDiff.Dump(gpuAccessors[stageIndex], currentStage, program, guestCode, false);
+
                         shaders[stageIndex + 1] = new CachedShaderStage(program.Info, guestCode, cb1Data);
                     }
 
@@ -754,6 +756,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
             TranslatorContext translatorContext = DecodeComputeShader(gpuAccessor, _context.Capabilities.Api, 0);
 
             ShaderProgram program = translatorContext.Translate();
+
+            ShaderTranslationDiff.Dump(gpuAccessor, translatorContext, program, shader.Code, false);
 
             CachedShaderStage[] shaders = [new(program.Info, shader.Code, shader.Cb1Data)];
 
