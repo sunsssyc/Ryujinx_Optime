@@ -234,7 +234,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
             gpuAccessor.InitializeReservedCounts(tfEnabled: false, vertexAsCompute: false);
 
             TranslatorContext translatorContext = DecodeComputeShader(gpuAccessor, _context.Capabilities.Api, gpuVa);
-            TranslatedShader translatedShader = TranslateShader(_dumper, channel, translatorContext, cachedGuestCode, asCompute: false);
+            TranslatedShader translatedShader = TranslateShader(_dumper, channel, translatorContext, cachedGuestCode, asCompute: false, gpuAccessor);
 
             ShaderSource[] shaderSourcesArray = new ShaderSource[] { CreateShaderSource(translatedShader.Program) };
             ShaderInfo info = ShaderInfoBuilder.BuildForCompute(_context, translatedShader.Program.Info, computeState.GetLocalSize());
@@ -426,7 +426,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
                     {
                         byte[] code = cachedGuestCode.GetByIndex(stageIndex);
 
-                        TranslatedShader translatedShader = TranslateShader(_dumper, channel, currentStage, code, asCompute);
+                        TranslatedShader translatedShader = TranslateShader(_dumper, channel, currentStage, code, asCompute, gpuAccessors[stageIndex]);
 
                         shaders[stageIndex + 1] = translatedShader.Shader;
                         program = translatedShader.Program;
@@ -787,7 +787,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
         /// <param name="code">Optional Maxwell binary code of the current stage shader, if present on cache</param>
         /// <param name="asCompute">Indicates that the vertex shader should be converted to a compute shader</param>
         /// <returns>Compiled graphics shader code</returns>
-        private static TranslatedShader TranslateShader(ShaderDumper dumper, GpuChannel channel, TranslatorContext context, byte[] code, bool asCompute)
+        private static TranslatedShader TranslateShader(ShaderDumper dumper, GpuChannel channel, TranslatorContext context, byte[] code, bool asCompute, IGpuAccessor diffAccessor = null)
         {
             MemoryManager memoryManager = channel.MemoryManager;
 
@@ -802,6 +802,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
             ShaderProgram program = context.Translate(asCompute);
 
             paths.Prepend(program);
+
+            ShaderTranslationDiff.Dump(diffAccessor, context, program, code, asCompute);
 
             return new TranslatedShader(new CachedShaderStage(program.Info, code, cb1Data), program);
         }

@@ -783,10 +783,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 }
             }
 
-            if (DrawTrace.Enabled)
-            {
-                DrawTrace.AfterDraw(_channel.TextureManager);
-            }
         }
 
         /// <summary>
