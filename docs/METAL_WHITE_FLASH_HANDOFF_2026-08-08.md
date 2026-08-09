@@ -1717,3 +1717,30 @@ Fix for next session: initialise the per-frame sample seq array to -1 at Commit,
 DescribeFlipOps skip entries without a fresh sample, and verify NotePass lands in the ring
 (print OpRing.Seq per frame once). Then rerun. The plan itself is unchanged - the flip
 interval still decides between a named command and the CPU branch.
+
+### Phase 1 CONVERGED: the flip interval holds exactly three operations
+
+With fresh boundary samples and the white-signature detector, a white frame reports:
+
+    flip@22->23(0x781E03C0) ops: [217195]pass:0xA73352D00->0xA73352A80
+                                  [217196]dispatch [217197]dispatch
+
+Boundary samples fire only when a pass on a watched texture ends, so entry 23 is the
+watched texture immediately after pass [217195] on it - varied before, the white signature
+after, with only that pass and two compute dispatches in between. (NoteDispatch records
+before the encoder switch, so the dispatches sit at the pass's teardown; order within the
+three is approximate, membership is exact.)
+
+The writer is one of three operations:
+  1. the render pass on 0xA73352D00 (its draws, or its load action - read entry 23's dN
+     from the same block's passContent line; d0 makes the load action prime suspect again,
+     for THIS pass specifically)
+  2/3. the two compute dispatches - compute image writes are the weakest-covered class in
+     every hook built so far, and the game runs exposure/histogram compute right at this
+     point in the frame
+
+Next (one run each, or one run with both):
+  - print the draw count and load action of the flipped-to pass in flipOps itself
+  - log the compute pipeline labels of dispatches adjacent to a white flip, then skip
+    those dispatches under a file toggle: rate collapses -> the dispatch is the writer;
+    unchanged -> the pass is, and its load action gets the treatment
