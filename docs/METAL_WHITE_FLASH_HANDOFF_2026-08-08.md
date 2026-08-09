@@ -2166,3 +2166,24 @@ attachments only. That is the next refinement if anyone returns to it, and it is
 iteration of the same instrument - each previous one buried the signal under legal traffic.
 
 The narrowing stays regardless: it strictly reduces unnecessary pass splits.
+
+### Third iteration: detection is finally accurate, the fix's placement is not
+
+Comparing sampled textures against a snapshot of the attachments taken as the pass
+descriptor is built - rather than against _currentState.RenderTargets, which retains
+targets from earlier passes - gives the first trustworthy number: about 25 genuine
+feedback events per frame, same storage, same level, same layer, genuinely attached.
+That is a believable figure for an engine that reads targets it is writing, which is legal
+on the guest API with the barrier this backend skips 89 times a frame as a no-op.
+
+The fix could not be measured against it, because the fix crashes. Ending the pass from
+inside GetOrCreateRenderEncoder - which is itself half way through acquiring an encoder -
+faults the driver in drawIndexedPrimitives at 0x8a0, the same signature as the encoder-ABA
+bug fixed at the start of this investigation. It is defaulted off; detection stays on
+demand.
+
+A correct version decides before RenderResourcesPrepass runs, from bound state alone, and
+splits there. That is a contained piece of work and it is the one thing left with an
+untested mechanism behind it - the earlier "no effect" measurement was taken with
+detection over-broad by a factor of forty, so it does not stand as a negative for the
+narrow case.
