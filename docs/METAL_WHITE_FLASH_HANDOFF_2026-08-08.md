@@ -2067,3 +2067,30 @@ Bounded plan:
      artefact flag in a spare channel, no thresholds.
 
 This is the honest root-cause path. The mitigation stays only until it lands.
+
+### The two translations are equivalent - shader codegen is cleared
+
+Dumping MSL and GLSL of the same guest shader from one process (ShaderTranslationDiff,
+RYUJINX_SHADER_DIFF=<dir>) gives 1771 pairs sharing decoder, IR and every optimisation
+pass, so any difference is a backend difference and nothing else. Two hooks were needed:
+ShaderCache.TranslateShader and ParallelDiskCacheLoader's own Translate calls - the loader
+path is what actually feeds the game, and missing it produced zero dumps at first, the
+fourth warm-cache no-op in these notes.
+
+The composite shader (the pair carrying 0x7EF19FFF) matches operation for operation: same
+bit-trick reciprocal, same Newton refinement, same three clamps, same x3.5. The MSL side is
+if anything more correct, carrying the explicit integer wrapping added this week.
+
+Across all pairs the apparent divergences - MSL having fewer clamps, fma and rsqrt - are
+artefacts of GLSL expression folding, which duplicates a shared sub-expression textually
+once per use: one example showed 20 GLSL clamps of which 16 were the same expression
+repeated, leaving 5 unique against MSL's 5. Operation counts are NOT folding-invariant and
+must be de-duplicated before comparison.
+
+So the MSL translation drops no guard and no operation. Shader codegen is excluded.
+
+What that leaves of the Vulkan differential: pass-structure fragmentation. This backend
+splits the scene texture's rendering into 25-30 Load/Store round trips per frame where
+MoltenVK maps Vulkan renderpasses roughly 1:1 and takes a handful. The fault crystallises
+at Load/Store boundaries, so the dice are rolled an order of magnitude more often here.
+That is the last standing structural difference and the only one not yet measured.
