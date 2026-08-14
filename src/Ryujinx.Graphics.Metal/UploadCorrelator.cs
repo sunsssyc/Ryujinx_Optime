@@ -66,6 +66,7 @@ namespace Ryujinx.Graphics.Metal
             public ulong[] Shapes;
             public int ShapeCount;
             public Binding Binding;
+            public Binding BindingLast;
         }
 
         private static MTLBuffer _buf;
@@ -87,8 +88,14 @@ namespace Ryujinx.Graphics.Metal
         }
 
         private static Binding _frameBinding;
+        private static Binding _frameBindingLast;
         private static readonly Dictionary<string, (long Flat, long Normal)> _bindingStats = new();
         private static long _framesWithNoBinding;
+
+        // Mean luma of the sampled grid, split by outcome. Without it a run whose
+        // picture went black reports zero flat frames and reads as a fix - which is
+        // exactly how a "this build might suppress it" result was once produced.
+        private static double _lumaFlatSum, _lumaNormalSum;
 
         private static readonly ulong[] _frameShapes = new ulong[8];
         private static int _frameShapeCount;
@@ -145,10 +152,24 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            _frameBinding.GpuAddress = gpuAddress;
-            _frameBinding.NativePtr = nativePtr;
-            _frameBinding.CanonicalPtr = canonicalPtr;
-            _frameBinding.Program = program;
+            // First of the frame, not last. The consumer whose fetch comes back white
+            // is the second pass of the frame; every later draw that also samples a
+            // scene-class texture used to overwrite this record, so the "identical
+            // binding on flat and normal frames" reading was taken from whichever draw
+            // happened to be last. Keep both, and report them separately.
+            if (_frameBinding.Count == 0)
+            {
+                _frameBinding.GpuAddress = gpuAddress;
+                _frameBinding.NativePtr = nativePtr;
+                _frameBinding.CanonicalPtr = canonicalPtr;
+                _frameBinding.Program = program;
+            }
+
+            _frameBindingLast.GpuAddress = gpuAddress;
+            _frameBindingLast.NativePtr = nativePtr;
+            _frameBindingLast.CanonicalPtr = canonicalPtr;
+            _frameBindingLast.Program = program;
+
             _frameBinding.Count++;
         }
 
@@ -298,12 +319,14 @@ namespace Ryujinx.Graphics.Metal
                 Array.Copy(_frameShapes, mine.Shapes, _frameShapeCount);
                 mine.ShapeCount = _frameShapeCount;
                 mine.Binding = _frameBinding;
+                mine.BindingLast = _frameBindingLast;
                 mine.Valid = true;
             }
 
             // 2. Reset the frame accumulators. The attachment set is per frame too.
             _attachedThisFrame.Clear();
             _frameBinding = default;
+            _frameBindingLast = default;
             _frameShapeCount = 0;
             _frameUploads = 0;
             _frameBigUploads = 0;
@@ -323,18 +346,31 @@ namespace Ryujinx.Graphics.Metal
         {
             byte* p = (byte*)_buf.Contents + index * Pixels * BytesPerPixel;
             int saturated = 0;
+            double lumaSum = 0;
 
             for (int i = 0; i < Pixels; i++)
             {
                 byte* px = p + i * BytesPerPixel;
+                double luma = (px[0] + px[1] + px[1] + px[2]) * 0.25;
 
-                if ((px[0] + px[1] + px[1] + px[2]) * 0.25f >= SaturatedLuma)
+                lumaSum += luma;
+
+                if (luma >= SaturatedLuma)
                 {
                     saturated++;
                 }
             }
 
             bool flat = saturated >= SaturatedNeeded;
+
+            if (flat)
+            {
+                _lumaFlatSum += lumaSum / Pixels;
+            }
+            else
+            {
+                _lumaNormalSum += lumaSum / Pixels;
+            }
 
             if (flat)
             {
@@ -391,11 +427,19 @@ namespace Ryujinx.Graphics.Metal
             }
             else
             {
-                string key = $"gpu=0x{slot.Binding.GpuAddress:X} tex=0x{slot.Binding.NativePtr:X} " +
-                             $"root=0x{slot.Binding.CanonicalPtr:X} prog={slot.Binding.Program}";
+                string key = $"FIRST n={slot.Binding.Count} gpu=0x{slot.Binding.GpuAddress:X} " +
+                             $"tex=0x{slot.Binding.NativePtr:X} root=0x{slot.Binding.CanonicalPtr:X} " +
+                             $"prog={slot.Binding.Program}";
 
                 (long f, long n) = _bindingStats.TryGetValue(key, out (long Flat, long Normal) b) ? (b.Flat, b.Normal) : (0L, 0L);
                 _bindingStats[key] = flat ? (f + 1, n) : (f, n + 1);
+
+                string lastKey = $"LAST  gpu=0x{slot.BindingLast.GpuAddress:X} " +
+                                 $"tex=0x{slot.BindingLast.NativePtr:X} root=0x{slot.BindingLast.CanonicalPtr:X} " +
+                                 $"prog={slot.BindingLast.Program}";
+
+                (long lf, long ln) = _bindingStats.TryGetValue(lastKey, out (long Flat, long Normal) lb) ? (lb.Flat, lb.Normal) : (0L, 0L);
+                _bindingStats[lastKey] = flat ? (lf + 1, ln) : (lf, ln + 1);
             }
 
             for (int i = 0; i < slot.ShapeCount; i++)
@@ -413,6 +457,7 @@ namespace Ryujinx.Graphics.Metal
             StringBuilder sb = new();
 
             sb.Append($"uploadcorr: classified={_flatFrames + _normalFrames} flat={_flatFrames} normal={_normalFrames} dropped={_dropped}");
+            sb.Append($" | luma flat {(_flatFrames > 0 ? _lumaFlatSum / _flatFrames : 0):F0}, normal {(_normalFrames > 0 ? _lumaNormalSum / _normalFrames : 0):F0}");
             sb.Append($" | upload: flat {_flatWithUpload}/{_flatFrames}, normal {_normalWithUpload}/{_normalFrames}");
             sb.Append($" | uploadOntoRT: flat {_flatWithUploadOntoRt}, normal {_normalWithUploadOntoRt}");
             sb.Append($" | copy: flat {_flatWithCopy}/{_flatFrames}, normal {_normalWithCopy}/{_normalFrames}");

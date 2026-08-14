@@ -72,6 +72,62 @@ namespace Ryujinx.Graphics.Metal
         private readonly int[] _passEndReasons = new int[Enum.GetValues<PassEndReason>().Length];
         private ulong _drawCountAtPassStart;
 
+        // Subtraction harness. Nineteen configurations of the standalone
+        // reproducer failed to synthesise the fault by adding properties, so the
+        // remaining move is to remove them from the real frame instead: drop the
+        // draws in a window of passes and watch whether the flat rate moves.
+        // Passes are still opened, so attachments, load actions and store
+        // actions are untouched - only what is drawn changes.
+        //
+        // /tmp/ryujinx-metal-skip-draws holds "A-B" (pass indexes within the
+        // frame, half open), re-read once a frame. Empty or absent disables it.
+        // The composite is pass 2 and the scene finishes around pass 167, so
+        // "3-167" removes the scene render while leaving the consumer intact.
+        private int _passIndexInFrame;
+        private static int _skipDrawsFrom = -1;
+        private static int _skipDrawsTo = -1;
+        private static long _skippedDraws;
+
+        private static void RefreshSkipDraws()
+        {
+            try
+            {
+                string text = System.IO.File.Exists("/tmp/ryujinx-metal-skip-draws")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-skip-draws").Trim()
+                    : string.Empty;
+
+                string[] parts = text.Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+                if (parts.Length == 2 &&
+                    int.TryParse(parts[0], out int from) &&
+                    int.TryParse(parts[1], out int to))
+                {
+                    _skipDrawsFrom = from;
+                    _skipDrawsTo = to;
+                }
+                else
+                {
+                    _skipDrawsFrom = _skipDrawsTo = -1;
+                }
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
+
+        private bool SkipThisDraw()
+        {
+            if (_skipDrawsFrom < 0 || _passIndexInFrame < _skipDrawsFrom || _passIndexInFrame >= _skipDrawsTo)
+            {
+                return false;
+            }
+
+            _skippedDraws++;
+
+            return true;
+        }
+
         // Draws allowed in one render pass before it is split (0 = never). Seeded from
         // RYUJINX_METAL_PASS_SPLIT_DRAWS; /tmp/ryujinx-metal-pass-split-draws overrides
         // it hot, re-read once per frame, so both arms run inside one session.
@@ -503,6 +559,7 @@ namespace Ryujinx.Graphics.Metal
         public MTLRenderCommandEncoder CreateRenderCommandEncoder()
         {
             _renderPassCount++;
+            _passIndexInFrame++;
             _drawCountAtPassStart = DrawCount;
 
             ulong signature = ComputePassSignature();
@@ -599,6 +656,8 @@ namespace Ryujinx.Graphics.Metal
             FlashGuard.RefreshToggle();
             RefreshPassSplit();
             RefreshBounceScene();
+            RefreshSkipDraws();
+            _passIndexInFrame = 0;
             RefreshBarrierToggle();
             EncoderStateManager.RefreshSamplingToggle();
 
@@ -775,6 +834,7 @@ namespace Ryujinx.Graphics.Metal
                     _lastStatsRenderPassCount = _renderPassCount;
 
                     string passText =
+                        $" skipped draws: {_skippedDraws}." +
                         $" per frame: {passes / (ulong)SyncStatsLogFrameInterval} passes, " +
                         $"{draws / (ulong)SyncStatsLogFrameInterval} draws " +
                         $"({(passes != 0 ? (double)draws / passes : 0):F1} draws/pass).";
@@ -1323,7 +1383,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void Draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance, string debugGroupName)
         {
-            if (vertexCount == 0)
+            if (vertexCount == 0 || SkipThisDraw())
             {
                 return;
             }
@@ -1487,6 +1547,11 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndexed(int indexCount, int instanceCount, int firstIndex, int firstVertex, int firstInstance)
         {
+            if (SkipThisDraw())
+            {
+                return;
+            }
+
             if (indexCount == 0)
             {
                 return;

@@ -2525,3 +2525,56 @@ thousands of live textures and tens of gigabytes of footprint, concurrent thread
 issuing blits and uploads against the same queue, and compute passes interleaved with
 the render ones. Those are the next knobs, and they are cheap to add now that the
 harness runs at 110 frames a second.
+
+## 2026-08-14 (cont.): subtraction, an instrument repair, and a sharp new correlate
+
+### Subtraction has a per-arm cost nobody had priced
+
+`/tmp/ryujinx-metal-skip-draws` takes "A-B" and drops the draws in that window of
+passes while still opening the passes, so attachments and load/store actions are
+untouched. Two things came out of the first attempt.
+
+Dropping the whole scene render (3-167) puts the rate at 100% flat with luma 253 and
+the normal count frozen. That is the blank-picture failure the ledger warns about, so
+it is not a measurement - but it is a useful positive control: **a scene target that
+was not written this frame reads as exactly the flash's appearance**, uniform 253.
+
+More important, the damage persists. Clearing the skip did not return the rate to 40%;
+it settled at exactly 50%, 600 flat and 600 normal per interval - the signature of two
+rotating surfaces with one of them permanently unwritten. So skip arms cannot be
+hot-swapped: each needs its own launch, and every reading taken after the first arm in
+that session is void. Subtraction costs a full ten-minute launch per arm.
+
+### The binding probe was reading the wrong draw, and the conclusion survived anyway
+
+`NoteSceneBinding` overwrote its record on every call, so it kept the *last* scene-class
+binding of the frame while the consumer that comes back white is the second pass. It now
+keeps the first and the last separately. In gameplay they are different storages, so the
+gap was real:
+
+    FIRST  gpu=0x46C  tex=0x708B0C500  root=0x708A75E00  prog=5a6eec8e1d385f76
+    LAST   gpu=0x2A   tex=0x71894A800  root=0x718948500  prog=480117a3b1123d65
+
+Both are still identical across outcomes - FIRST n=13 carries 1882 flat and 3123 normal
+frames on one key, LAST carries 1894 flat and 4701 normal on one key. The instrument
+repair strengthened the result rather than overturning it: whichever end of the frame is
+asked, the shader is pointed at the same texture on flat frames as on normal ones.
+
+### The count of scene-class draws steps the rate
+
+Splitting by how many draws sampled a scene-class texture that frame was accidental -
+the count went into the key - and it is the sharpest correlate found so far:
+
+    n = 10     0 flat /   57
+    n = 11     0 flat /  746
+    n = 12     9 flat /   62      14.5%
+    n = 13  1882 flat / 5005      37.6%
+
+Eight hundred frames at eleven or fewer, not one of them flat; a step to 37.6% at
+thirteen. This is plausibly the day/night gate seen through a sharper instrument rather
+than a new mechanism - n tracks how much of the scene chain is running - but it is the
+first *quantitative* handle on that gate, and unlike "daylight" it can be read per frame.
+
+Worth doing next, and cheap: log which programs make up the n draws, and diff the n=11
+set against the n=13 set. That names the two stages whose presence coincides with the
+fault appearing, which is the same answer subtraction would give at a tenth the cost.
