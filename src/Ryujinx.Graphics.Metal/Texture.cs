@@ -52,7 +52,7 @@ namespace Ryujinx.Graphics.Metal
 
         public Texture(MTLDevice device, MetalRenderer renderer, Pipeline pipeline, TextureCreateInfo info) : base(device, renderer, pipeline, info)
         {
-            MTLPixelFormat pixelFormat = FormatTable.GetFormat(Info.Format);
+            MTLPixelFormat pixelFormat = HostFormat(Info.Format);
 
             MTLTextureDescriptor descriptor = new()
             {
@@ -180,9 +180,72 @@ namespace Ryujinx.Graphics.Metal
         /// emulator can exercise; guest textures are freely reused as render
         /// targets, storage images and reinterpreted views.
         /// </summary>
+        /// <summary>
+        /// The class of texture the composite reads and the flash appears in: the guest's
+        /// full resolution HDR scene target. Keyed on the guest format, not MtlFormat, so
+        /// it survives the RGBA16Float substitution below.
+        /// </summary>
+        /// <summary>
+        /// The single place a guest format becomes a host one. Both the base texture and
+        /// every view have to agree: deriving them separately meant a substituted base
+        /// was handed views still asking for the packed format, and Metal rejects that
+        /// pair at creation ("source texture pixelFormat not compatible with texture view
+        /// pixelFormat").
+        /// </summary>
+        private static MTLPixelFormat HostFormat(Format format)
+        {
+            if (_sceneRgba16f && format == Format.R11G11B10Float)
+            {
+                return MTLPixelFormat.RGBA16Float;
+            }
+
+            return FormatTable.GetFormat(format);
+        }
+
+        public static bool IsSceneClass(TextureCreateInfo info) =>
+            info.Format == Format.R11G11B10Float && info.Width >= 1000;
+
+        /// <summary>
+        /// Card 2: run the scene class as RGBA16Float instead of the packed RG11B10Float.
+        /// The white is manufactured on the read - every host write channel is excluded at
+        /// power - and a packed 32-bit three-channel format is decoded on the read path by
+        /// hardware an unpacked half4 never touches. Substitution is consistent across the
+        /// whole format, so blits between two of these still see matching layouts.
+        /// RYUJINX_METAL_SCENE_RGBA16F=1.
+        /// </summary>
+        private static readonly bool _sceneRgba16f =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_SCENE_RGBA16F") == "1";
+
+        /// <summary>
+        /// Card 4: stop asking for usages the scene class never exercises. Every colour
+        /// texture here declares PixelFormatView and ShaderWrite unconditionally, and on
+        /// Apple GPUs either flag alone disables lossless compression - which is why the
+        /// flash lives on a long-lived *uncompressed* colour target. MoltenVK sets
+        /// ShaderWrite only when the VkImage actually carries STORAGE_BIT, so Vulkan runs
+        /// this same surface compressed and flashes at 1/175th the rate. Scoped to the
+        /// scene class alone to keep the blast radius off genuine storage images.
+        /// 1 drops ShaderWrite, 2 drops ShaderWrite and PixelFormatView.
+        /// </summary>
+        private static readonly int _leanUsage =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_LEAN_USAGE"), out int leanUsage)
+                ? leanUsage
+                : 0;
+
         private static MTLTextureUsage GetTextureUsage(TextureCreateInfo info, MTLPixelFormat pixelFormat)
         {
             MTLTextureUsage usage = MTLTextureUsage.ShaderRead | MTLTextureUsage.PixelFormatView;
+
+            if (_leanUsage > 0 && IsSceneClass(info))
+            {
+                usage |= MTLTextureUsage.RenderTarget;
+
+                if (_leanUsage >= 2)
+                {
+                    usage &= ~MTLTextureUsage.PixelFormatView;
+                }
+
+                return usage;
+            }
 
             if (info.Format.IsDepthOrStencil)
             {
@@ -247,7 +310,7 @@ namespace Ryujinx.Graphics.Metal
             int firstLayer,
             int firstLevel) : base(device, renderer, pipeline, info)
         {
-            MTLPixelFormat pixelFormat = FormatTable.GetFormat(Info.Format);
+            MTLPixelFormat pixelFormat = HostFormat(Info.Format);
 
             if (info.DepthStencilMode == DepthStencilMode.Stencil)
             {

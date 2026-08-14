@@ -1,3 +1,4 @@
+using Ryujinx.Common.Memory;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
@@ -80,6 +81,121 @@ namespace Ryujinx.Graphics.Metal
                 : 0;
 
         private static readonly int _passSplitDrawsDefault = _passSplitDraws;
+
+        // Card 3 toggle and its scratch surface. Hot via /tmp/ryujinx-metal-bounce-scene.
+        //   1 - full bounce, scene -> scratch -> scene
+        //   2 - positive control: scratch -> scene only, without filling scratch first.
+        //       The scratch holds anything but this frame's scene, so if the hook is live
+        //       the picture must visibly break. A null from mode 1 means nothing until
+        //       mode 2 has been seen to break the screen: the first attempt at this card
+        //       measured "no effect" from a hook that never fired, because the bound
+        //       texture arrived through TextureArrayRefs and the walk only read
+        //       TextureRefs.
+        private static int _bounceSceneInput =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_BOUNCE_SCENE"), out int bounceScene)
+                ? bounceScene
+                : 0;
+
+        private static readonly int _bounceSceneInputDefault = _bounceSceneInput;
+
+        private Texture _bounceScratch;
+        private int _bounceScratchWidth;
+        private int _bounceScratchHeight;
+        private int _bouncedAtPresent = -1;
+        private int _bounceCount;
+        private int _bounceMissCount;
+
+        private static void RefreshBounceScene()
+        {
+            try
+            {
+                if (System.IO.File.Exists("/tmp/ryujinx-metal-bounce-scene"))
+                {
+                    _bounceSceneInput =
+                        int.TryParse(System.IO.File.ReadAllText("/tmp/ryujinx-metal-bounce-scene").Trim(), out int value)
+                            ? value
+                            : _bounceSceneInputDefault;
+                }
+                else
+                {
+                    _bounceSceneInput = _bounceSceneInputDefault;
+                }
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
+
+        /// <summary>
+        /// Copies the bound scene texture out to a scratch surface and straight back, so
+        /// the surface the next pass samples has just been written by the blit engine.
+        /// Once per frame: the composite is the second pass of the frame and the only one
+        /// that reads this class, and repeating it per pass would cost bandwidth for
+        /// nothing.
+        /// </summary>
+        private void BounceSceneInput()
+        {
+            if (_bouncedAtPresent == _presentCount)
+            {
+                return;
+            }
+
+            Texture scene = _encoderStateManager.SceneClassSampledTexture();
+
+            if (scene == null)
+            {
+                _bounceMissCount++;
+                return;
+            }
+
+            _bouncedAtPresent = _presentCount;
+            _bounceCount++;
+
+            // Dynamic resolution moves this size during play. Rebuilding the scratch on
+            // every change is what freed a live attachment under FlashGuard and faulted
+            // the driver, so only grow it, and never release the old one mid-flight.
+            if (_bounceScratch == null || scene.Width != _bounceScratchWidth || scene.Height != _bounceScratchHeight)
+            {
+                _bounceScratch = new Texture(_device, _renderer, this, scene.Info);
+                _bounceScratchWidth = scene.Width;
+                _bounceScratchHeight = scene.Height;
+
+                if (_bounceSceneInput == 2)
+                {
+                    // Make the control unmistakable. A fresh texture's undefined content
+                    // turned out to be indistinguishable from the scene on screen, which
+                    // is no control at all; 0x55 packs to a constant that is neither the
+                    // scene nor white, so if the copy lands the picture cannot survive it.
+                    int bytes = scene.Info.Width * scene.Info.Height * 4;
+                    MemoryOwner<byte> fill = MemoryOwner<byte>.Rent(bytes);
+                    fill.Span.Fill(0x55);
+                    _bounceScratch.SetData(fill);
+                }
+            }
+
+            MTLBlitCommandEncoder blit = Cbs.Encoders.EnsureBlitEncoder();
+
+            MTLTexture src = scene.GetHandle(Cbs);
+            MTLTexture scratch = _bounceScratch.GetHandle(Cbs);
+
+            MTLOrigin origin = new();
+            MTLSize size = new() { width = (ulong)scene.Width, height = (ulong)scene.Height, depth = 1 };
+
+            if (_bounceSceneInput != 2)
+            {
+                blit.CopyFromTexture(src, 0, 0, origin, size, scratch, 0, 0, origin);
+            }
+
+            blit.CopyFromTexture(scratch, 0, 0, origin, size, src, 0, 0, origin);
+
+            if (_bounceCount % 600 == 1)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"bounce mode={_bounceSceneInput} fired={_bounceCount} missed={_bounceMissCount} " +
+                    $"{scene.Width}x{scene.Height} {scene.MtlFormat}");
+            }
+        }
 
         private static void RefreshPassSplit()
         {
@@ -215,6 +331,24 @@ namespace Ryujinx.Graphics.Metal
             if (HdrPassProbe.Enabled && Cbs.Encoders.CurrentEncoderType != EncoderType.Render)
             {
                 HdrPassProbe.SampleBeforePass(Cbs, _encoderStateManager.RenderTargets[0], _presentCount % 4);
+            }
+
+            // Card 3: bounce the scene texture through the blit engine before the pass that
+            // samples it. Every host write channel is excluded on flat frames, so the white
+            // is manufactured on the read; and at present time a CPU-side blit of this very
+            // texture reads the scene correctly on frames the shader read white. If a blit
+            // round trip clears the fault, whatever the sampler sees is a cached or
+            // deferred view of the surface rather than its memory - and the bounce is then
+            // also a real fix, unlike repeating the previous frame. Same safety contract as
+            // the probe above: only with no pass open, so opening a blit encoder is legal.
+            // forDraw only. Bindings are stale on the non-draw calls, and with the
+            // once-a-frame latch below a single early non-draw call was enough to spend
+            // the frame's bounce on whatever happened to still be bound - which is why
+            // the first positive control wrote to a scene texture nothing went on to read
+            // and left the picture untouched.
+            if (forDraw && _bounceSceneInput > 0 && Cbs.Encoders.CurrentEncoderType != EncoderType.Render)
+            {
+                BounceSceneInput();
             }
 
             MTLRenderCommandEncoder renderCommandEncoder = Cbs.Encoders.EnsureRenderEncoder();
@@ -464,6 +598,7 @@ namespace Ryujinx.Graphics.Metal
             OpRing.OnPresent();
             FlashGuard.RefreshToggle();
             RefreshPassSplit();
+            RefreshBounceScene();
             RefreshBarrierToggle();
             EncoderStateManager.RefreshSamplingToggle();
 

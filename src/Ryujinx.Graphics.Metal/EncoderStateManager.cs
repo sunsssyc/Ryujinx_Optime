@@ -2061,6 +2061,43 @@ namespace Ryujinx.Graphics.Metal
             return any;
         }
 
+        /// <summary>
+        /// The scene-class texture currently bound for sampling, if any. Bound state only,
+        /// so it can be answered before RenderResourcesPrepass and before any encoder is
+        /// acquired - the same constraint the feedback split had to learn the hard way.
+        /// </summary>
+        public readonly Texture SceneClassSampledTexture()
+        {
+            foreach (TextureRef reference in _currentState.TextureRefs)
+            {
+                if (reference.Storage is Texture sampled && Texture.IsSceneClass(sampled.Info))
+                {
+                    return sampled;
+                }
+            }
+
+            // Textures also arrive as arrays, and a walk of TextureRefs alone silently
+            // misses those - which is exactly the shape of every "nothing is bound here"
+            // artefact in this investigation's history.
+            foreach (EncoderState.ArrayRef<TextureArray> arrayRef in _currentState.TextureArrayRefs)
+            {
+                if (arrayRef.Array == null)
+                {
+                    continue;
+                }
+
+                foreach (TextureRef reference in arrayRef.Array.GetTextureRefs())
+                {
+                    if (reference.Storage is Texture sampled && Texture.IsSceneClass(sampled.Info))
+                    {
+                        return sampled;
+                    }
+                }
+            }
+
+            return null;
+        }
+
         private readonly (ulong gpuAddress, IntPtr nativePtr) AddressForTexture(ref TextureRef texture)
         {
             TextureBase storage = texture.Storage;

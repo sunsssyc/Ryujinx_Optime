@@ -2366,3 +2366,91 @@ game time to 4:45 PM, giving roughly seven minutes of day):
   - RG11B10Float -> RGBA16Float for the scene-texture class (packed-format read path),
   - bouncing the composite's input through a blit copy (the CPU-side evidence says the
     blit engine reads this texture correctly at the same moments the sampler does not).
+
+## 2026-08-14: the white is manufactured on the read, shown positively
+
+Four discriminators were run against the reproducing save, all with the correlator as
+the counter and the guard off. One of them settled the question the whole investigation
+had been circling.
+
+### Card 3, blit bounce: null as a fix, decisive as evidence
+
+Copy the scene texture out to a scratch surface and back through the blit engine
+immediately before the pass that samples it (hot file /tmp/ryujinx-metal-bounce-scene,
+mode 1). Mode 2 is the positive control: stamp a 0x55 constant over the scene texture
+every frame instead, so the picture cannot survive if the write lands.
+
+The control had to be built twice, and the first version is the cautionary tale. It
+fired 3601 times a frame-for-frame and changed nothing on screen, because the hook ran
+on non-draw calls to GetOrCreateRenderEncoder where bindings are stale, and the
+once-a-frame latch was spent on a texture nothing went on to read; the bound texture
+also arrived through TextureArrayRefs, which the first state walk did not read at all.
+Fixed - forDraw only, both binding paths - the control is unmistakable: the whole scene
+goes red, HUD untouched.
+
+With that control passing, the measurement:
+
+    no bounce            ~235/600 flat   39%
+    mode 1, real bounce  ~248/600 flat   41%
+    mode 2, constant red ~248/600 flat   41%
+
+And sampling frames directly under the constant-red injection, guard off:
+
+    red red WHITE red WHITE WHITE WHITE red red red red red red red      (4 of 14)
+
+The composite's input was 0x55 on every one of those frames - the screen proves it -
+and pure white frames continued at exactly the rate they always have. **The content of
+the texture is irrelevant to whether the frame comes out white.** Combined with the
+in-shader measurement that the fetch returns 254/254 on flat frames, this is the
+positive form of what the ledger had only been able to infer: the fetch returns white
+while the memory holds red. The fault is in the read, not in anything written.
+
+### Card 2, RGBA16Float: structurally impossible, and moot
+
+Substituting an unpacked format for the packed RG11B10Float scene class fails at
+texture creation: the guest reinterprets that same storage as RGBA8Unorm, and Metal
+only permits a view whose format matches the base's bit width.
+
+    source texture pixelFormat (MTLPixelFormatRGBA16Float) not compatible with
+    texture view pixelFormat (MTLPixelFormatRGBA8Unorm)
+
+Every 32bpp float alternative is either not renderable (RGB9E5) or not float
+(RGB10A2Unorm), so the substitution has nowhere to go without rewriting the aliasing
+path. It is moot regardless: card 3 showed the decode of the content cannot matter when
+the content itself does not.
+
+### Card 4, lean usage flags: null
+
+Every colour texture here declares PixelFormatView and ShaderWrite unconditionally, and
+on Apple GPUs either flag alone disables lossless compression - which is how the scene
+target came to be the long-lived *uncompressed* colour target the flash lives on.
+MoltenVK sets ShaderWrite only for images that actually carry STORAGE_BIT.
+RYUJINX_METAL_LEAN_USAGE=2 drops both for the scene class, putting the surface back on
+the compressed path. Renders correctly, no command buffer errors, ~240/600 flat = 40%.
+Null.
+
+### Card 1, extreme pass split: real, partial, and not a fix
+
+N=200 was null. N=25 engages hard - 77 DrawBudget splits a frame, 197 -> 276 passes -
+and does move the rate. A/B/A inside one daylight window:
+
+    split off    234.8/600   39.1%
+    N=25         200.6/600   33.4%
+    split off    238.8/600   39.8%
+
+The return to baseline rules out the dusk drift, 5.15 SE. So capping draws per pass
+buys about a sixth of the fault and no more. Whether that is the partial-render path
+being partly avoided or simply the timing shift of 79 extra passes a frame is not
+separable here, and 33% is not a fix either way.
+
+### Where that leaves it
+
+The read-side account is no longer the last one standing by elimination; it is the one
+with a positive experiment behind it. A texture whose memory demonstrably contains a
+constant is sampled as uniform near-white on ~40% of frames, gated by scene content
+(day/night) and not by workload, immune to storage mode, usage flags, compression,
+queue topology, pass structure, barriers, residency and every host write channel.
+
+That is a driver texture-read fault, and it is now expressible as a self-contained
+report: the constant-injection run is the reproduction, and the ledger above is the
+list of everything it is not.
