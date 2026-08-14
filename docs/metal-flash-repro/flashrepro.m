@@ -49,6 +49,29 @@
 //             39.1% -> 33.4%, so this path is not excluded there either.
 //   SPLITCB=n split each frame across n command buffers, as auto-flush does.
 //
+// Scale, which is what the shape-only configurations were missing. The binding
+// was proved identical on flat and normal frames inside the emulator, and the
+// shape alone never fails here, so what is left between the two is how much the
+// emulator has going on:
+//
+//   LIVE=n    keep n scene-sized textures alive, for footprint and allocation
+//             pressure - the emulator runs with thousands of live textures and
+//             was measured at tens of gigabytes.
+//   THREADS=n n background threads issuing their own command buffers on the
+//             same queue - the emulator has texture readback and uploads
+//             running off the render thread continuously.
+//   COMPUTE=n n compute dispatches interleaved into each frame; the real frame
+//             ends about seven passes on a compute encoder.
+//   HDR=v     the geometry draws write v, v*0.8, v*0.6 into the scene target
+//             before the constant fill lands on top. RG11B10Float has no sign
+//             bit and a five-bit exponent, so a bright daylight scene lives in
+//             high exponents and a night one does not - and the fault is gated
+//             by day/night while being independent of what the texture holds at
+//             fetch time. Constant injection in the emulator only controlled the
+//             latter: the game's own HDR writes still happened earlier in the
+//             frame, so damage done while writing high exponents would survive
+//             it. This is the one condition that reading leaves open.
+//
 // Build:  clang -fobjc-arc -framework Foundation -framework Metal -O2 \
 //               flashrepro.m -o flashrepro
 //
@@ -139,6 +162,10 @@ fragment float4 fcomposite(VOut in [[stage_in]],
     return float4(fetch12(tex, in.pos.xy, sc.s), 1.0);
 }
 
+kernel void kmain(device float *out [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+    out[tid] = out[tid] * 0.5 + float(tid & 255u) * 0.01;
+}
+
 fragment float4 fcomposite_ab(VOut in [[stage_in]],
                               device CompositeArgs &args [[buffer(1)]],
                               constant Scale &sc [[buffer(0)]]) {
@@ -171,6 +198,10 @@ int main(int argc, const char *argv[]) {
         const int churn = envInt("CHURN", 0);
         const int tris = envInt("TRIS", 0);
         const int splitCb = envInt("SPLITCB", 1);
+        const int live = envInt("LIVE", 0);
+        const int threads = envInt("THREADS", 0);
+        const int computes = envInt("COMPUTE", 0);
+        const float hdr = (float)atof(envStr("HDR", "0"));
         const MTLPixelFormat sceneFormat = parseFormat(envStr("FMT", "rg11b10"));
 
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -184,6 +215,8 @@ int main(int argc, const char *argv[]) {
                frames, passes, drawsPerPass, inflight, useArgBuf, revisit);
         printf("conditions  alias=%d depth=%d churn=%d tris=%d splitcb=%d\n",
                useAlias, useDepth, churn, tris, splitCb);
+        printf("scale       live=%d (~%.1f GB) threads=%d compute=%d hdr=%.1f\n",
+               live, live * (double)sceneW * sceneH * 4.0 / 1073741824.0, threads, computes, hdr);
 
         NSError *error = nil;
         id<MTLLibrary> library = [device newLibraryWithSource:kShaderSource
@@ -289,10 +322,66 @@ int main(int argc, const char *argv[]) {
             *(MTLResourceID *)argBuffer.contents = scene.gpuResourceID;
         }
 
+        // Footprint. Held in an array so ARC cannot collect them.
+        NSMutableArray *liveTextures = [NSMutableArray arrayWithCapacity:(NSUInteger)MAX(live, 1)];
+        for (int i = 0; i < live; ++i) {
+            MTLTextureDescriptor *ld =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:sceneFormat
+                                                                   width:sceneW height:sceneH mipmapped:NO];
+            ld.usage = sceneUsage;
+            ld.storageMode = MTLStorageModePrivate;
+            id<MTLTexture> t = [device newTextureWithDescriptor:ld];
+            if (!t) { fprintf(stderr, "live allocation failed at %d\n", i); break; }
+            [liveTextures addObject:t];
+        }
+        if (live) printf("allocated   %lu live textures\n", (unsigned long)liveTextures.count);
+
+        id<MTLComputePipelineState> computePipe = nil;
+        id<MTLBuffer> computeBuf = nil;
+        if (computes > 0) {
+            computePipe = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"kmain"]
+                                                                error:&error];
+            if (!computePipe) { fprintf(stderr, "compute pipe: %s\n", error.description.UTF8String); return 2; }
+            computeBuf = [device newBufferWithLength:1 << 20 options:MTLResourceStorageModePrivate];
+        }
+
+        // Background traffic on the same queue: its own command buffers, its own
+        // blits, never synchronised against the render loop - which is exactly
+        // what the emulator's texture readback and uploads do.
+        __block volatile int32_t stopThreads = 0;
+        for (int t = 0; t < threads; ++t) {
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                id<MTLBuffer> staging = [device newBufferWithLength:1 << 20
+                                                            options:MTLResourceStorageModeShared];
+                while (!stopThreads) {
+                    @autoreleasepool {
+                        id<MTLCommandBuffer> bcb = [queue commandBuffer];
+                        id<MTLBlitCommandEncoder> blit = [bcb blitCommandEncoder];
+                        [blit copyFromTexture:scene
+                                  sourceSlice:0 sourceLevel:0
+                                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                                   sourceSize:MTLSizeMake(256, 256, 1)
+                                     toBuffer:staging
+                            destinationOffset:0
+                       destinationBytesPerRow:256 * 4
+                     destinationBytesPerImage:256 * 256 * 4];
+                        [blit endEncoding];
+                        [bcb commit];
+                        [bcb waitUntilCompleted];
+                    }
+                }
+            });
+        }
+
         float sceneColour[4] = { kSceneR, kSceneG, kSceneB, 1.0f };
         id<MTLBuffer> fillColour = [device newBufferWithBytes:sceneColour
                                                        length:sizeof(sceneColour)
                                                       options:MTLResourceStorageModeShared];
+
+        float hdrColour[4] = { hdr, hdr * 0.8f, hdr * 0.6f, 1.0f };
+        id<MTLBuffer> hdrBuf = [device newBufferWithBytes:hdrColour
+                                                   length:sizeof(hdrColour)
+                                                  options:MTLResourceStorageModeShared];
         float scale[2] = { (float)sceneW / (float)outW, (float)sceneH / (float)outH };
         id<MTLBuffer> scaleBuf = [device newBufferWithBytes:scale
                                                      length:sizeof(scale)
@@ -374,6 +463,7 @@ int main(int argc, const char *argv[]) {
                 // flat frame stays unambiguous.
                 if (tris > 0 && writesScene) {
                     [enc setRenderPipelineState:(throughAlias ? aliasPipe : geomPipe)];
+                    if (hdr > 0.0f) [enc setFragmentBuffer:hdrBuf offset:0 atIndex:0];
                     if (!throughAlias) {
                         for (int d = 0; d < drawsPerPass; ++d) {
                             [enc drawPrimitives:MTLPrimitiveTypeTriangle
@@ -383,6 +473,9 @@ int main(int argc, const char *argv[]) {
                     }
                 }
 
+                // The detection constant lands last, so the target ends every
+                // frame holding it however bright the geometry wrote.
+                [enc setFragmentBuffer:fillColour offset:0 atIndex:0];
                 [enc setRenderPipelineState:(throughAlias ? aliasPipe : fillPipe)];
                 for (int d = 0; d < drawsPerPass; ++d) {
                     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -393,6 +486,15 @@ int main(int argc, const char *argv[]) {
                     [cb commit];
                     cb = [queue commandBuffer];
                 }
+            }
+
+            for (int c = 0; c < computes; ++c) {
+                id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+                [ce setComputePipelineState:computePipe];
+                [ce setBuffer:computeBuf offset:0 atIndex:0];
+                [ce dispatchThreadgroups:MTLSizeMake(64, 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+                [ce endEncoding];
             }
 
             // Dynamic resolution allocates and frees scene-sized targets
@@ -473,6 +575,7 @@ int main(int argc, const char *argv[]) {
         for (int i = 0; i < inflight; ++i) {
             dispatch_semaphore_wait(inflightSem, DISPATCH_TIME_FOREVER);
         }
+        stopThreads = 1;
 
         printf("last sample %u,%u,%u   (constant is about %u,%u,%u)\n",
                lastR, lastG, lastB,

@@ -36,40 +36,49 @@ composite never read the constant at all, and the flat count means nothing.
 | `SPLITCB` | 1 | split each frame across N command buffers, as auto-flush does |
 | `INFLIGHT` | 4 | frames in flight; results are read off the fence, never waited on |
 
-## Result so far: does not reproduce
+## Result: does not reproduce, nineteen configurations
 
-Eleven configurations, about ten thousand frames, on Apple M1 Max / macOS 26.5:
+Apple M1 Max / macOS 26.5, roughly fifteen thousand frames total:
 
 ```
-plain shape (3000 frames)                        flat 0
-ALIAS=1 / DEPTH=1 / CHURN=3 and their combinations   flat 0
-TRIS=20000 / TRIS=100000                         flat 0
-SPLITCB=4                                        flat 0
-TRIS=100000 SPLITCB=4 DEPTH=1 ALIAS=1 CHURN=2    flat 0
+plain shape (3000 frames)                                   flat 0
+ALIAS=1 / DEPTH=1 / CHURN=3 and their combinations          flat 0
+TRIS=20000 / TRIS=100000                                    flat 0
+SPLITCB=4                                                   flat 0
+LIVE=2000 / LIVE=4000 (verified: 4000 textures, ~21 GB)     flat 0
+THREADS=6 / THREADS=8                                       flat 0
+COMPUTE=7                                                   flat 0
+HDR=40 / HDR=1000                                           flat 0
+everything at once                                          flat 0
 ```
 
-The harness self-check passes in every run (the composite reads the constant on
-essentially every frame), so these are real negatives, not a broken instrument.
+The harness self-check passes in every run - the composite reads the injected
+constant on essentially every frame - so these are real negatives.
 
-**This weakens the "generic driver read fault" reading.** A plain Metal program
-holding every property we had identified - persistent uncompressed RG11B10Float
-target, ~200 passes a frame, argument buffers, explicit texel fetches, a
-format-aliased view of the same storage, depth attachments, allocation churn,
-tens of millions of triangles a frame, split command buffers, frames in flight -
-never once returns white. So either the model is still missing a condition, or
-the fault involves emulator state rather than the workload shape.
+## What that means
 
-The sharpest remaining fork, and the next thing to run:
+Inside the emulator every step of the chain is now positively verified: the
+argument buffer hands the shader the same resource id on flat frames as on
+normal ones (2219 flat and 4964 normal frames, byte for byte identical), the
+texture's memory demonstrably holds a constant we injected, and the fetch
+returns uniform near-white anyway.
 
-  Record what the composite draw's argument buffer actually contains - the
-  MTLResourceID handed to the shader - per frame slot, classify the frame a few
-  presents later, and split by outcome.
+Outside it, none of those properties reproduce the fault, individually or
+together, even at twenty gigabytes of live textures with eight threads on the
+queue and thirty million triangles a frame.
 
-  - flat frames carry a different resource id -> the binding is wrong, it is
-    ours, and it is fixable
-  - identical on both -> the driver really does return white for a correctly
-    bound, correctly filled texture, and the gap is in this reproducer
+So the fault is real and localised, but not yet *characterised*: the list of
+properties we can name is not sufficient to cause it. Blind knob-guessing has
+now returned nineteen negatives and should stop. The two approaches with
+different information content are:
 
-Until that fork is resolved, "driver bug" is a hypothesis with one positive
-experiment behind it (constant injection in the emulator) and one negative
-(this program), not a conclusion.
+  - a scoped Xcode GPU capture of a flat frame, diffed against a capture of this
+    program, to find a property nobody thought to name
+  - subtraction inside the emulator rather than addition here: disable frame
+    stages against the reproducing save until the rate moves, bracketing the
+    condition from the other side
+
+Either way this program stays useful: it is the control. Anything proposed as
+"the condition" can be added here in minutes and tested in seconds, and if it
+ever does turn white, the result is a few hundred lines of self-contained Metal
+that can be filed as-is.
