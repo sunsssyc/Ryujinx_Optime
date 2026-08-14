@@ -2488,3 +2488,40 @@ guard does not create that race; its extra full-screen pass at present widens th
 Defaulted off. RYUJINX_METAL_FLASHGUARD=1 opts in for anyone who prefers the judder to
 the artefact. Fixing the SetData thread asymmetry is the prerequisite for reconsidering
 the default, and would be worth doing on its own account.
+
+## 2026-08-14 (cont.): the fork resolves - the binding is identical
+
+Constant injection proved the fetch returns something that is not in the texture's
+memory. That has two readings, and only one of them is a driver fault:
+
+  1. the shader reads that texture and gets the wrong answer   -> driver
+  2. the shader is pointed at something else entirely          -> ours, and fixable
+
+Under Tier 2 argument buffers the binding is a raw resource id written into a buffer,
+so reading (2) directly is one number. UploadCorrelator now records, per frame, the
+resource id handed to the shader for the scene-class texture - together with the native
+texture pointer, the storage root and the program - and splits it by the same delayed
+flat/normal classification.
+
+Over 7,183 classified frames on the reproducing save, 2,219 of them flat:
+
+    flat  2219   normal  4964   gpu=0x29   tex=0x957C69900  root=0x957C68500  prog=480117a3b1123d65
+    flat     0   normal     2   gpu=0x39A  tex=0x95A967700  root=0x95A94B980  prog=2c1a5bc1b14af178
+    flat     1   normal     0   gpu=0x688  tex=0x95AC98C80  root=0x957C68500  prog=7e5f0a2af5001b51
+
+One binding carries essentially every frame of both kinds, byte for byte identical:
+same resource id, same native texture, same storage root, same program. The two
+stragglers are one frame each. Reading (2) is dead.
+
+So the shader is pointed at the right texture, that texture's memory demonstrably holds
+the constant we put there, and the fetch returns uniform near-white on 31% of frames
+anyway. Every step from binding to memory is now positively verified rather than
+inferred.
+
+That also tells us what the standalone reproducer is missing. It is not the workload
+shape - eleven configurations of it never fail - and it is not the binding, which is
+correct in the emulator too. What the reproducer does not have is the emulator's scale:
+thousands of live textures and tens of gigabytes of footprint, concurrent threads
+issuing blits and uploads against the same queue, and compute passes interleaved with
+the render ones. Those are the next knobs, and they are cheap to add now that the
+harness runs at 110 frames a second.

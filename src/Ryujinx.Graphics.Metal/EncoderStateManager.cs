@@ -2336,6 +2336,20 @@ namespace Ryujinx.Graphics.Metal
                                     ? AddressForTexture(ref texture)
                                     : (0, IntPtr.Zero);
 
+                                // The resource id actually handed to the shader for the
+                                // scene texture. Constant injection proved the fetch
+                                // returns something that is not in that texture's memory,
+                                // which is either the driver misreading it or the shader
+                                // being pointed somewhere else entirely; this is the only
+                                // number that separates the two.
+                                if (UploadCorrelator.Enabled && hasTexture &&
+                                    texture.Storage is Texture sceneCandidate &&
+                                    Texture.IsSceneClass(sceneCandidate.Info))
+                                {
+                                    UploadCorrelator.NoteSceneBinding(
+                                        gpuAddress, nativePtr, sceneCandidate.CanonicalPtr, program.DebugLabel);
+                                }
+
                                 if (HdrPassProbe.Enabled && hasTexture &&
                                     HdrPassProbe.IsWatchedTarget(_currentState.RenderTargets[0]))
                                 {

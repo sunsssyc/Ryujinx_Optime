@@ -65,6 +65,7 @@ namespace Ryujinx.Graphics.Metal
             public int BigCopiesOntoRt;
             public ulong[] Shapes;
             public int ShapeCount;
+            public Binding Binding;
         }
 
         private static MTLBuffer _buf;
@@ -74,6 +75,21 @@ namespace Ryujinx.Graphics.Metal
         // the render thread (SetData uses the main pipeline, attachments bind at
         // encoder creation, present is the boundary), so plain fields suffice.
         private static readonly HashSet<IntPtr> _attachedThisFrame = new();
+        // The scene texture's binding as the shader receives it, for the last draw of
+        // the frame that sampled it. Recorded per frame, classified with the frame.
+        private struct Binding
+        {
+            public ulong GpuAddress;
+            public IntPtr NativePtr;
+            public IntPtr CanonicalPtr;
+            public string Program;
+            public int Count;
+        }
+
+        private static Binding _frameBinding;
+        private static readonly Dictionary<string, (long Flat, long Normal)> _bindingStats = new();
+        private static long _framesWithNoBinding;
+
         private static readonly ulong[] _frameShapes = new ulong[8];
         private static int _frameShapeCount;
         private static int _frameUploads;
@@ -113,6 +129,27 @@ namespace Ryujinx.Graphics.Metal
 
             Logger.Warning?.PrintMsg(LogClass.Gpu,
                 $"uploadcorr armed: ring={Slots} grid={GridSide}x{GridSide} satLuma={SaturatedLuma} need={SaturatedNeeded} minPixels={MinPixels}");
+        }
+
+        /// <summary>
+        /// The resource id written into the composite's argument buffer for the scene
+        /// texture. Split by outcome this answers the only question left: a different id
+        /// on flat frames means the shader was pointed at something else and the fault is
+        /// ours; identical ids mean the driver returned white for a correctly bound,
+        /// correctly filled texture.
+        /// </summary>
+        public static void NoteSceneBinding(ulong gpuAddress, IntPtr nativePtr, IntPtr canonicalPtr, string program)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            _frameBinding.GpuAddress = gpuAddress;
+            _frameBinding.NativePtr = nativePtr;
+            _frameBinding.CanonicalPtr = canonicalPtr;
+            _frameBinding.Program = program;
+            _frameBinding.Count++;
         }
 
         public static void NoteAttachment(Texture target)
@@ -260,11 +297,13 @@ namespace Ryujinx.Graphics.Metal
                 mine.Shapes ??= new ulong[8];
                 Array.Copy(_frameShapes, mine.Shapes, _frameShapeCount);
                 mine.ShapeCount = _frameShapeCount;
+                mine.Binding = _frameBinding;
                 mine.Valid = true;
             }
 
             // 2. Reset the frame accumulators. The attachment set is per frame too.
             _attachedThisFrame.Clear();
+            _frameBinding = default;
             _frameShapeCount = 0;
             _frameUploads = 0;
             _frameBigUploads = 0;
@@ -346,6 +385,19 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
+            if (slot.Binding.Count == 0)
+            {
+                _framesWithNoBinding++;
+            }
+            else
+            {
+                string key = $"gpu=0x{slot.Binding.GpuAddress:X} tex=0x{slot.Binding.NativePtr:X} " +
+                             $"root=0x{slot.Binding.CanonicalPtr:X} prog={slot.Binding.Program}";
+
+                (long f, long n) = _bindingStats.TryGetValue(key, out (long Flat, long Normal) b) ? (b.Flat, b.Normal) : (0L, 0L);
+                _bindingStats[key] = flat ? (f + 1, n) : (f, n + 1);
+            }
+
             for (int i = 0; i < slot.ShapeCount; i++)
             {
                 (long f, long n) = _shapeStats.TryGetValue(slot.Shapes[i], out (long Flat, long Normal) v) ? (v.Flat, v.Normal) : (0L, 0L);
@@ -365,6 +417,13 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | uploadOntoRT: flat {_flatWithUploadOntoRt}, normal {_normalWithUploadOntoRt}");
             sb.Append($" | copy: flat {_flatWithCopy}/{_flatFrames}, normal {_normalWithCopy}/{_normalFrames}");
             sb.Append($" | copyOntoRT: flat {_flatWithCopyOntoRt}, normal {_normalWithCopyOntoRt}");
+
+            sb.Append($"\n  scene bindings seen: {_bindingStats.Count}, frames with none: {_framesWithNoBinding}");
+
+            foreach (KeyValuePair<string, (long Flat, long Normal)> pair in _bindingStats)
+            {
+                sb.Append($"\n    flat {pair.Value.Flat,6}  normal {pair.Value.Normal,6}   {pair.Key}");
+            }
 
             foreach (KeyValuePair<ulong, (long Flat, long Normal)> pair in _shapeStats)
             {
