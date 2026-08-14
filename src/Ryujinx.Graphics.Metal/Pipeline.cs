@@ -88,6 +88,59 @@ namespace Ryujinx.Graphics.Metal
         private static int _skipDrawsTo = -1;
         private static long _skippedDraws;
 
+        // Skip every draw whose program label starts with one of these prefixes.
+        // /tmp/ryujinx-metal-skip-program holds a comma separated list, re-read once a
+        // frame. Unlike the pass-window skip this removes a handful of draws rather
+        // than the whole scene render, so the picture survives - which the correlator's
+        // per-outcome luma confirms rather than assumes.
+        private static string[] _skipPrograms = [];
+        private static long _skippedByProgram;
+
+        private static void RefreshSkipProgram()
+        {
+            try
+            {
+                string text = System.IO.File.Exists("/tmp/ryujinx-metal-skip-program")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-skip-program").Trim()
+                    : string.Empty;
+
+                _skipPrograms = text.Length == 0
+                    ? []
+                    : text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
+
+        private bool SkipThisProgram()
+        {
+            if (_skipPrograms.Length == 0)
+            {
+                return false;
+            }
+
+            string label = _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel;
+
+            if (label == null)
+            {
+                return false;
+            }
+
+            foreach (string prefix in _skipPrograms)
+            {
+                if (label.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    _skippedByProgram++;
+
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static void RefreshSkipDraws()
         {
             try
@@ -118,6 +171,11 @@ namespace Ryujinx.Graphics.Metal
 
         private bool SkipThisDraw()
         {
+            if (SkipThisProgram())
+            {
+                return true;
+            }
+
             if (_skipDrawsFrom < 0 || _passIndexInFrame < _skipDrawsFrom || _passIndexInFrame >= _skipDrawsTo)
             {
                 return false;
@@ -657,6 +715,7 @@ namespace Ryujinx.Graphics.Metal
             RefreshPassSplit();
             RefreshBounceScene();
             RefreshSkipDraws();
+            RefreshSkipProgram();
             _passIndexInFrame = 0;
             RefreshBarrierToggle();
             EncoderStateManager.RefreshSamplingToggle();
@@ -834,7 +893,7 @@ namespace Ryujinx.Graphics.Metal
                     _lastStatsRenderPassCount = _renderPassCount;
 
                     string passText =
-                        $" skipped draws: {_skippedDraws}." +
+                        $" skipped draws: {_skippedDraws}, by program: {_skippedByProgram}." +
                         $" per frame: {passes / (ulong)SyncStatsLogFrameInterval} passes, " +
                         $"{draws / (ulong)SyncStatsLogFrameInterval} draws " +
                         $"({(passes != 0 ? (double)draws / passes : 0):F1} draws/pass).";

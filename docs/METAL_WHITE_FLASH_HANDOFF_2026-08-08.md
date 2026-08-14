@@ -2578,3 +2578,49 @@ first *quantitative* handle on that gate, and unlike "daylight" it can be read p
 Worth doing next, and cheap: log which programs make up the n draws, and diff the n=11
 set against the n=13 set. That names the two stages whose presence coincides with the
 fault appearing, which is the same answer subtraction would give at a tenth the cost.
+
+### The n step is a correlate, not a cause
+
+Recording which programs make up the scene-class-sampling draws gave a diff that looked
+decisive. Aligning the natural signatures:
+
+    n=10                                        0 /   61    0.0%
+    n=11  (+57642c)                             0 /   21    0.0%
+    n=11  (+8a7b6c)                             0 /  767    0.0%
+    n=12  (+dd3b94 +57642c)                     8 /   55   14.5%
+    n=13  (+dd3b94 +57642c +7e5f0a)          1943 / 4961   39.2%
+    n=14  (7e5f0a twice)                        2 /    2  100.0%
+
+Two names fall out, and the historical composite ee89b4 is present in every set
+including the clean ones - innocent again, for the third time.
+
+Both names are wrong. `/tmp/ryujinx-metal-skip-program` skips draws by program label
+prefix, verified engaged by the skipped-draw counter and by the signature table
+changing shape, with the picture alive throughout (normal-frame luma 102 -> 117 -> 131):
+
+    baseline                       ~40%
+    skip dd3b94                     43.7%
+    skip 7e5f0a                     41-46%
+
+Neither moves the rate. The count tracks how much of the scene chain is running, which
+tracks the same lighting state the day/night gate tracks; it is that gate seen through a
+finer instrument, not a mechanism.
+
+### Where addition and subtraction both leave it
+
+Both directions have now been pushed to conclusion and both are null:
+
+  - addition, outside the emulator: nineteen configurations of the standalone
+    reproducer, ~15,000 frames, never once white
+  - subtraction, inside it: skipping the draws whose presence coincides exactly with
+    the fault appearing changes nothing
+
+Taken together those say something specific. The fault is insensitive to *which* draws
+run - remove the ones that correlate perfectly with it and it persists at full rate -
+and it cannot be synthesised from any property of the workload we can name. What it does
+track is the overall scene state: daylight versus night, 39% versus effectively zero,
+with the same geometry, the same pass structure and the same draw counts on both sides.
+
+The instruments are all in the tree and all hot-swappable, so any future hypothesis is
+one file write away from a measurement. What is missing is a hypothesis, and neither
+adding properties nor removing draws has produced one.

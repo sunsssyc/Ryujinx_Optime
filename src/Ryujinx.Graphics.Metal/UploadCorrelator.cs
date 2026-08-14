@@ -67,6 +67,7 @@ namespace Ryujinx.Graphics.Metal
             public int ShapeCount;
             public Binding Binding;
             public Binding BindingLast;
+            public string Signature;
         }
 
         private static MTLBuffer _buf;
@@ -89,6 +90,17 @@ namespace Ryujinx.Graphics.Metal
 
         private static Binding _frameBinding;
         private static Binding _frameBindingLast;
+
+        // The programs that sampled a scene-class texture this frame, in order. The
+        // count alone already steps the rate hard - zero flat in 803 frames at eleven
+        // or fewer, 37.6% at thirteen - so what those draws actually are is the next
+        // question, and diffing the eleven-draw signature against the thirteen-draw one
+        // names the stages whose presence coincides with the fault.
+        private const int MaxFrameProgs = 40;
+        private const int MaxSignatures = 200;
+        private static readonly string[] _frameProgs = new string[MaxFrameProgs];
+        private static int _frameProgCount;
+        private static readonly Dictionary<string, (long Flat, long Normal)> _signatureStats = new();
         private static readonly Dictionary<string, (long Flat, long Normal)> _bindingStats = new();
         private static long _framesWithNoBinding;
 
@@ -169,6 +181,12 @@ namespace Ryujinx.Graphics.Metal
             _frameBindingLast.NativePtr = nativePtr;
             _frameBindingLast.CanonicalPtr = canonicalPtr;
             _frameBindingLast.Program = program;
+
+            if (_frameProgCount < MaxFrameProgs)
+            {
+                string label = program ?? "?";
+                _frameProgs[_frameProgCount++] = label.Length > 6 ? label[..6] : label;
+            }
 
             _frameBinding.Count++;
         }
@@ -320,6 +338,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.ShapeCount = _frameShapeCount;
                 mine.Binding = _frameBinding;
                 mine.BindingLast = _frameBindingLast;
+                mine.Signature = $"n={_frameBinding.Count} " + string.Join(",", _frameProgs, 0, _frameProgCount);
                 mine.Valid = true;
             }
 
@@ -327,6 +346,7 @@ namespace Ryujinx.Graphics.Metal
             _attachedThisFrame.Clear();
             _frameBinding = default;
             _frameBindingLast = default;
+            _frameProgCount = 0;
             _frameShapeCount = 0;
             _frameUploads = 0;
             _frameBigUploads = 0;
@@ -442,6 +462,16 @@ namespace Ryujinx.Graphics.Metal
                 _bindingStats[lastKey] = flat ? (lf + 1, ln) : (lf, ln + 1);
             }
 
+            if (slot.Signature != null &&
+                (_signatureStats.Count < MaxSignatures || _signatureStats.ContainsKey(slot.Signature)))
+            {
+                (long sf, long sn) = _signatureStats.TryGetValue(slot.Signature, out (long Flat, long Normal) sv)
+                    ? (sv.Flat, sv.Normal)
+                    : (0L, 0L);
+
+                _signatureStats[slot.Signature] = flat ? (sf + 1, sn) : (sf, sn + 1);
+            }
+
             for (int i = 0; i < slot.ShapeCount; i++)
             {
                 (long f, long n) = _shapeStats.TryGetValue(slot.Shapes[i], out (long Flat, long Normal) v) ? (v.Flat, v.Normal) : (0L, 0L);
@@ -468,6 +498,17 @@ namespace Ryujinx.Graphics.Metal
             foreach (KeyValuePair<string, (long Flat, long Normal)> pair in _bindingStats)
             {
                 sb.Append($"\n    flat {pair.Value.Flat,6}  normal {pair.Value.Normal,6}   {pair.Key}");
+            }
+
+            sb.Append($"\n  scene-sampling signatures: {_signatureStats.Count}");
+
+            List<KeyValuePair<string, (long Flat, long Normal)>> top = new(_signatureStats);
+            top.Sort((a, b) => (b.Value.Flat + b.Value.Normal).CompareTo(a.Value.Flat + a.Value.Normal));
+
+            for (int i = 0; i < top.Count && i < 12; i++)
+            {
+                long total = top[i].Value.Flat + top[i].Value.Normal;
+                sb.Append($"\n    flat {top[i].Value.Flat,6} / {total,6} = {(total > 0 ? 100.0 * top[i].Value.Flat / total : 0),5:F1}%  {top[i].Key}");
             }
 
             foreach (KeyValuePair<ulong, (long Flat, long Normal)> pair in _shapeStats)
