@@ -2624,3 +2624,50 @@ with the same geometry, the same pass structure and the same draw counts on both
 The instruments are all in the tree and all hot-swappable, so any future hypothesis is
 one file write away from a measurement. What is missing is a hypothesis, and neither
 adding properties nor removing draws has produced one.
+
+## 2026-08-14 (cont.): the capture tooling, fixed - and what fixing it revealed
+
+The earlier Xcode round is recorded above as a tool misunderstanding rather than a tool
+limit, and that was right, but the harness had two defects of its own.
+
+**The scope never closed.** Present runs OnPresentBegin (which stopped the capture)
+*before* EndScope, so every scoped capture was finalised with its scope still open. That
+is why they came out covering a frame's tail - the UI and the minimap, scene already
+drawn - and why whole-frame queue captures were reached for instead, at hundreds of
+megabytes with the tools crashing while finalising.
+
+**The frame was random.** Flat frames are about 40% at the reproducing save, so most
+traces were of healthy frames, and nothing recorded which kind had been caught.
+
+`CaptureHunter` (RYUJINX_METAL_CAPTURE_FLAT=1, with METAL_CAPTURE_ENABLED=1) fixes both.
+It opens the scope immediately before the pass that samples the scene texture - the same
+predicate the 0x55 control proved lands on the failing consumer - and closes it when that
+pass ends, both well before present. Then it classifies the frame with FlashGuard's
+criterion, keeps the trace only if the frame was flat, and retries otherwise.
+
+It works. First keeper:
+
+    capture hunter: KEPT a flat frame after 2760 attempts
+    (saturated 25/25, mean luma 241): /tmp/ryujinx-flat-2759.gputrace
+
+**2.6 MB**, well-formed (`captured_frames_count = 1`, boundaryLess false), against the
+multi-gigabyte bundles that could not be finalised. A copy is in artifacts/captures.
+
+### The attempt count is itself a result
+
+At 40% flat, a keeper should arrive in two or three attempts. It took 2,760 - the fault
+is suppressed roughly a thousandfold while a capture is running. That is the same
+Heisenbug this file has recorded twice before (a per-frame present log takes it from
+3/min to 0), now measured against a different perturbation, and it is the strongest
+timing evidence yet: whatever produces the white needs a window that an active GPU
+capture closes almost completely.
+
+It also means the trace has to be read with that caveat in mind. It is a genuine flat
+frame - 25 of 25 samples saturated at mean luma 241 - but it is one that happened under
+heavy perturbation, so anything read from it about *timing* is suspect while anything
+read about *state* (bindings, attachments, resource contents at the failing draw) is not.
+
+Reading it is the next step, and the note from the earlier round still applies: the
+Dependencies filter matches encoder names, not textures. Ask "who wrote this texture" in
+the Memory view - select the resource, expand its own usage list - or use Reveal in
+Dependencies from a top-level row.

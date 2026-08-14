@@ -465,6 +465,16 @@ namespace Ryujinx.Graphics.Metal
                 BounceSceneInput();
             }
 
+            // Same predicate as the bounce, which the 0x55 control proved lands on the
+            // pass whose fetch comes back white: open the capture scope here so the
+            // trace holds that pass rather than a whole frame.
+            if (forDraw && CaptureHunter.Enabled &&
+                Cbs.Encoders.CurrentEncoderType != EncoderType.Render &&
+                _encoderStateManager.SceneClassSampledTexture() != null)
+            {
+                CaptureHunter.OnSceneSamplingPassBegin();
+            }
+
             MTLRenderCommandEncoder renderCommandEncoder = Cbs.Encoders.EnsureRenderEncoder();
 
             if (forDraw)
@@ -553,6 +563,8 @@ namespace Ryujinx.Graphics.Metal
             Cbs.Encoders.EndCurrentPass();
 
             _pendingPassEndReason = PassEndReason.Unspecified;
+
+            CaptureHunter.OnPassEnd();
 
             // Sample the watched target right after a pass on it ends. Sampling only on
             // encoder transitions left every chart entry between transitions holding the
@@ -835,6 +847,8 @@ namespace Ryujinx.Graphics.Metal
             // several presents later, never waited on, never logged per frame.
             UploadCorrelator.OnPresent(Cbs, src);
 
+            CaptureHunter.SamplePresentSource(Cbs, src);
+
             // The per-present view of the drawable's texture was never released -
             // one native texture view leaked per frame. The Auto defers the native
             // release until the command buffer using it completes, so this is safe
@@ -846,7 +860,27 @@ namespace Ryujinx.Graphics.Metal
             // Balance the ownership taken at nextDrawable time (Window.Present).
             ObjcOwnership.Release(drawable.NativePtr);
 
+            // The capture attempt has to be judged against the frame it captured, so
+            // this is the one place a wait is taken - and it is safe on evidence: the
+            // CPU-sampling FlashGuard held a sync here every frame and still measured
+            // 35% flat, so the sync does not close the race. Only while hunting.
+            FenceHolder decideFence = null;
+
+            if (CaptureHunter.WantsSyncThisFrame)
+            {
+                decideFence = Cbs.GetFence();
+                decideFence.Get();
+            }
+
             FlushCommandsImpl();
+
+            if (decideFence != null)
+            {
+                decideFence.Wait();
+                decideFence.Put();
+            }
+
+            CaptureHunter.Decide();
 
             // A scoped capture has to be told where a frame begins and ends, and nothing
             // was telling it: without this the scope never opened and the trace came out
