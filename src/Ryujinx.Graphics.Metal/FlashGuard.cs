@@ -123,17 +123,35 @@ namespace Ryujinx.Graphics.Metal
             _buf = device.NewBuffer(Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
         }
 
-        // On by default. The root cause is a driver-level load fault - a long-lived,
-        // uncompressed colour target's Load intermittently brings near-white tile
-        // garbage in place of its content - and every backend-side mechanism was
-        // excluded at measurement power (bindings, arithmetic, coverage, barriers,
-        // residency, counters, MRT dedup, store elision, clear-at-birth, depth usage
-        // flags, alias sync; see the handoff doc). Both crashes that once kept this
-        // mitigation off were fixed - the keep texture is created once and never
-        // resized, and it registers with the command buffer - and it measured 35% -> 0%
-        // with the picture alive. RYUJINX_METAL_FLASHGUARD=0 opts out.
+        // Off by default again, on evidence taken while actually playing.
+        //
+        // It was promoted to default-on after measuring 35% -> 0% flat frames with the
+        // picture alive and no crash while turning the camera. That acceptance was taken
+        // standing still, and standing still is where this fault hides. Three arms, same
+        // build, same save, the same scripted four minutes of walking and panning:
+        //
+        //     guard on,  one queue   crash at 2:16   (commit an already committed buffer)
+        //     guard on,  two queues  crash at 2:11   (silent exit, no assertion)
+        //     guard off             alive at 7:07   130 roam cycles, no errors
+        //
+        // So the warning this comment used to carry - "the process exits during ordinary
+        // play, within a minute or two of camera movement" - was never actually fixed;
+        // eight unattended runs today sat still for five to eight minutes each and never
+        // saw it. The guard does not create the race, it widens it: Texture.SetData takes
+        // Pipeline.Cbs and opens a blit encoder on it with no thread check at all, while
+        // Texture.GetData carefully asks OwnedByCurrentThread first and routes background
+        // callers to their own pool. Movement means terrain streaming means SetData from
+        // thread-pool workers, and the guard's extra full-screen pass widens the window
+        // between that encoder opening and the render thread committing.
+        //
+        // Fix that asymmetry and this can be reconsidered. Until then the artefact is
+        // preferable to the exit, and the cost was never only the crash: at the
+        // reproducing save 39-41% of frames are flat, so the guard repeats four frames in
+        // ten there and the motion judders accordingly.
+        //
+        // RYUJINX_METAL_FLASHGUARD=1 opts in.
         private static readonly bool _defaultEnabled =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_FLASHGUARD") != "0";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FLASHGUARD") == "1";
 
         public static void RefreshToggle()
         {

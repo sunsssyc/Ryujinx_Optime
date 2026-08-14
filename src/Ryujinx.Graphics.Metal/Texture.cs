@@ -895,8 +895,43 @@ namespace Ryujinx.Graphics.Metal
             return PinnedSpan<byte>.UnsafeFromSpan(GetData(resources.GetPool(), resources.GetFlushBuffer(), layer, level));
         }
 
+        /// <summary>
+        /// GetData asks OwnedByCurrentThread and sends background callers to their own
+        /// pool; SetData below takes Pipeline.Cbs and opens a blit encoder on it with no
+        /// such check, so a thread-pool worker can be mid-encoder on the render thread's
+        /// command buffer when the render thread commits it. That is the shape of the
+        /// crash that appears within two minutes of moving and never while standing
+        /// still. This counts the off-thread callers so the asymmetry can be confirmed
+        /// rather than argued. RYUJINX_METAL_LOG_SETDATA_THREAD=1.
+        /// </summary>
+        private static readonly bool _logSetDataThread =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_LOG_SETDATA_THREAD") == "1";
+
+        private static int _setDataOffThread;
+        private static int _setDataOnThread;
+
+        private void NoteSetDataThread()
+        {
+            if (!_logSetDataThread)
+            {
+                return;
+            }
+
+            if (Renderer.CommandBufferPool.OwnedByCurrentThread)
+            {
+                _setDataOnThread++;
+            }
+            else if (++_setDataOffThread % 200 == 1)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"SetData OFF the render thread: {_setDataOffThread} (on-thread {_setDataOnThread}) " +
+                    $"{Info.Width}x{Info.Height} {MtlFormat} thread={System.Threading.Thread.CurrentThread.Name ?? "?"}");
+            }
+        }
+
         public void SetData(MemoryOwner<byte> data)
         {
+            NoteSetDataThread();
             OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
             HdrPassProbe.NoteNonRenderWrite(this, "upload");
@@ -985,6 +1020,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data, int layer, int level)
         {
+            NoteSetDataThread();
             OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
             UploadCorrelator.NoteUpload(this);
@@ -995,6 +1031,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data, int layer, int level, Rectangle<int> region)
         {
+            NoteSetDataThread();
             OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);
             UploadCorrelator.NoteUpload(this);

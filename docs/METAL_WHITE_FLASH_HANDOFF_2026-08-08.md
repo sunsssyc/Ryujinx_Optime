@@ -2454,3 +2454,37 @@ queue topology, pass structure, barriers, residency and every host write channel
 That is a driver texture-read fault, and it is now expressible as a self-contained
 report: the constant-injection run is the reproduction, and the ledger above is the
 list of everything it is not.
+
+## 2026-08-14: FlashGuard is defaulted off again - it crashes during play
+
+Reported from ordinary play: stutter, then an exit. Both are the guard.
+
+The stutter is not a bug and not a frame-rate cost - the guard is GPU-side, decides in
+the shader, and holds 30fps. It repeats the previous frame whenever it classifies one
+flat, and at the reproducing save 39-41% of frames are flat, so four frames in ten there
+are duplicates and motion judders accordingly. Typical daylight play is nearer 11%, night
+effectively zero.
+
+The exit is a real crash, and the acceptance that promoted this mitigation to default-on
+missed it because that acceptance was taken standing still. Three arms, same build, same
+save, the same scripted four minutes of walking and panning (tools/roam.py):
+
+    guard on,  one queue    crash at 2:16   commit an already committed command buffer
+    guard on,  two queues   crash at 2:11   silent exit, no assertion at all
+    guard off               alive at 7:07   130 roam cycles, no errors
+
+The queue merge is exonerated - both topologies die, and the older one dies silently,
+which is exactly the failure this file's FlashGuard comment described and claimed fixed.
+Eight unattended runs earlier the same day sat still for five to eight minutes each and
+never saw it; movement is the variable, and movement means terrain streaming.
+
+Underlying asymmetry, now instrumented (RYUJINX_METAL_LOG_SETDATA_THREAD=1):
+Texture.GetData asks CommandBufferPool.OwnedByCurrentThread and routes background callers
+to their own pool. Texture.SetData does no such check - it takes Pipeline.Cbs and opens a
+blit encoder on it from whatever thread calls it. A thread-pool worker can therefore be
+mid-encoder on the render thread's command buffer while the render thread commits it. The
+guard does not create that race; its extra full-screen pass at present widens the window.
+
+Defaulted off. RYUJINX_METAL_FLASHGUARD=1 opts in for anyone who prefers the judder to
+the artefact. Fixing the SetData thread asymmetry is the prerequisite for reconsidering
+the default, and would be worth doing on its own account.
