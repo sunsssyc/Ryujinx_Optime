@@ -465,14 +465,42 @@ namespace Ryujinx.Graphics.Metal
                 BounceSceneInput();
             }
 
+            // Close a window whose watched pass has already ended. Done here, at the
+            // top of encoder acquisition with no pass open, because it needs a flush and
+            // flushing from inside EndCurrentPass would recurse.
+            if (CaptureHunter.ClosePending && Cbs.Encoders.CurrentEncoderType != EncoderType.Render)
+            {
+                FlushCommandsImpl();
+                CaptureHunter.CloseWindow();
+            }
+
             // Same predicate as the bounce, which the 0x55 control proved lands on the
-            // pass whose fetch comes back white: open the capture scope here so the
-            // trace holds that pass rather than a whole frame.
+            // pass whose fetch comes back white. Flush first so the command buffer that
+            // will carry that pass is created inside the capture window - Metal records
+            // nothing for a command buffer that was not both created and committed
+            // inside it, which is why the first attempt produced an empty trace.
+            // Target the composite by what it writes, not by what it samples. The
+            // sampled-texture predicate picked the G-buffer pass instead: it keys on a
+            // width of 1000 or more, and dynamic resolution had the scene at 800x448, so
+            // the real scene textures never matched. The composite is the pass that
+            // writes the full resolution surface, and that stays 1920x1080 whatever
+            // dynamic resolution does to the scene.
             if (forDraw && CaptureHunter.Enabled &&
                 Cbs.Encoders.CurrentEncoderType != EncoderType.Render &&
-                _encoderStateManager.SceneClassSampledTexture() != null)
+                _encoderStateManager.RenderTargets[0] is Texture compositeTarget &&
+                CaptureHunter.IsPresentedSurface(compositeTarget))
             {
-                CaptureHunter.OnSceneSamplingPassBegin();
+                // Start first, flush second. StartCapture only records command buffers
+                // created after it, and flushing first meant the command buffer that
+                // would carry the composite was born before the window opened - the
+                // capture then held one command buffer with a blit encoder, no render
+                // encoder and no draws. Opening the window first makes the flush's fresh
+                // command buffer the one Metal records.
+                if (CaptureHunter.WantsStart)
+                {
+                    CaptureHunter.OnSceneSamplingPassBegin(DrawCount);
+                    FlushCommandsImpl();
+                }
             }
 
             MTLRenderCommandEncoder renderCommandEncoder = Cbs.Encoders.EnsureRenderEncoder();
@@ -564,7 +592,7 @@ namespace Ryujinx.Graphics.Metal
 
             _pendingPassEndReason = PassEndReason.Unspecified;
 
-            CaptureHunter.OnPassEnd();
+            CaptureHunter.OnPassEnd(DrawCount);
 
             // Sample the watched target right after a pass on it ends. Sampling only on
             // encoder transitions left every chart entry between transitions holding the
@@ -847,6 +875,7 @@ namespace Ryujinx.Graphics.Metal
             // several presents later, never waited on, never logged per frame.
             UploadCorrelator.OnPresent(Cbs, src);
 
+            CaptureHunter.NotePresentSource(src);
             CaptureHunter.SamplePresentSource(Cbs, src);
 
             // The per-present view of the drawable's texture was never released -

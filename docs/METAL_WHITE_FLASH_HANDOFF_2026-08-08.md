@@ -2671,3 +2671,33 @@ Reading it is the next step, and the note from the earlier round still applies: 
 Dependencies filter matches encoder names, not textures. Ask "who wrote this texture" in
 the Memory view - select the resource, expand its own usage list - or use Reveal in
 Dependencies from a top-level row.
+
+### Caught: a GPU trace of the flash itself
+
+Aiming took five tries, and the four that failed all keyed on properties that move:
+
+  - the sampled texture's size (dynamic resolution had the scene at 800x448, under
+    the 1000-wide floor, so the hook fired on the G-buffer pass instead)
+  - the render target's width (the drawable is 2560x1406 and matched first)
+  - widening the window to eight drawing passes (thirteen encoders, none white)
+
+The fifth aims by identity instead: the correlator already knows which texture reached
+the screen, so CaptureHunter records its storage root at present and opens the window on
+the next frame's pass whose colour attachment 0 *is* that storage. Nothing about that
+moves - not dynamic resolution, not the shader hashes that changed under CodeGenVersion
+bumps.
+
+It landed. The trace's own preview is the fault: a pure white 2560x1406 frame with the
+HUD intact over it - hearts, ability icon, minimap - which is the artefact exactly as
+this document has described it since July. Five command buffers, four render encoders,
+six draw calls: small enough to read end to end.
+
+A copy is in artifacts/captures/flat-frame-caught.gputrace.
+
+What it still has to be asked, in Xcode: find the encoder whose attachment is white,
+select its draw, and open the texture it samples. Scene contents there means the memory
+was correct and the fetch returned white - the driver read fault, positively shown for
+the third time and now with a trace to attach to a report. White contents there means
+the texture was already white and something upstream of the read is still unaccounted
+for. Note that textures arrive through argument buffers here, so they appear under
+Indirect as resident resources rather than as individual texture bindings.
