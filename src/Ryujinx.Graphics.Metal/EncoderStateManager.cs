@@ -2051,6 +2051,13 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private static bool _elideEmptyStore;
 
+        /// <summary>
+        /// The program whose sampled texture the correlator photographs. Defaults to the
+        /// pass-through blit that writes the presented surface.
+        /// </summary>
+        private static readonly string _watchLabel =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_LABEL") ?? "480117";
+
         private static bool _passStoreUnknown;
         private static ulong _passColorMask;
         private static bool _passHasDepth;
@@ -2483,12 +2490,15 @@ namespace Ryujinx.Graphics.Metal
                                         gpuAddress, nativePtr, sceneCandidate.CanonicalPtr, program.DebugLabel,
                                         null);
 
-                                    // Sample what the composite WRITES, not what it reads.
-                                    if (program.IsTexelFetchComposite &&
-                                        _currentState.RenderTargets is { Length: > 0 } &&
-                                        _currentState.RenderTargets[0] != null)
+                                    // The source of the pass-through blit that writes the
+                                    // presented surface. That shader has no arithmetic - one
+                                    // sample, written straight out - so if its source holds a
+                                    // picture while the screen is a uniform fill, the fault
+                                    // is in its UVs and not upstream of it at all.
+                                    if (_watchLabel.Length != 0 && program.DebugLabel != null &&
+                                        program.DebugLabel.StartsWith(_watchLabel, StringComparison.Ordinal))
                                     {
-                                        UploadCorrelator.NoteCompositeOutput(_currentState.RenderTargets[0]);
+                                        UploadCorrelator.NoteCompositeOutput(sceneCandidate);
                                     }
                                 }
 

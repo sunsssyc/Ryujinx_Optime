@@ -4143,3 +4143,31 @@ shader's source texture at present, the way the texel-fetch shader's input was s
 compare its uniformity against the presented surface's. If the source has structure while the
 output does not, the UVs are the fault and the whole search moves to the vertex stage that
 produces `inAttr0` and `position.w`.
+
+### The UVs are degenerate - the white is one texel, stretched over the screen
+
+Gated arm: luma 140, 11,399 frames, flat 23.12%.
+
+    blit source, flat frames    19.43 distinct of 25 adjacent texels   (a picture)
+    blit output, same frames    min 247  max 254  sd 2.0               (a uniform fill)
+
+The shader between them does one thing: `out.color0 = tex.sample(samp, float2(u, v))`. There
+is no arithmetic that could turn a picture into a fill. So on a white frame the sampler is
+returning the same texel for every pixel, which means `u` and `v` are constant across the
+primitive - **the interpolated UVs collapse.**
+
+That is the fault, and it explains every result in this document that looked correct and
+useless. The source texture holds a picture, the constants are exact, `render_scale` is 1.0,
+the argument buffer is never overwritten, residency is declared, nothing overwrites anything
+- all true, all irrelevant, because the failure is in the interpolation feeding a
+pass-through blit, and nobody had looked at a shader that does no work.
+
+It also explains the colour. The white is not 255 and never was; it is 247-254, which is
+simply the value of whichever bright texel the collapsed UV happens to land on.
+
+**Next, and this is now a bug hunt rather than a search:** `u` and `v` come from
+`in.inAttr0.xy * in.position.w` scaled by `1.0f / temp_0`, where `temp_0` is the interpolated
+w. Read `480117a3b1123d65-vertex.metal`, which the same trace already dumped, and find what
+makes its outputs degenerate on a fifth of frames - a zero or NaN `w`, a vertex buffer that
+is not what it should be, or attributes that are not being written at all. The vertex stage
+of this draw has never been examined.
