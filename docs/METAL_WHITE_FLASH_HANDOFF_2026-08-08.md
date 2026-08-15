@@ -3055,3 +3055,49 @@ the pipeline came back null, the draws were skipped, and the scene rendered **bl
 the HUD intact** - the same shape as the artefact. `Fragment shader linking failed` in
 the log is what separated them. Any shader patch must be checked for link failures before
 its measurement is believed.
+
+## 2026-08-15: Metal's own validation layer - the cleverer comparison, never run until now
+
+User feedback first, and it corrects an overstatement: with the read-after-write split on
+the game still "flashes constantly". That is right. 45% to 24% at 30fps is thirteen white
+frames a second becoming seven. Statistically half; perceptually still a strobe. The fix
+is real and the framing was not - only something near zero crosses that threshold.
+
+Asked for a cleverer way to compare the two backends, the answer was sitting unused:
+**Metal ships a validation layer whose entire job is to report undefined behaviour.** If
+this backend asks Metal for something MoltenVK never asks for, that is the tool designed
+to name it.
+
+    METAL_DEVICE_WRAPPER_TYPE=1  MTL_SHADER_VALIDATION=1  MTL_DEBUG_LAYER=1
+
+It found two real API violations, each within a minute, neither of which any probe in
+this investigation could have seen.
+
+**1. Purgeable state set on in-flight buffers.**
+
+    -[MTLDebugBuffer setPurgeableState:]:568: failed assertion
+    `Cannot set purgeability state to volatile while resource is in use by a command buffer.`
+
+`DisposableBuffer.Dispose` marked every buffer `MTLPurgeableState.Empty` before releasing
+it - telling the system its contents may be discarded immediately - while a command buffer
+was still using it. These buffers include the argument buffers carrying texture resource
+ids. It was looked at earlier in this investigation and dismissed because `Auto<T>` defers
+disposal; validation says the deferral is not enough. Removed
+(RYUJINX_METAL_PURGE_ON_DISPOSE=1 restores it). **Flat rate unchanged at 25%.**
+
+**2. Scissor rects of 65535x65535 against a 1x1 render pass.**
+
+    (rect.x(0) + rect.width(65535))(65535) must be <= render pass width(1)
+
+The clamp for this already existed and was silently inert: `GetRenderPassSize()` walks
+`_currentState.RenderTargets` and falls back to `ulong.MaxValue`, so `Math.Min(65535,
+MaxValue)` passes the sentinel straight through - and `_currentState` holds nothing for
+passes the helper shaders build. Now recorded where the descriptor is actually built.
+**Flat rate unchanged at 27.5%**, and validation still reports it, so at least one path
+reaching `SetScissorRects` is still not covered.
+
+Both are genuine correctness bugs and neither is the flash. The method, though, is the
+one worth keeping: it produced two findings in the time every other approach tonight took
+an hour to produce one, and it is the only technique so far that reports what this backend
+does *wrong* rather than what it does *differently*. The obvious continuation is to keep
+fixing what it reports until it is silent - the remaining scissor path first.

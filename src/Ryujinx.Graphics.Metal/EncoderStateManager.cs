@@ -504,6 +504,8 @@ namespace Ryujinx.Graphics.Metal
                 sceneCheck.Width >= 1500 && sceneCheck.Width <= 1700 &&
                 sceneCheck.MtlFormat == MTLPixelFormat.RG11B10Float;
 
+            NotePassSize(0, 0);
+
             for (int i = 0; i < Constants.MaxColorAttachments; i++)
             {
                 if (_currentState.RenderTargets[i] is Texture tex)
@@ -520,7 +522,13 @@ namespace Ryujinx.Graphics.Metal
                     FeedbackProbe.NoteAttachment(i, tex);
                     UploadCorrelator.NoteAttachment(tex);
                     NoteAttachmentWritten(tex.CanonicalPtr);
+                    NotePassSize((ulong)tex.Width, (ulong)tex.Height);
                 }
+            }
+
+            if (_passWidth == 0 && _currentState.DepthStencil != null)
+            {
+                NotePassSize((ulong)_currentState.DepthStencil.Width, (ulong)_currentState.DepthStencil.Height);
             }
 
             MTLRenderPassDepthAttachmentDescriptor depthAttachment = renderPassDescriptor.DepthAttachment;
@@ -1704,8 +1712,28 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        // The size of the pass actually being encoded, recorded where the descriptor is
+        // built. Deriving it from _currentState instead was wrong twice over: the state
+        // can hold targets bound for an earlier pass, and for passes the helper shaders
+        // build it holds none at all - in which case the fallback returned ulong.MaxValue
+        // and the scissor clamp below became a no-op. Metal's validation layer caught it
+        // immediately: 65535x65535 scissor rects against a 1x1 render pass.
+        private static ulong _passWidth;
+        private static ulong _passHeight;
+
+        internal static void NotePassSize(ulong width, ulong height)
+        {
+            _passWidth = width;
+            _passHeight = height;
+        }
+
         private readonly (ulong Width, ulong Height) GetRenderPassSize()
         {
+            if (_passWidth != 0 && _passHeight != 0)
+            {
+                return (_passWidth, _passHeight);
+            }
+
             for (int i = 0; i < _currentState.RenderTargets.Length; i++)
             {
                 if (_currentState.RenderTargets[i] is Texture tex)

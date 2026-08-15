@@ -112,6 +112,20 @@ namespace Ryujinx.Graphics.Metal
         // exactly how a "this build might suppress it" result was once produced.
         private static double _lumaFlatSum, _lumaNormalSum;
 
+        // What a viewer actually counts is flashes, not flat frames. Consecutive flat
+        // frames are one flash; a change that halves the flat *frames* while leaving the
+        // number of runs alone looks like no change at all, which is what was reported
+        // after the read-after-write split took 45% to 24%. Runs, run length and the gap
+        // between them are the perceptual quantities, so measure those too.
+        private static bool _prevFlat;
+        private static long _runs;
+        private static long _runFrames;
+        private static long _longestRun;
+        private static long _currentRun;
+        private static long _gapSum;
+        private static long _currentGap;
+        private static long _gaps;
+
         // Two questions the captures could not settle by eye, asked as numbers instead.
         //
         // The HUD renders correctly over the white on a flat frame, and the hardware
@@ -501,11 +515,38 @@ namespace Ryujinx.Graphics.Metal
             if (flat)
             {
                 _lumaFlatSum += lumaSum / Pixels;
+                _runFrames++;
+                _currentRun++;
+
+                if (!_prevFlat)
+                {
+                    _runs++;
+
+                    if (_currentGap > 0)
+                    {
+                        _gapSum += _currentGap;
+                        _gaps++;
+                        _currentGap = 0;
+                    }
+                }
             }
             else
             {
                 _lumaNormalSum += lumaSum / Pixels;
+                _currentGap++;
+
+                if (_prevFlat)
+                {
+                    if (_currentRun > _longestRun)
+                    {
+                        _longestRun = _currentRun;
+                    }
+
+                    _currentRun = 0;
+                }
             }
+
+            _prevFlat = flat;
 
             if (flat)
             {
@@ -630,6 +671,10 @@ namespace Ryujinx.Graphics.Metal
             {
                 sb.Append($"\n    flat {pair.Value.Flat,6}  normal {pair.Value.Normal,6}   {pair.Key}");
             }
+
+            sb.Append($"\n  FLASHES: {_runs} runs, {(_runs > 0 ? (double)_runFrames / _runs : 0):F2} frames each, " +
+                      $"longest {_longestRun}, mean gap {(_gaps > 0 ? (double)_gapSum / _gaps : 0):F1} frames" +
+                      $" -> {(_runs > 0 && _flatFrames + _normalFrames > 0 ? _runs * 30.0 / (_flatFrames + _normalFrames) : 0):F2} flashes/sec at 30fps");
 
             sb.Append("\n  presented storage, by outcome:");
 
