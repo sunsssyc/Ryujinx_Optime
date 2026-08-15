@@ -3901,3 +3901,25 @@ MSL declares them as `constant Textures &textures [[buffer(19)]]`, so this needs
 declaration emitter, every access site, and the backend's binding path to change together,
 plus a `CodeGenVersion` bump and a full retranslation. It is the only untried thing that
 removes the indirection whose *allocation strategy alone* moves the rate by eleven points.
+
+### A hole in every input measurement here: the composite may draw more than once
+
+`NoteSceneBinding` keeps the *last* scene-class binding of the frame, and the per-frame
+program signatures show programs repeating within a single frame - `7e5f0a` twice in the
+sample above, `220ff4` three times in an earlier one. Nothing in this document establishes
+that the composite draws exactly once per frame.
+
+If it draws more than once, every input measurement recorded here describes the last
+invocation only. "The input is not flat", globally and locally, and "nothing overwrites it
+afterwards" would then be statements about one invocation while the white could be produced
+by another - one that reads a different texture, or the same texture at a different point in
+the frame.
+
+This does not overturn anything measured about the *output* - the white is uniform, the
+constants are exact, `render_scale` is 1.0, the argument buffer is never overwritten - but it
+does mean the input side is less settled than the rest of this section reads.
+
+**Check this first next session, before anything else:** count the composite's draws per
+frame, split by outcome. It is a two-line change to the probe that already exists
+(`IsTexelFetchComposite` identifies the program), and if the count is greater than one, the
+input measurements need redoing per invocation rather than per frame.
