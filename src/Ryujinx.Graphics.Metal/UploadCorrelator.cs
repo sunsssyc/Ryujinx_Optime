@@ -80,6 +80,7 @@ namespace Ryujinx.Graphics.Metal
             public int VertexStride;
             public (int Count, int Inst, int First, int Indexed) Draw;
             public string Indices;
+            public string Attrib;
             public IntPtr ArgPtr;
             public ulong[] ArgExpected;
             public int ArgCount;
@@ -308,6 +309,16 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        public static void NoteVertexAttrib(int format, int offset, int bufferIndex)
+        {
+            if (Enabled)
+            {
+                _frameAttrib = $"fmt={format} off={offset} buf={bufferIndex}";
+            }
+        }
+
+        private static string _frameAttrib;
+        private static readonly Dictionary<string, (long Flat, long Normal)> _attribStats = new();
         private static string _frameIndices;
         private static readonly Dictionary<string, (long Flat, long Normal)> _indexStats = new();
         private static int _frameVertexStride = -1;
@@ -782,6 +793,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.VertexStride = _frameVertexStride;
                 mine.Draw = _frameDraw;
                 mine.Indices = _frameIndices;
+                mine.Attrib = _frameAttrib;
                 mine.ArgPtr = _frameArgPtr;
                 mine.ArgCount = _frameArgCount;
 
@@ -833,6 +845,7 @@ namespace Ryujinx.Graphics.Metal
             _frameVertexStride = -1;
             _frameDraw = (-1, -1, -1, -1);
             _frameIndices = null;
+            _frameAttrib = null;
             _frameArgPtr = IntPtr.Zero;
             _frameArgCount = 0;
             _frameLateWriter = null;
@@ -962,6 +975,12 @@ namespace Ryujinx.Graphics.Metal
             {
                 _normalDrawSum += slot.CompositeDraws;
                 _normalDrawN++;
+            }
+
+            if (slot.Attrib != null && _attribStats.Count < 32)
+            {
+                (long af2, long an2) = _attribStats.TryGetValue(slot.Attrib, out (long Flat, long Normal) av2) ? (av2.Flat, av2.Normal) : (0L, 0L);
+                _attribStats[slot.Attrib] = flat ? (af2 + 1, an2) : (af2, an2 + 1);
             }
 
             if (slot.Indices != null && _indexStats.Count < 32)
@@ -1247,6 +1266,11 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($", normal min {(_normalFrames > 0 ? _normalMinSum / _normalFrames : 0):F0} max {(_normalFrames > 0 ? _normalMaxSum / _normalFrames : 0):F0} sd {(_normalFrames > 0 ? _normalSdSum / _normalFrames : 0):F1}");
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
+
+            foreach (KeyValuePair<string, (long Flat, long Normal)> a2 in _attribStats)
+            {
+                sb.Append($"\n  vertex attrib0 {a2.Key}: flat {a2.Value.Flat}, normal {a2.Value.Normal}");
+            }
 
             foreach (KeyValuePair<string, (long Flat, long Normal)> j in _indexStats)
             {

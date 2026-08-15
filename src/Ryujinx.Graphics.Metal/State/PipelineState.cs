@@ -128,6 +128,15 @@ namespace Ryujinx.Graphics.Metal
                 attrib.Format = uid.Format;
                 attrib.Offset = uid.Offset;
                 attrib.BufferIndex = uid.BufferIndex;
+
+                // The last unread link. A zero-size format, an offset past the stride, or
+                // an attribute that is simply absent all leave the shader's zero-initialised
+                // attribute untouched - constant across the primitive, which is a screen
+                // filled with one texel.
+                if (i == 0)
+                {
+                    UploadCorrelator.NoteVertexAttrib((int)uid.Format, (int)uid.Offset, (int)uid.BufferIndex);
+                }
             }
 
             for (int i = 0; i < VertexBindingDescriptionsCount; i++)

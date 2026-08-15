@@ -4394,3 +4394,33 @@ indistinguishable from a fetch of zeros - which is exactly the observed fault.
 
 Read `MTLVertexDescriptor`'s attribute 0 format, offset and bufferIndex at this draw, split
 by outcome. It is the last link.
+
+### The attribute probe measures pipeline creation, not the draw
+
+    vertex attrib0 fmt=27 off=0 buf=0   flat 0, normal 46
+    vertex attrib0 fmt=29 off=0 buf=0   flat 4, normal 14
+    vertex attrib0 fmt=30 off=0 buf=0   flat 1, normal 8
+    ... six rows, seventy-seven events in total
+
+Seventy-seven, against 11,399 frames and 2,484 flat ones. `PipelineState` builds the vertex
+descriptor when a *pipeline* is created and pipelines are cached, so these rows record which
+frames happened to compile a pipeline - not which descriptor was in force at the blit's draw.
+Splitting them by outcome is meaningless and the numbers must not be read as a result. Noted
+here because the count made it obvious immediately; a probe firing 77 times where 11,399 were
+expected is the same class of error as the four false negatives caught earlier today, and the
+same check caught it.
+
+The real measurement takes the descriptor of the pipeline *in use* at that draw. The blit's
+pipeline is one specific cached object; reading its attribute 0 once and confirming it is
+stable is enough to clear or convict it, and it does not need a per-frame split at all - a
+descriptor that is wrong is wrong on every frame, which would make the fault constant rather
+than intermittent. That argument alone makes the vertex descriptor an unlikely culprit, and
+it is worth stating before spending another arm on it: **every remaining candidate in the
+fetch is static, while the fault is intermittent at one frame in five.**
+
+That mismatch is the most useful thing this section produces. The collapse is intermittent,
+so whatever causes it must itself vary frame to frame - and of everything in the chain, the
+only things that vary are the buffer contents (measured: correct), the indices (measured:
+correct), and the draw parameters (measured: constant). The chain as drawn cannot produce an
+intermittent fault, which means one of its links is being measured in a way that misses the
+frames that matter - most plausibly the ones sampled at present rather than at the draw.
