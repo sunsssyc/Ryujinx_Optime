@@ -3339,3 +3339,30 @@ unexplained: a minority of colour attachments arrive with `MTLStoreAction.Unknow
 though every store assignment in the backend is `Store` unless `_elideEmptyStore` is set,
 and its hot file is absent - some of the traffic may be the GUI's own Metal use rather than
 the emulator's, which the probe does not yet separate.
+
+### Probe status after the second attempt
+
+The Metal half is now clean: a full session, 15,768 texture descriptors, and per-frame
+lines whose load/store labels are correct (an earlier build had the `MTLLoadAction` indices
+transposed, so its "load" column was really Clear). Steady state is ~597 render encoders
+and ~5,200 `useResource` declarations per frame, all of them read-only or read-write, none
+write-only, and ~8 colour attachments per frame still arriving with
+`MTLStoreAction.Unknown` despite every store assignment in the backend being `Store` while
+`_elideEmptyStore` is off. That last one is unexplained and worth chasing.
+
+The Vulkan half is still not usable, for three different reasons across three attempts:
+the texture log was capped; then the run never left shader loading inside its window
+(`CodeGenVersion` 7378 invalidated the Vulkan disk cache too, so it retranslates from
+scratch and needs well over five minutes); then a stale `pkill` from a previous background
+job killed it just after it reached "Shader cache loaded" with 3,829 textures logged.
+
+One real gap remains in the instrument: **no FRAME line has ever been produced under
+MoltenVK**, even with `presentDrawable:atTime:` hooked and a commit-count fallback. So the
+per-frame half of the comparison does not work under Vulkan yet and the present path needs
+to be found - `[CAMetalDrawable present]` on the drawable itself is the obvious next
+candidate, since it is not a command-buffer method and nothing hooks it.
+
+The texture-descriptor comparison is the part that is nearly ready, and the raw counts so
+far (Metal 15,768 against MoltenVK's few thousand, and MoltenVK's flattening out while
+Metal keeps climbing) are suggestive but must not be quoted until both runs cover the same
+gameplay window - the earlier version of exactly this comparison was invalidated by that.
