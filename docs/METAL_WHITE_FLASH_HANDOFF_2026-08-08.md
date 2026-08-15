@@ -4497,3 +4497,35 @@ Deferred deletion, own allocation, forced full rebind, deferred stores, the reci
 in two forms, the index buffer's lifetime, and now a forced encoder split - one made it worse,
 one broke the picture, and the rest did nothing measurable. The only change that has ever
 moved it remains the read-after-write split itself, which halved it and is on by default.
+
+### Full serialisation was already tried, and it reframes everything
+
+An old result in this ledger, under-used all day: **full serialisation changed nothing.** If
+ordering every pass against every other does not remove the flash, then no ordering
+intervention will - which is consistent with today's seven, four of which were orderings of
+one kind or another.
+
+It also means the read-after-write split's 45% -> 24% was never about ordering. What else
+does ending a pass do? It resolves the attachment out of tile memory into the texture. On
+this hardware a render target's contents live in tile memory until the pass ends; a later
+pass that samples that texture reads the *texture*, and whether the texture holds what the
+tile held depends on the store having happened.
+
+So the split's real effect is plausibly that it forces stores that would otherwise be
+deferred or elided - and the residual 20% would be the frames where the blit samples a
+texture whose contents are still, in some sense, not there. That is a different axis from
+both ordering and from the values this document has spent the day measuring, and it explains
+why every value came out correct: the bytes Ryujinx wrote are correct, the descriptors are
+correct, and the texture the GPU actually reads is simply not the one those bytes went into
+yet.
+
+**This supersedes the "frame structure" direction proposed in the previous section.** The
+encoder count is not interesting in itself; what matters is which of those encoders store
+their attachment and which do not. `FixupStoreActions` already exists and already
+distinguishes those cases - it is the code that turns an `Unknown` store into `DontCare` for
+a zero-draw pass, and turning it on broke the picture entirely, which is itself evidence that
+stores on this path are load-bearing in a way nobody has mapped.
+
+Next: log, per frame and split by outcome, the store action actually resolved for the blit's
+source texture's last writing pass. Not how many encoders there were - what happened to that
+one attachment.
