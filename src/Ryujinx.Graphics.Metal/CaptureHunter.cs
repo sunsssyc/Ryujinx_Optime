@@ -212,7 +212,7 @@ namespace Ryujinx.Graphics.Metal
         private static readonly int _passesToKeep =
             int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_CAPTURE_PASSES"), out int keep) && keep > 0
                 ? keep
-                : 8;
+                : 12;
 
         /// <summary>
         /// Called after the caller has flushed, so the command buffer holding the

@@ -2701,3 +2701,48 @@ the third time and now with a trace to attach to a report. White contents there 
 the texture was already white and something upstream of the read is still unaccounted
 for. Note that textures arrive through argument buffers here, so they appear under
 Indirect as resident resources rather than as individual texture bindings.
+
+### What the captures said, and the old lead they reopened
+
+Three windows were captured, each a verified flat frame, each read in Xcode.
+
+**The present filter is faithful.** The pass that writes the drawable is the emulator's
+own FSR sharpener, labelled "Present Color RCAS Sharp" in the trace (the scaling filter
+was enabled in this session - a variable nothing in this investigation had ever
+controlled for). Its input and its output were opened side by side: input
+`Texture 0x75c191400`, 1920x1080 RGBA8Unorm, **already uniform white with the HUD over
+it**; output identical. RCAS reproduced a white input faithfully. It is not the cause,
+and the scaling filter is not the cause.
+
+**The scene is intact in the same frame.** The G-buffer pass in that same flat frame
+carries eight colour attachments plus depth, all showing the scene correctly - trees,
+character, ground. Confirms the earlier capture's finding, now on a frame known to be
+flat rather than assumed.
+
+**Nothing in the frame writes the white surface.** Two different windows - one aimed at
+the presented surface's storage, one opened at the frame's first draw and kept for
+twelve drawing passes, fifteen render encoders - contain no encoder whose attachment is
+white. Filtering the Memory view by the presented texture's parent returns nothing,
+because encoders bind the *view*, not the parent; filtering by the view returns only the
+present read.
+
+That third point lands on something this document recorded on 2026-08-02 and then let
+go of:
+
+> The Metal backend never writes the presented texture in the three frames before
+> present - no MRT attachment, no SetData, no CopyTo, identical on good and bad frames.
+
+Taken together with today's captures, the reading is that **the white surface is not
+produced during the frame at all; it is selected for presentation already white**. The
+reason four aiming strategies could not find the encoder that writes it may simply be
+that no such encoder exists.
+
+That was closed at the time by the cross-backend comparison: the present-choice table is
+byte-identical between Metal and Vulkan (same guest addresses, same alternation). But
+that test compared *which guest address* was chosen, not *what the host texture behind
+that address contained*. Those are different questions and only the first was answered.
+
+Next, and it needs no capture and no GUI: for the texture actually handed to Window.Present
+on a flat frame, record when its host storage was last written and by what. The correlator
+already has the identity and the per-frame classification; this is one more field in the
+same table.

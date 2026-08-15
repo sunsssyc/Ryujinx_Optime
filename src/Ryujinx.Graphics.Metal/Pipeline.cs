@@ -485,10 +485,14 @@ namespace Ryujinx.Graphics.Metal
             // the real scene textures never matched. The composite is the pass that
             // writes the full resolution surface, and that stays 1920x1080 whatever
             // dynamic resolution does to the scene.
-            if (forDraw && CaptureHunter.Enabled &&
-                Cbs.Encoders.CurrentEncoderType != EncoderType.Render &&
-                _encoderStateManager.RenderTargets[0] is Texture compositeTarget &&
-                CaptureHunter.IsPresentedSurface(compositeTarget))
+            // No aiming predicate any more. Every one of them opened the window too
+            // late: the capture that finally showed the fault proved the 1920x1080
+            // surface was already white when it arrived and that no encoder inside the
+            // window ever wrote it, so the writer runs earlier in the frame. The
+            // composite is the frame's second pass, so starting at the frame's first
+            // draw and keeping a dozen drawing passes contains it by construction.
+            if (forDraw && CaptureHunter.WantsStart &&
+                Cbs.Encoders.CurrentEncoderType != EncoderType.Render)
             {
                 // Start first, flush second. StartCapture only records command buffers
                 // created after it, and flushing first meant the command buffer that
