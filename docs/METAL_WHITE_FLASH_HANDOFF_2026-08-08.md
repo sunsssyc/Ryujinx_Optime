@@ -2912,3 +2912,31 @@ sets from `IsMoltenVk` and are therefore also true on this machine. Not a diverg
 
 A systematic diff of the whole capability struct has not been done and is the obvious
 place to resume: it is a read, not an experiment, and this axis has never been walked.
+
+### Cost, coverage, and the default
+
+Measured properly rather than assumed, all A/B/A inside single daylight windows:
+
+    variant                              flat rate        passes/frame   sync wait/120f
+    off                                  37-45%           197-200        110-190ms
+    colour attachments, cb scope         24-28%           ~620           ~570ms
+    + depth, images, blit writes         25.0%            ~640           ~1050ms
+    frame scope                          25.3%            2512           10800ms
+
+The extra write channels and the wider scope buy nothing and cost a great deal, so both
+are removed - colour attachments at command-buffer scope is the whole of the benefit.
+
+Frame rate at the reproducing save, hot-swapped:
+
+    split on    30.01 FPS (33.32ms)  FIFO 28.5%
+    split off   29.99 FPS (33.34ms)  FIFO 29.8%
+
+The extra sync wait is about 4.7ms a frame against 1.2ms, and both fit inside the 33ms
+budget at this location. No measurable frame cost, so it is now on by default
+(RYUJINX_METAL_RAW_SPLIT=0 opts out). The caveat is honest: the cost was measured at one
+location with headroom, and a heavier scene has not been tried.
+
+One process note, because it cost a measurement: the expensive frame-scoped variant was
+reverted in source but the artifact was never re-published, so a later "cheap" run was
+actually the expensive binary - 2512 passes a frame - and the build handed over for
+play was the same one. Publish after reverting, or measure the wrong thing.

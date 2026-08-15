@@ -96,8 +96,27 @@ namespace Ryujinx.Graphics.Metal
         private static string[] _skipPrograms = [];
         private static long _skippedByProgram;
 
+        // On by default. Ryujinx's Vulkan backend issues pipeline barriers, and Metal
+        // cannot express a read-after-write barrier inside a render encoder, so MoltenVK
+        // resolves one by ending the encoder - the Vulkan path splits at every
+        // read-after-write for free, and does not flash. This backend issued no barrier
+        // of any kind and leaned entirely on Metal's automatic hazard tracking, which for
+        // argument-buffer reads is fed by useResource rather than by anything the driver
+        // observes. Doing what Vulkan does removes roughly half the white frames:
+        // 45.2% -> 24.3% -> 41.5% and 36.7% -> 27.7% across two sessions, reversible,
+        // 16 SE, at 30.01 fps against 29.99 with it off.
+        //
+        // Colour attachments only, scoped to the command buffer. Adding depth
+        // attachments, storage-image stores and blit writes changed the rate by nothing
+        // (25.0% against 24.3%) and widening the scope to the whole frame made every draw
+        // its own pass for no benefit at all - both reverted.
+        //
+        // It is not a cure: a floor of about 25% is completely indifferent to ordering,
+        // and Vulkan sits at zero under the same conditions, so something else still
+        // differs. RYUJINX_METAL_RAW_SPLIT=0 opts out; the frame cost was measured only
+        // at the reproducing save, where there is headroom inside the 30fps cap.
         private static bool _rawSplit =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT") == "1";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT") != "0";
 
         private static readonly bool _rawSplitDefault = _rawSplit;
         private static long _rawSplits;
@@ -207,17 +226,6 @@ namespace Ryujinx.Graphics.Metal
                     target.CanonicalPtr,
                     _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel);
             }
-        }
-
-        /// <summary>
-        /// A blit write - SetData, CopyTo - into this storage. Reached from Texture,
-        /// which has no view of the encoder state, and it is the same read-after-write
-        /// hazard as an attachment write: the Vulkan path barriers a transfer-write
-        /// before a shader read exactly as it barriers a colour-attachment write.
-        /// </summary>
-        internal void NoteStorageWritten(IntPtr root)
-        {
-            _encoderStateManager.NoteAttachmentWritten(root);
         }
 
         private bool SkipThisDraw()

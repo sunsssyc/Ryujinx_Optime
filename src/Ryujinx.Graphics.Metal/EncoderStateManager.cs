@@ -523,11 +523,6 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
-            if (_currentState.DepthStencil is Texture depthWrite)
-            {
-                NoteAttachmentWritten(depthWrite.CanonicalPtr);
-            }
-
             MTLRenderPassDepthAttachmentDescriptor depthAttachment = renderPassDescriptor.DepthAttachment;
             MTLRenderPassStencilAttachmentDescriptor stencilAttachment = renderPassDescriptor.StencilAttachment;
 
@@ -2085,19 +2080,6 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private readonly HashSet<IntPtr> _writtenThisCb = new();
 
-        /// <summary>
-        /// A storage image bound for writing. A compute or fragment shader store is the
-        /// same read-after-write hazard as an attachment write, and the Vulkan path
-        /// barriers it identically.
-        /// </summary>
-        public readonly void NoteImageWritten(TextureBase storage)
-        {
-            if (storage is Texture texture)
-            {
-                NoteAttachmentWritten(texture.CanonicalPtr);
-            }
-        }
-
         public readonly void NoteAttachmentWritten(IntPtr root)
         {
             if (root != IntPtr.Zero)
@@ -2658,8 +2640,6 @@ namespace Ryujinx.Graphics.Metal
                                     fragResourceIdIndex++;
                                     renderStages |= MTLRenderStages.RenderStageFragment;
                                 }
-
-                                NoteImageWritten(image.Storage);
                                 AddResource(nativePtr, MTLResourceUsage.Read | MTLResourceUsage.Write, renderStages, in bindings);
                             }
                         }
@@ -2908,8 +2888,6 @@ namespace Ryujinx.Graphics.Metal
                                 if ((segment.Stages & ResourceStages.Compute) != 0)
                                 {
                                     HdrPassProbe.NoteComputeImage(image.Storage);
-
-                                    NoteImageWritten(image.Storage);
                                     AddResource(nativePtr, MTLResourceUsage.Read | MTLResourceUsage.Write, in bindings);
                                     resourceIds[resourceIdIndex] = gpuAddress;
                                     resourceIdIndex++;
@@ -2932,8 +2910,6 @@ namespace Ryujinx.Graphics.Metal
                                     if ((segment.Stages & ResourceStages.Compute) != 0)
                                     {
                                         HdrPassProbe.NoteComputeImage(image.Storage as Texture);
-
-                                        NoteImageWritten(image.Storage);
                                         AddResource(nativePtr, MTLResourceUsage.Read | MTLResourceUsage.Write, in bindings);
                                         resourceIds[resourceIdIndex] = gpuAddress;
                                         resourceIdIndex++;
