@@ -4578,3 +4578,28 @@ therefore half wrong: it is ordering, at least in part. The reasoning was sound 
 premise - the old full-serialisation result - was not. Corrected here rather than deleted,
 because the same premise underpins the "sharpest unexplained thing" claim, which no longer
 stands.
+
+### What full serialisation cannot reach: ordering between command buffers
+
+Splitting a pass ends an encoder inside one command buffer. Ordering *between* command
+buffers is not affected by it at all - that is decided by the order they are committed to the
+queue. And the command-stream probe already measured how many there are: **3,842 commits per
+120 frames, thirty-two command buffers per frame** on this backend, against twenty-four on
+MoltenVK.
+
+`CommandBufferPool` hands command buffers to whichever thread rents one. If a thread encodes
+work that is logically earlier and commits after the render thread's buffer, the GPU runs them
+in commit order and the dependency is inverted - and no amount of intra-buffer splitting
+touches that. It is exactly the shape needed to explain a residual that survives serialising
+every draw against every other inside the buffer.
+
+It also fits the one intervention that made things *worse*: giving argument buffers their own
+allocation cost eleven points, and per-draw allocation churn changes which thread is doing
+what and when buffers are rented and committed.
+
+**Next: measure commit order against rental order.** `CommandBufferPool` knows both; recording
+the frames where they disagree, split by outcome, is one counter and needs no new machinery.
+If flat frames are the ones where a buffer committed out of rental order, the fault is found
+and the fix is to commit in order - which is what MoltenVK gets for free, because
+`kMVKQueueCountPerQueueFamily = 1` means Vulkan on this platform never has a second queue to
+race with.
