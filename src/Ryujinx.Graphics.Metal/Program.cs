@@ -367,7 +367,13 @@ namespace Ryujinx.Graphics.Metal
                 m =>
                 {
                     guarded++;
-                    return $"{m.Groups[1].Value} = ({denom} == 0.0f) ? 0.0f : (as_type<float>({recip}) * {m.Groups[2].Value});";
+                    // A threshold, not an equality. The first version tested the
+                    // denominator against exactly zero, fired on every frame, and changed
+                    // nothing - which refuted the mechanism only if the weight sum reaches
+                    // zero exactly. A sum of 1e-30 gives the bit-trick reciprocal about
+                    // 1e30, the product overflows just the same, clamp returns 1.0 and the
+                    // shader multiplies by 3.5. The negated comparison also catches NaN.
+                    return $"{m.Groups[1].Value} = !(fabs({denom}) > 1e-8f) ? 0.0f : (as_type<float>({recip}) * {m.Groups[2].Value});";
                 });
 
             // Logged because the obvious way to check - grepping the RYUJINX_SHADER_DIFF

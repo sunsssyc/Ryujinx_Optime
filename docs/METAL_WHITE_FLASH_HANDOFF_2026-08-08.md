@@ -4006,3 +4006,16 @@ The open question is now blunter than it has been all day: **what writes the uni
 if not this division?** The composite is the last thing to touch the surface before present -
 but "last writer" was established by a census that assumed the composite produces the white,
 and that assumption is gone. Re-run the writer census without it.
+
+The refutation survives the obvious objection to it. The first guard tested the denominator
+against exactly zero, so it only ruled out an exact 0/0; a weight sum of 1e-30 would give the
+bit-trick reciprocal about 1e30, overflow the product just the same, clamp to 1.0 and
+multiply by 3.5. Re-run with a threshold - `!(fabs(temp_297) > 1e-8f)`, which also catches
+NaN - the guard fires, nothing fails to link, and the result does not move:
+
+    threshold guard   luma 141, 11,399 frames, flat 21.36%
+    flat frames       min 246  max 254  sd 2.4   luma 251
+
+So the division is not the source however small its denominator gets. That closes the
+loophole and makes the refutation solid: whatever writes this uniform white, it is not this
+shader's normalisation.
