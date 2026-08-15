@@ -2469,7 +2469,8 @@ namespace Ryujinx.Graphics.Metal
                                     Texture.IsSceneClass(sceneCandidate.Info))
                                 {
                                     UploadCorrelator.NoteSceneBinding(
-                                        gpuAddress, nativePtr, sceneCandidate.CanonicalPtr, program.DebugLabel);
+                                        gpuAddress, nativePtr, sceneCandidate.CanonicalPtr, program.DebugLabel,
+                                        sceneCandidate);
                                 }
 
                                 if (HdrPassProbe.Enabled && hasTexture &&

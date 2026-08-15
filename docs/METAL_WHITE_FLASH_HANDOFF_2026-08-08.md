@@ -3535,3 +3535,30 @@ normal-frame luma is far from the repro scene's 138. And the whole late-session 
 refused screenshots, ignored keypresses, `import Quartz` failing outright - was macOS TCC:
 toggling the grants invalidated the running process's own, and the host app had to be
 restarted before Accessibility and Screen Recording applied.
+
+### The input is not flat
+
+If the composite goes white because it averages over a single colour, its input should be
+that single colour. Sampled directly - twenty-five points of the scene texture bound to the
+frame's last scene-class draw, compared as raw 32-bit values because RG11B10Float bytes are
+not BGRA and only equality means anything:
+
+    flat frames    20.25 distinct of 25   (1,761 frames)
+    normal frames  20.27 distinct of 25   (6,630 frames)
+
+Identical. The input carries as much variety on a white frame as on a good one, so nothing
+upstream is flattening it, and the "what makes the input flat" question recorded after the
+uniformity result was the wrong question.
+
+Two readings survive, and they are separable:
+
+- **The sampled texture is not the composite's input.** `_frameSceneTex` is the *last*
+  scene-class texture bound in the frame, and around thirteen draws bind one. Pinning the
+  sample to the program that actually performs the twelve texel fetches settles it.
+- **The input is fine and the weight sum reaches zero some other way.** The weights are not
+  the taps alone; the coordinate and the normalisation both read constant buffers
+  (`fp_c3->data[0]` feeds the fetch coordinates, `fp_c1->data[0].y` is the Newton constant).
+  A zeroed or stale constant buffer produces the same 0/0 with a perfectly good texture.
+
+The second is the more interesting one and has never been looked at: every binding check so
+far compared identities, and a constant buffer keeps its identity while its contents change.

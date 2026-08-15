@@ -71,6 +71,7 @@ namespace Ryujinx.Graphics.Metal
             public IntPtr PresentRoot;
             public long PresentAge;
             public string Writers;
+            public bool InputSampled;
         }
 
         private static MTLBuffer _buf;
@@ -93,6 +94,12 @@ namespace Ryujinx.Graphics.Metal
 
         private static Binding _frameBinding;
         private static Binding _frameBindingLast;
+
+        // The composite's input, kept as the texture rather than an address: the white is
+        // now known to be exactly uniform, so the composite is faithfully computing 0/0
+        // and the question is what makes THIS flat on a fifth of frames. Identity was
+        // already shown identical across outcomes, so only contents can differ.
+        private static Texture _frameSceneTex;
 
         // The programs that sampled a scene-class texture this frame, in order. The
         // count alone already steps the rate hard - zero flat in 803 frames at eleven
@@ -117,6 +124,12 @@ namespace Ryujinx.Graphics.Metal
         // for normal frames so the two can be read against each other.
         private static double _flatMinSum, _flatMaxSum, _flatSdSum, _flatSatSum;
         private static double _normalMinSum, _normalMaxSum, _normalSdSum;
+
+        // Distinct raw 32-bit values among the composite's 25 input samples. One means
+        // the input it averages over is a single colour, which is exactly the condition
+        // that drives the weight sum to zero.
+        private static double _flatInputDistinctSum, _normalInputDistinctSum;
+        private static long _flatInputFrames, _normalInputFrames;
 
         // What a viewer actually counts is flashes, not flat frames. Consecutive flat
         // frames are one flash; a change that halves the flat *frames* while leaving the
@@ -204,7 +217,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            _buf = device.NewBuffer(Slots * Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
+            _buf = device.NewBuffer(2 * Slots * Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
 
             Logger.Warning?.PrintMsg(LogClass.Gpu,
                 $"uploadcorr armed: ring={Slots} grid={GridSide}x{GridSide} satLuma={SaturatedLuma} need={SaturatedNeeded} minPixels={MinPixels}");
@@ -246,7 +259,7 @@ namespace Ryujinx.Graphics.Metal
             _pendingWriterCount[src.CanonicalPtr] = 0;
         }
 
-        public static void NoteSceneBinding(ulong gpuAddress, IntPtr nativePtr, IntPtr canonicalPtr, string program)
+        public static void NoteSceneBinding(ulong gpuAddress, IntPtr nativePtr, IntPtr canonicalPtr, string program, Texture storage = null)
         {
             if (!Enabled)
             {
@@ -270,6 +283,7 @@ namespace Ryujinx.Graphics.Metal
             _frameBindingLast.NativePtr = nativePtr;
             _frameBindingLast.CanonicalPtr = canonicalPtr;
             _frameBindingLast.Program = program;
+            _frameSceneTex = storage ?? _frameSceneTex;
 
             if (_frameProgCount < MaxFrameProgs)
             {
@@ -453,6 +467,37 @@ namespace Ryujinx.Graphics.Metal
                         _buf, (ulong)((idx * Pixels + i) * BytesPerPixel), BytesPerPixel, BytesPerPixel);
                 }
 
+                // Twenty-five more points, from the composite's input. Sampled as raw
+                // 32-bit values rather than luma: the scene target is RG11B10Float, so
+                // its bytes are not BGRA and only equality is meaningful. A flat input
+                // collapses to a single distinct value.
+                Texture sceneTex = _frameSceneTex;
+                mine.InputSampled = false;
+
+                if (sceneTex != null)
+                {
+                    MTLTexture stex = sceneTex.GetHandle(cbs);
+
+                    if (stex.NativePtr != IntPtr.Zero && sceneTex.Width > GridSide && sceneTex.Height > GridSide)
+                    {
+                        for (int i = 0; i < Pixels; i++)
+                        {
+                            blit.CopyFromTexture(
+                                stex, 0, 0,
+                                new MTLOrigin
+                                {
+                                    x = (ulong)(sceneTex.Width * (i % GridSide + 1) / (GridSide + 1)),
+                                    y = (ulong)(sceneTex.Height * (i / GridSide + 1) / (GridSide + 1)),
+                                    z = 0,
+                                },
+                                new MTLSize { width = 1, height = 1, depth = 1 },
+                                _buf, (ulong)(((Slots + idx) * Pixels + i) * BytesPerPixel), BytesPerPixel, BytesPerPixel);
+                        }
+
+                        mine.InputSampled = true;
+                    }
+                }
+
                 mine.Fence = cbs.GetFence();
                 mine.Fence.Get();
                 mine.Frame = _frame;
@@ -479,6 +524,7 @@ namespace Ryujinx.Graphics.Metal
             _attachedThisFrame.Clear();
             _frameBinding = default;
             _frameBindingLast = default;
+            _frameSceneTex = null;
             _frameProgCount = 0;
             _framePresentRoot = IntPtr.Zero;
             _framePresentAge = -1;
@@ -532,6 +578,32 @@ namespace Ryujinx.Graphics.Metal
 
             bool flat = saturated >= SaturatedNeeded;
 
+            int inputDistinct = 0;
+
+            if (slot.InputSampled)
+            {
+                uint* q = (uint*)((byte*)_buf.Contents + (Slots + index) * Pixels * BytesPerPixel);
+
+                for (int i = 0; i < Pixels; i++)
+                {
+                    bool seen = false;
+
+                    for (int j = 0; j < i; j++)
+                    {
+                        if (q[j] == q[i])
+                        {
+                            seen = true;
+                            break;
+                        }
+                    }
+
+                    if (!seen)
+                    {
+                        inputDistinct++;
+                    }
+                }
+            }
+
             // The shape of the white, not just the fact of it. Everything downstream of
             // this classifier has been asking who wrote white; nothing has asked what the
             // white looks like, and the two answers point at completely different faults.
@@ -545,6 +617,12 @@ namespace Ryujinx.Graphics.Metal
 
             if (flat)
             {
+                if (slot.InputSampled)
+                {
+                    _flatInputDistinctSum += inputDistinct;
+                    _flatInputFrames++;
+                }
+
                 _flatMinSum += lumaMin;
                 _flatMaxSum += lumaMax;
                 _flatSdSum += sd;
@@ -567,6 +645,12 @@ namespace Ryujinx.Graphics.Metal
             }
             else
             {
+                if (slot.InputSampled)
+                {
+                    _normalInputDistinctSum += inputDistinct;
+                    _normalInputFrames++;
+                }
+
                 _normalMinSum += lumaMin;
                 _normalMaxSum += lumaMax;
                 _normalSdSum += sd;
@@ -700,6 +784,8 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | luma flat {(_flatFrames > 0 ? _lumaFlatSum / _flatFrames : 0):F0}, normal {(_normalFrames > 0 ? _lumaNormalSum / _normalFrames : 0):F0}");
             sb.Append($" | shape flat min {(_flatFrames > 0 ? _flatMinSum / _flatFrames : 0):F0} max {(_flatFrames > 0 ? _flatMaxSum / _flatFrames : 0):F0} sd {(_flatFrames > 0 ? _flatSdSum / _flatFrames : 0):F1} sat {(_flatFrames > 0 ? _flatSatSum / _flatFrames : 0):F1}/{Pixels}");
             sb.Append($", normal min {(_normalFrames > 0 ? _normalMinSum / _normalFrames : 0):F0} max {(_normalFrames > 0 ? _normalMaxSum / _normalFrames : 0):F0} sd {(_normalFrames > 0 ? _normalSdSum / _normalFrames : 0):F1}");
+            sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
+            sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
             sb.Append($" | upload: flat {_flatWithUpload}/{_flatFrames}, normal {_normalWithUpload}/{_normalFrames}");
             sb.Append($" | uploadOntoRT: flat {_flatWithUploadOntoRt}, normal {_normalWithUploadOntoRt}");
             sb.Append($" | copy: flat {_flatWithCopy}/{_flatFrames}, normal {_normalWithCopy}/{_normalFrames}");
