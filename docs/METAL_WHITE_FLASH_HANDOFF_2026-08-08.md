@@ -4624,3 +4624,45 @@ unexplained by any specific ordering violation that has been looked for: not rea
 within an encoder, not tile-memory residency, not stores, not cross-command-buffer commit
 order. Something about ending passes reduces the fault without any of the named mechanisms
 accounting for it.
+
+---
+
+## RESUME HERE (2026-08-16, superseding the block above)
+
+**State.** Not fixed. Rate 20-24% on gated arms. Three real bugs fixed today, none of them
+the flash. The earlier RESUME block and the divide-by-zero memory are both refuted - read
+this one.
+
+**The single most important open fact.** Splitting passes reduces the flash monotonically:
+
+    no split                    45%
+    read-after-write split      24%   (default on)
+    full serialisation          17%   (verified engaged: 2,506 passes / 2,506 draws)
+
+and **no named mechanism accounts for it.** Ordering within an encoder, tile-memory
+residency, store actions, and cross-command-buffer commit order have each been measured and
+excluded. Whatever ending a pass does that helps, it is not any of those. Explaining this is
+worth more than another candidate: it is the only lever that has ever worked and nobody knows
+why it works.
+
+**What is established, each measured at the moment it matters.** The presented surface is
+written by a pass-through blit (`480117a3b1123d65`) that samples one texture and writes it
+out unchanged. On white frames: its source holds a picture (19 distinct values in 25 adjacent
+texels), nothing writes that source after it reads it (1/2,496), its vertex buffer holds four
+distinct vertices read at encode time, the stride is 16, the six indices are `0,2,1,1,2,3`,
+the draw is `count=6 inst=1 first=0 indexed=1`, and the output is a uniform fill at min 247
+max 254 sd 2.0. Everything this backend hands the GPU for that draw is correct on exactly the
+frames that fail.
+
+**Do not redo these.** Nine gated interventions and measurements, all null or worse:
+deferred deletion of temporary buffers, argument buffers on their own allocation (+13 points,
+worse), forced full rebind, MoltenVK-style deferred stores (breaks the picture), the
+reciprocal guard in both an exact-zero and a threshold form, the index pattern buffer's
+lifetime, a forced encoder split before the blit, and commit-order inversion (happens 0.5x
+per frame, uncorrelated). The table is also in memory as `metal-flash-gated-interventions`.
+
+**Method that must not be dropped.** Every arm goes through `tools/arm_valid.py` before its
+number is quoted; it caught five false negatives today, four of them arms that were measuring
+a menu screen. `drive_in.sh` verifies it reached gameplay by draws per frame (~2,500 against
+~340 in menus). Any probe must be checked for firing before its output is read - that caught
+two more.
