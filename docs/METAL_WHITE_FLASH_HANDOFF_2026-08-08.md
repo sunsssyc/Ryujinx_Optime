@@ -3245,50 +3245,6 @@ whose destination is an `AstTextureOperation`, which that generator assumes is a
 `AstOperand`) while the same shader translates fine as the primary. `tools/spvdis.py` reads
 the `.spv` without needing spirv-tools installed.
 
----
-
-## RESUME HERE (2026-08-15)
-
-**State.** The flash is halved and not fixed. `RYUJINX_METAL_RAW_SPLIT` is on by default
-(45% -> 24%, no frame cost); a floor of ~25% remains. Six real bugs were fixed on the way,
-none of them the flash. Latest build: `artifacts/terminal/Ryujinx-metal-v130-spvdiff`.
-
-**The one thing to do next.** Compare the composite's MSL against the SPIR-V Vulkan
-actually runs. The tool is wired and unrun:
-
-```bash
-# CodeGenVersion is at 7377; bump it in DiskCacheHostStorage.cs before each fresh run
-# or the warm cache skips Translate and the directory comes out empty (hit 5 times).
-brew install spirv-tools
-RYUJINX_SHADER_DIFF=/tmp/spvdiff ./Ryujinx --graphics-backend Metal <rom>
-spirv-dis /tmp/spvdiff/<hash>-Fragment.spv
-```
-
-The composite is `ee89b4e471373459`: twelve texel fetches at level 0, one
-`texture2d<float>`, no sampler. Look for whatever its SPIR-V does that MSL cannot express
-or expresses differently - operand order, the level argument, sampled-vs-storage image
-type, decorations with no MSL equivalent.
-
-**Why that is the only axis left.** Everything else is measured identical between flat and
-normal frames, and each was verified positively rather than by elimination: ordering
-(encoder splits, full serialisation, MTLFence), content (0x55 injection - screen red, 27%
-still white), binding (7,183 frames, four fields byte-identical), residency, authorship,
-present, out-of-bounds fetch, compile options (fast math), API legality (Metal's validation
-layer is now silent), and the capability struct. Vulkan is at 0% on the same machine, same
-driver, same save, with Metal argument buffers on in both.
-
-**Harness.** `tools/drive_in.sh <build> <log> [env...]` drives into the reproducing save
-unattended (`RYUJINX_BACKEND=Vulkan` for the other backend). `RYUJINX_METAL_UPLOAD_CORR=1`
-gives per-frame flat classification and every by-outcome split. `tools/flatshots.py <winid>
-<n> <dir>` classifies compositor screenshots when the correlator is unavailable
-(cross-backend). A/B by hot file, always A/B/A, always check the picture is alive: a black
-or blank arm reports zero flat frames and reads as a fix.
-
-**Two standing traps, both hit repeatedly.** Verify a toggle actually took effect before
-believing its measurement (`SPLIT_QUEUE` and `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` were
-both overridden). Re-publish the artifact after reverting source, or the next run measures
-the old binary.
-
 ### Three more doors closed, 2026-08-15
 
 - **Load and store actions.** Colour attachments load with `Load` or `Clear` and store with
@@ -3562,3 +3518,78 @@ Two readings survive, and they are separable:
 
 The second is the more interesting one and has never been looked at: every binding check so
 far compared identities, and a constant buffer keeps its identity while its contents change.
+
+---
+
+## RESUME HERE (2026-08-15, evening)
+
+**Where this stands.** The flash is halved and not fixed, and for the first time the
+mechanism that produces the white is confirmed rather than argued.
+
+The composite (`9E7042ABC827EC13-Fragment`, the one fragment shader of 3,626 that uses a
+texel fetch) ends in a normalised weighted average whose division is a bit-trick reciprocal.
+When the weight sum is zero the reciprocal overflows, clamps to 1.0, and is multiplied by
+3.5 across all three channels - in finite arithmetic, with no inf and no NaN. That predicted
+the white must be *exactly uniform* rather than a picture blown out by a bad exposure, and a
+gated arm settles it:
+
+    flat frames    min 248  max 254  sd 1.8   saturated 24.3/25
+    normal frames  min  49  max 232  sd 57.9
+
+So the composite is faithful: it computes 0/0 and writes what that produces. The question is
+what drives its weight sum to zero.
+
+**The obvious answer is already excluded.** The input is not flat - 20.25 distinct values of
+25 sampled points on flat frames against 20.27 on normal ones, over 8,399 gated frames. The
+texture carries as much variety on a white frame as on a good one.
+
+**The next action.** One probe, pinned to the program that actually performs the twelve
+texel fetches. `_frameSceneTex` currently records the frame's *last* scene-class binding and
+about thirteen draws bind one, so pinning also closes off the "sampled the wrong texture"
+reading. On that draw, record by outcome:
+
+- `fp_c1->data[0]` (the Newton constant) and `fp_c3->data[0]` (the fetch coordinates' scale
+  and bias). A zeroed or stale constant buffer produces 0/0 from a perfectly good texture,
+  and this has never been looked at: every binding check so far compared *identities*, which
+  a constant buffer keeps while its contents change.
+- The twelve taps of a single pixel, rather than 25 points spread across the image. The
+  weight sum is computed per pixel from a local neighbourhood, so a globally varied texture
+  can still be locally flat.
+
+The verdict is clean either way. If those constants differ between flat and normal frames,
+that is the fault. If they are bit-identical, the zero comes from the local neighbourhood,
+and the twelve-tap sample says so directly.
+
+**Running an arm.**
+
+    ./tools/drive_in.sh artifacts/terminal/Ryujinx-metal-v135-inputshape /tmp/arm.log \
+        RYUJINX_METAL_UPLOAD_CORR=1
+    python3 tools/arm_valid.py /tmp/arm.log      # never quote a number this rejects
+
+`drive_in.sh` drives by evidence now: it presses through the sequence and checks draws per
+frame, because gameplay runs ~2,500 and the menus sit near 340, and four consecutive arms
+were silently measuring menus and reporting flat=0. `arm_valid.py` rejects any arm whose
+normal-frame luma is far from the repro scene's 138 - a dark scene reports zero flat frames
+and reads exactly like a fix. `SAVE_INDEX=n` picks a lower entry in the load list.
+
+**Traps, each of which has cost real time here.**
+
+- macOS TCC: toggling Accessibility or Screen Recording invalidates the running process's
+  own grants. The host app has to be restarted, or keypresses are ignored, screenshots are
+  refused, and `import Quartz` fails outright.
+- Never leave a background job whose tail is `pkill -x Ryujinx`. Two runs were killed by a
+  sibling job moments after they reached gameplay.
+- Bumping `CodeGenVersion` invalidates the *Vulkan* disk cache too, which then needs well
+  over five minutes of retranslation before it reaches gameplay.
+- A warm cache changes boot timing enough to break any fixed-sleep drive-in.
+
+**What is excluded, positively rather than by elimination.** Ordering (encoder splits, full
+serialisation, MTLFence), content injection, binding identity, residency, authorship,
+present, out-of-bounds fetch, compile options, API legality, load and store actions, heap
+aliasing (there is no MTLHeap in the backend), the off-thread `SetData` race (zero
+occurrences over a full session), the MSL texel-fetch offset bug (real, fixed, no effect on
+the rate), and the exposure/tonemap reading (dead as of the uniformity result). Vulkan
+remains at 0% on the same machine, same driver, same save.
+
+**Builds.** `v135-inputshape` is current. `v134-shape` added the shape counters, `v133`
+the texel-fetch offset fix, `CodeGenVersion` 7378.
