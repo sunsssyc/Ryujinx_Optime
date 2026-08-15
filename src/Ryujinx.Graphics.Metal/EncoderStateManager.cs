@@ -2481,7 +2481,15 @@ namespace Ryujinx.Graphics.Metal
                                 {
                                     UploadCorrelator.NoteSceneBinding(
                                         gpuAddress, nativePtr, sceneCandidate.CanonicalPtr, program.DebugLabel,
-                                        program.IsTexelFetchComposite ? sceneCandidate : null);
+                                        null);
+
+                                    // Sample what the composite WRITES, not what it reads.
+                                    if (program.IsTexelFetchComposite &&
+                                        _currentState.RenderTargets is { Length: > 0 } &&
+                                        _currentState.RenderTargets[0] != null)
+                                    {
+                                        UploadCorrelator.NoteCompositeOutput(_currentState.RenderTargets[0]);
+                                    }
                                 }
 
                                 if (HdrPassProbe.Enabled && hasTexture &&

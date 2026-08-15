@@ -4019,3 +4019,33 @@ NaN - the guard fires, nothing fails to link, and the result does not move:
 So the division is not the source however small its denominator gets. That closes the
 loophole and makes the refutation solid: whatever writes this uniform white, it is not this
 shader's normalisation.
+
+### The composite's output is a picture on the frames that present white
+
+Sampled the composite's own colour attachment - twenty-five adjacent texels of what it
+writes, not what it reads - against the presented surface on the same frames. Gated arm:
+luma 141, 11,399 frames, flat 22.46%.
+
+    composite output      flat 19.32 distinct of 25    normal 18.64 of 25
+    presented surface     flat min 246 max 254 sd 2.3  (uniform white)
+
+**On the very frames that present a uniform white, the composite writes a picture.** It does
+not make the white. The white is introduced after the composite and before present.
+
+That relocates the fault entirely. Every measurement in this document until now was aimed at
+the composite - its input, its constants, its coordinates, its argument buffer, its
+neighbourhood, its division - and it is not the culprit. It is simply the last shader anyone
+had reason to suspect, and the divide-by-zero derivation gave that suspicion a mechanism that
+turned out to be false.
+
+The stage between the composite's output and the presented surface is where to look now, and
+the earlier conclusion that present is innocent must be re-read: "FSR RCAS faithfully
+reproduces an already-white input" was established by feeding it white, which shows it
+propagates white rather than that its input was white. It was never shown that the surface
+handed to present is white *before* present touches it - and this measurement says the
+surface written by the composite is not.
+
+**Next: sample the presented surface's own storage immediately before the present pass, and
+enumerate every pass that touches it between the composite and present, split by outcome.**
+The writer census exists; it needs re-running without the assumption that the composite is
+the writer of interest.

@@ -169,6 +169,20 @@ namespace Ryujinx.Graphics.Metal
         private static double _flatResidencySum, _normalResidencySum;
         private static long _flatResidencyN, _normalResidencyN;
 
+        /// <summary>
+        /// The composite's own colour attachment. The divide-by-zero reading is refuted, so
+        /// there is no longer any reason to believe the composite is what makes the frame
+        /// white - and if its output is not uniform while the presented surface is, the
+        /// white arrives after it, somewhere nobody has looked.
+        /// </summary>
+        public static void NoteCompositeOutput(Texture target)
+        {
+            if (Enabled && target != null)
+            {
+                _frameSceneTex = target;
+            }
+        }
+
         public static void NoteResidency(int count)
         {
             if (Enabled)
