@@ -1906,6 +1906,18 @@ namespace Ryujinx.Graphics.Metal
             else
             {
                 (mtlBuffer, offset, type) = _encoderStateManager.IndexBuffer.GetIndexBuffer(_renderer, Cbs);
+
+                // The guest's own index buffer, which is the one this draw actually uses -
+                // the earlier probe sat in the quad-conversion branch and never fired.
+                // Six zero entries here would make every invocation fetch vertex zero,
+                // collapsing the interpolated attribute across the primitive, which is a
+                // screen filled with a single texel.
+                if (UploadCorrelator.Enabled && indexCount >= 6 &&
+                    _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string idl2 &&
+                    idl2.StartsWith("480117", StringComparison.Ordinal))
+                {
+                    UploadCorrelator.NoteIndices(mtlBuffer.Contents + offset, (int)type);
+                }
             }
 
             if (mtlBuffer.NativePtr != IntPtr.Zero)

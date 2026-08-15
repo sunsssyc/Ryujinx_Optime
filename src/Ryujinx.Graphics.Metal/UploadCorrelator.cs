@@ -287,15 +287,25 @@ namespace Ryujinx.Graphics.Metal
 
         private static (int Count, int Inst, int First, int Indexed) _frameDraw = (-1, -1, -1, -1);
         private static readonly Dictionary<string, (long Flat, long Normal)> _drawParamStats = new();
-        public static unsafe void NoteIndices(IntPtr contents)
+        public static unsafe void NoteIndices(IntPtr contents, int indexType = 2)
         {
             if (!Enabled || contents == IntPtr.Zero)
             {
                 return;
             }
 
-            int* p = (int*)contents;
-            _frameIndices = $"{p[0]},{p[1]},{p[2]},{p[3]},{p[4]},{p[5]}";
+            // MTLIndexType: 0 = UInt16, 1 = UInt32. Anything else is this probe's own
+            // default for the 32-bit pattern path.
+            if (indexType == 0)
+            {
+                ushort* p16 = (ushort*)contents;
+                _frameIndices = $"{p16[0]},{p16[1]},{p16[2]},{p16[3]},{p16[4]},{p16[5]}";
+            }
+            else
+            {
+                uint* p32 = (uint*)contents;
+                _frameIndices = $"{p32[0]},{p32[1]},{p32[2]},{p32[3]},{p32[4]},{p32[5]}";
+            }
         }
 
         private static string _frameIndices;

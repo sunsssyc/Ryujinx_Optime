@@ -4365,3 +4365,32 @@ through `IndexBufferPattern`, and reading its first six entries by outcome is th
 measurement - just in the right place. If they are 0,1,2,0,2,3 on white frames too, the fetch
 collapse is in the vertex descriptor's attribute format or offset, which is then the only link
 in the chain never read.
+
+### The indices are correct on every white frame
+
+Hooked in the right place this time - the guest's own index buffer, on the ordinary indexed
+path - and the hook fired:
+
+    blit indices [0,2,1,1,2,3]   flat 2,553   normal 8,844
+    blit indices [0,0,0,0,0,0]   flat     0   normal     1
+
+Two triangles of a quad, correct, on **every** flat frame. The all-zero case exists but
+occurs once, on a normal frame, and never on a white one. The index buffer is innocent and
+the index hypothesis is dead.
+
+That empties the fetch of everything except one thing. The chain now reads, every link
+measured: a pass-through blit writes the presented surface; its source texture holds a
+picture on white frames; therefore its UVs are constant across the primitive; the vertex
+buffer holds four distinct vertices; the stride walking them is 16; the draw asks for six
+indices with correct values; and the attribute still arrives constant in the shader.
+
+**The only unread link is the vertex descriptor** - the format and offset declared for
+attribute 0, which is what turns bytes at a stride into a `float4` in `in.inAttr0`. A format
+of zero size, an offset past the end of the stride, or a descriptor whose attribute is simply
+absent all produce the same thing: the shader's zero-initialised attribute, unchanged, and
+therefore constant. That initialisation is visible at the top of the vertex shader
+(`out.outAttr0.x = 0.0f` before anything is computed), so a fetch that never happens is
+indistinguishable from a fetch of zeros - which is exactly the observed fault.
+
+Read `MTLVertexDescriptor`'s attribute 0 format, offset and bufferIndex at this draw, split
+by outcome. It is the last link.
