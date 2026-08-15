@@ -3303,3 +3303,39 @@ the old binary.
   with `GetData` is real in the source and is never exercised. The lead is dead.
 
 Flat rate across the three v133 runs: 20.8%, 21.2%, 19.8%. Against v132 at 17.25%.
+
+### A Metal-level probe that watches both backends, 2026-08-15
+
+MoltenVK is Metal underneath, so the Vulkan run and the Metal run can be watched with the
+*same* instrument and their output diffed as text. `tools/mtlspy.m` builds a dylib that
+swizzles the driver's own classes and logs every texture descriptor plus a per-frame
+summary of encoders, commits, `useResource` usage/stages, and attachment load/store actions:
+
+    clang -dynamiclib -fobjc-arc -arch arm64 -framework Foundation -framework Metal \
+      -o /tmp/mtlspy.dylib tools/mtlspy.m
+    DYLD_INSERT_LIBRARIES=/tmp/mtlspy.dylib MTLSPY=/tmp/spy.log ./Ryujinx ...
+
+Two things had to be got right, and both were got wrong first:
+
+- **Interposing does not work.** `__DATA,__interpose` on `MTLCreateSystemDefaultDevice`
+  catches nothing, because the Metal backend reaches Metal through .NET P/Invoke, which
+  resolves symbols with `dlsym` at run time and never goes through the bindings DYLD
+  rewrites. Making a device in the constructor and swizzling its *class* works for both
+  backends, since the class object is shared with whatever they create later.
+- **MoltenVK never calls `-presentDrawable:`.** The first Vulkan run produced thousands of
+  texture lines and not one frame line. The drawable-with-time variant is now hooked too,
+  with a commit-count fallback.
+
+The binary permits injection: it is adhoc-signed without hardened runtime and carries
+`com.apple.security.cs.allow-dyld-environment-variables`.
+
+**First results are not yet trustworthy and are recorded only as a marker.** Both runs hit
+a 4000-line cap in the texture log, so the two descriptor histograms covered different
+windows of the session and cannot be compared; the cap is now `MTLSPY_TEXLIMIT`, unlimited
+by default. What the capped data suggested, to be confirmed: Metal reallocates far more
+small textures than MoltenVK does, including the RG11B10Float scene target at the dynamic
+resolution 800x448, where a freshly allocated Private texture has undefined contents. Also
+unexplained: a minority of colour attachments arrive with `MTLStoreAction.Unknown` even
+though every store assignment in the backend is `Store` unless `_elideEmptyStore` is set,
+and its hot file is absent - some of the traffic may be the GUI's own Metal use rather than
+the emulator's, which the probe does not yet separate.
