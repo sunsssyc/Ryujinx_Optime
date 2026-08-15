@@ -3452,9 +3452,20 @@ today's arms:
 That is the whole point: both VOID runs reported flat=0 over 10,199 frames and would have
 read as a complete fix.
 
-Still open, and blocking the shape measurement: the drive-in no longer lands on the repro
-save. An attempt to screenshot the load list failed at window enumeration (`WID None`)
-rather than at the game, so which entry is now on top is still unknown. TOTK writes
-autosaves and this game has been launched well over a dozen times in one day, so the
-likeliest story remains that an autosave has displaced the 4:45 PM daylight save that
-`drive_in.sh` selects by pressing A three times on the top of the list.
+Still open, and blocking the shape measurement: **the drive-in never reaches gameplay at
+all.** The autosave story written here first was wrong - it never got as far as the load
+list. Draws per frame settles the question: a real gameplay arm runs 562 passes and 2,513
+draws per frame, while all four suspect arms sit at 287-295 passes and 335-344 draws, which
+is a menu. The luma gate caught them; the draw count names them.
+
+The cause is not timing. `drive_in.sh` now presses through the sequence twelve times over
+several minutes and verifies against the draw count, and still never gets in. Keyboard
+events are simply not landing, and `CGPreflightScreenCaptureAccess()` returns **False** -
+both of today's later failures, the refused screenshots and the ignored keypresses, are the
+same missing TCC grants. They were present earlier the same day, when the luma-138 arms were
+measured.
+
+**This is user-side and cannot be fixed from here.** The app hosting this session needs
+Accessibility (to post key events) and Screen Recording (to photograph a window) in System
+Settings > Privacy & Security. Until then no unattended arm can reach gameplay, and every
+run will report flat=0 from a menu.
