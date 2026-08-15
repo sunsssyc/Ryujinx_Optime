@@ -3630,3 +3630,46 @@ the distribution, not the average - what fraction of frames in each outcome has 
 2.0 - and, alongside it, the twelve taps of a single pixel rather than 25 points spread
 across the image, since the weight sum is computed per pixel from a local neighbourhood and
 a globally varied texture can still be locally flat.
+
+### Neither the neighbourhood nor the constants
+
+Gated arm: luma 138, 10,799 frames, flat 22.18%.
+
+**The local neighbourhood is not flat either.** Sampling twenty-five *adjacent* texels around
+the centre rather than a grid over the whole image - the weight sum is computed per pixel
+from a 4x3 neighbourhood, so a varied picture could still have been locally flat:
+
+    input distinct   flat 19.15 of 25    normal 19.20 of 25
+
+Nineteen distinct values among twenty-five neighbours, on both outcomes. Local flatness is
+dead too.
+
+**The constants are correct on exactly the frames that fail.** Extrema rather than means,
+because a mean cannot separate "always this value" from "happened to have it":
+
+    cb20  range flat    x [7.973727e-20, 7.973727e-20]   y [2, 2]
+          range normal  x [0,            7.973727e-20]   y [0, 2]
+
+On flat frames `cb20.y` is 2 with zero spread, every single time. It is the *normal* frames
+that sometimes carry zero - most likely a buffer this probe read before it was bound. So the
+Newton constant is never wrong when the frame goes white, and the constants are not the
+cause.
+
+**Which leaves one reading, and it is the one that fits every prior negative.** The taps
+return zero not because the texture is flat but because the fetches land somewhere the frame
+never wrote. The game runs dynamic resolution - the scene target is allocated at 1600x896
+and rendered at 800x448 - so a stale or wrong `TexelFetchScale` sends the reads into the
+part of the texture outside this frame's rendered region. That region is inside the texture,
+so:
+
+- the input sampled directly still shows a picture, because this probe reads the centre of
+  the *written* area (measured, twice);
+- clamping the fetches changed nothing, because clamping is to the texture's bounds and the
+  bad coordinates were never out of those bounds (measured earlier: 24.7% against 25-26%);
+- injecting content changed nothing, for the same reason;
+- and MoltenVK never does it, because the scale reaches the shader by a different path.
+
+**Next:** record, by outcome, the scene texture's dimensions against the frame's actual
+rendered region and the scale that `TexelFetchScale` applies. A mismatch on flat frames is
+the fault. Sampling the texture's far corner alongside its centre would corroborate it
+directly - the corner should be unwritten on flat frames.

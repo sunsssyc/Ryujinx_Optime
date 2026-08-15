@@ -113,6 +113,11 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool[] _frameCbSeen = new bool[MaxCbSlots];
         private static readonly double[] _cbFlatSum = new double[MaxCbSlots * 4];
         private static readonly double[] _cbNormalSum = new double[MaxCbSlots * 4];
+        private static readonly float[] _cbFlatMin = new float[MaxCbSlots * 4];
+        private static readonly float[] _cbFlatMax = new float[MaxCbSlots * 4];
+        private static readonly float[] _cbNormalMin = new float[MaxCbSlots * 4];
+        private static readonly float[] _cbNormalMax = new float[MaxCbSlots * 4];
+        private static bool _cbExtremaInit;
         private static readonly long[] _cbFlatN = new long[MaxCbSlots];
         private static readonly long[] _cbNormalN = new long[MaxCbSlots];
 
@@ -518,8 +523,13 @@ namespace Ryujinx.Graphics.Metal
                                 stex, 0, 0,
                                 new MTLOrigin
                                 {
-                                    x = (ulong)(sceneTex.Width * (i % GridSide + 1) / (GridSide + 1)),
-                                    y = (ulong)(sceneTex.Height * (i / GridSide + 1) / (GridSide + 1)),
+                                    // Adjacent texels around the centre, not a grid over
+                                    // the whole image. Spread sampling already said the
+                                    // texture carries a picture (19.72 distinct of 25);
+                                    // what the shader actually averages is a 4x3
+                                    // neighbourhood of one pixel.
+                                    x = (ulong)(sceneTex.Width / 2 + i % GridSide),
+                                    y = (ulong)(sceneTex.Height / 2 + i / GridSide),
                                     z = 0,
                                 },
                                 new MTLSize { width = 1, height = 1, depth = 1 },
@@ -655,8 +665,21 @@ namespace Ryujinx.Graphics.Metal
 
             if (slot.CbSeen != null)
             {
+                if (!_cbExtremaInit)
+                {
+                    _cbExtremaInit = true;
+
+                    for (int i = 0; i < MaxCbSlots * 4; i++)
+                    {
+                        _cbFlatMin[i] = _cbNormalMin[i] = float.MaxValue;
+                        _cbFlatMax[i] = _cbNormalMax[i] = float.MinValue;
+                    }
+                }
+
                 double[] into = flat ? _cbFlatSum : _cbNormalSum;
                 long[] n = flat ? _cbFlatN : _cbNormalN;
+                float[] lo = flat ? _cbFlatMin : _cbNormalMin;
+                float[] hi = flat ? _cbFlatMax : _cbNormalMax;
 
                 for (int c = 0; c < MaxCbSlots; c++)
                 {
@@ -669,7 +692,18 @@ namespace Ryujinx.Graphics.Metal
 
                     for (int i = 0; i < 4; i++)
                     {
-                        into[c * 4 + i] += slot.Cb[c * 4 + i];
+                        float v = slot.Cb[c * 4 + i];
+                        into[c * 4 + i] += v;
+
+                        if (v < lo[c * 4 + i])
+                        {
+                            lo[c * 4 + i] = v;
+                        }
+
+                        if (v > hi[c * 4 + i])
+                        {
+                            hi[c * 4 + i] = v;
+                        }
                     }
                 }
             }
@@ -864,6 +898,22 @@ namespace Ryujinx.Graphics.Metal
                     sb.Append($"{(_cbNormalN[c] > 0 ? _cbNormalSum[c * 4 + i] / _cbNormalN[c] : 0):G6}{(i < 3 ? " " : string.Empty)}");
                 }
                 sb.Append($"] n={_cbNormalN[c]}");
+
+                // Extrema, because a mean cannot separate "always this value on flat
+                // frames" from "flat frames are the subset that happened to have it".
+                if (_cbFlatN[c] > 0 && _cbNormalN[c] > 0)
+                {
+                    sb.Append("\n        range flat");
+                    for (int i = 0; i < 4; i++)
+                    {
+                        sb.Append($" [{_cbFlatMin[c * 4 + i]:G7},{_cbFlatMax[c * 4 + i]:G7}]");
+                    }
+                    sb.Append("  normal");
+                    for (int i = 0; i < 4; i++)
+                    {
+                        sb.Append($" [{_cbNormalMin[c * 4 + i]:G7},{_cbNormalMax[c * 4 + i]:G7}]");
+                    }
+                }
             }
             sb.Append($" | upload: flat {_flatWithUpload}/{_flatFrames}, normal {_normalWithUpload}/{_normalFrames}");
             sb.Append($" | uploadOntoRT: flat {_flatWithUploadOntoRt}, normal {_normalWithUploadOntoRt}");
