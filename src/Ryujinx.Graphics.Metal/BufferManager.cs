@@ -104,8 +104,35 @@ namespace Ryujinx.Graphics.Metal
             return Unsafe.As<ulong, BufferHandle>(ref handle64);
         }
 
-        public ScopedTemporaryBuffer ReserveOrCreate(CommandBufferScoped cbs, int size)
+        /// <summary>
+        /// Argument buffers can be forced out of the shared staging ring and onto their own
+        /// allocation. The composite reads a texture that demonstrably holds a picture and
+        /// still produces a uniform fill, which means the taps are not returning that
+        /// texture - and what the GPU dereferences is the resource id in the Tier 2
+        /// argument buffer, not the binding Ryujinx recorded. If a reused staging range is
+        /// handing the shader someone else's ids, this separates the two.
+        /// Measured, and it makes the flash **worse**: 34.79% against a 21.6% baseline on
+        /// a gated arm, some twenty-five standard errors. Off by default for that reason,
+        /// kept because the size of the move is the point - the argument buffer path is
+        /// causally connected to the fault, and a fresh allocation per draw is the version
+        /// of it that fails most often. The likely reason is residency: the encoder's
+        /// useResource list is built around the staging buffer, so a brand-new MTLBuffer
+        /// each draw can be dereferenced while not resident, and the shader reads garbage
+        /// resource ids - which is exactly the mechanism this was meant to test.
+        /// RYUJINX_METAL_ARGBUF_OWN=1 to turn it on.
+        /// </summary>
+        private static readonly bool _argBufOwnAllocation =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_ARGBUF_OWN") == "1";
+
+        public ScopedTemporaryBuffer ReserveOrCreate(CommandBufferScoped cbs, int size, bool ownAllocation = false)
         {
+            if (ownAllocation && _argBufOwnAllocation)
+            {
+                BufferHandle fresh = CreateWithHandle(size, out BufferHolder freshHolder);
+
+                return new ScopedTemporaryBuffer(this, freshHolder, fresh, 0, size, false);
+            }
+
             StagingBufferReserved? result = StagingBuffer.TryReserveData(cbs, size);
 
             if (result.HasValue)

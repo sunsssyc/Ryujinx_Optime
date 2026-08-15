@@ -3745,3 +3745,33 @@ untouched in memory.
 That reading survives every measurement in this document, and it is the only one that does.
 Read the argument buffer's own bytes for the composite's texture slot at that draw, and
 compare them by outcome against the resource id Ryujinx believes it wrote.
+
+### The argument buffer moves the rate, in the wrong direction
+
+Giving every argument buffer its own allocation instead of a range in the shared staging
+ring - the candidate fix for "a reused staging range hands the shader someone else's
+resource ids" - was measured on a gated arm:
+
+    own allocation   luma 129, 7,799 frames, flat 34.79%
+    baseline         luma 139, 10,799 frames, flat 21.59%
+
+Thirteen points worse, roughly twenty-five standard errors. It is off by default now
+(`RYUJINX_METAL_ARGBUF_OWN=1` to enable), but the size of the move is the result. This is
+only the second intervention in the whole investigation to shift the rate substantially -
+the read-after-write split was the first - and it says the argument buffer path is causally
+connected to the fault rather than merely adjacent to it.
+
+The direction is informative too. A fresh `MTLBuffer` per draw is the version that fails
+*more*, which points at residency rather than at staleness: the encoder's `useResource`
+declarations are built around the staging buffer, so a brand-new allocation can be
+dereferenced while not resident, and the shader then reads garbage where the resource ids
+should be. That is the same mechanism this experiment set out to test, arrived at from the
+other side - and it fits the contradiction exactly, because garbage ids point the taps at
+some other texture while the real input sits untouched and full of picture.
+
+**Next, and this is now a fix rather than a probe:** check that the argument buffer itself
+is declared to the encoder. If the staging buffer is resident only incidentally - because
+something else in the frame declared it - then the correct fix is an explicit `useResource`
+on whichever buffer backs the argument table, every time it changes, with
+`MTLResourceUsageRead` and the fragment stage. Confirm first by counting how often the
+backing buffer changes identity between draws, split by outcome.

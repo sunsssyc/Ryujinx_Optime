@@ -2331,13 +2331,13 @@ namespace Ryujinx.Graphics.Metal
 
             if (program.ArgumentBufferSizes[setIndex] > 0)
             {
-                vertArgBuffer = _bufferManager.ReserveOrCreate(_pipeline.Cbs, program.ArgumentBufferSizes[setIndex] * sizeof(ulong));
+                vertArgBuffer = _bufferManager.ReserveOrCreate(_pipeline.Cbs, program.ArgumentBufferSizes[setIndex] * sizeof(ulong), true);
                 bindings.TemporaryBuffers.Add(vertArgBuffer);
             }
 
             if (program.FragArgumentBufferSizes[setIndex] > 0)
             {
-                fragArgBuffer = _bufferManager.ReserveOrCreate(_pipeline.Cbs, program.FragArgumentBufferSizes[setIndex] * sizeof(ulong));
+                fragArgBuffer = _bufferManager.ReserveOrCreate(_pipeline.Cbs, program.FragArgumentBufferSizes[setIndex] * sizeof(ulong), true);
                 bindings.TemporaryBuffers.Add(fragArgBuffer);
             }
 
