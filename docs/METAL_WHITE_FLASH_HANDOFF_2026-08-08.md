@@ -4061,3 +4061,26 @@ for these frames.
 The presented storage's age is clean and unchanged: `age=1` on flat 2,559 and normal 8,807,
 so the surface shown was an attachment in the previous frame in essentially every case,
 whatever the outcome.
+
+### Why the census is empty, and what that implies
+
+`Present(CAMetalDrawable drawable, Texture src, ...)` hands the correlator a real Ryujinx
+`Texture`, so `src.CanonicalPtr` is a valid key. `NoteAttachmentDraw` is keyed on
+`RenderTargets[0].CanonicalPtr` from the draw path. The two keys are the same kind of thing,
+and the census still comes out empty - which means the presented storage **never appears as
+the render target of a draw**.
+
+Yet its age says it was an attachment one frame ago, on 2,559 flat frames and 8,807 normal
+ones. Both can only be true if the presented surface is written by something that is not a
+draw: a blit, a clear, or a compute dispatch. `NoteAttachmentDraw` fires from exactly one
+site, per draw, so none of those are recorded.
+
+That is the sharpest lead left, and it fits the shape of the fault better than anything the
+composite offered: **a clear writes a uniform fill by definition.** A frame where the blit
+that should overwrite the surface does not run - or runs before the clear rather than after -
+presents exactly what is measured: min 246, max 254, a spread of eight, no structure at all.
+
+**Next: record the non-draw writers.** Hook the blit and clear paths the way the draw path is
+hooked, key them on the same `CanonicalPtr`, and split by outcome. If flat frames show a
+clear with no subsequent blit, the fault is found - and unlike everything chased today, that
+is a fault in ordering, which this backend has already been shown to get wrong once.
