@@ -3101,3 +3101,33 @@ one worth keeping: it produced two findings in the time every other approach ton
 an hour to produce one, and it is the only technique so far that reports what this backend
 does *wrong* rather than what it does *differently*. The obvious continuation is to keep
 fixing what it reports until it is silent - the remaining scissor path first.
+
+### Online research against the sharpened characterisation
+
+The earlier search round was run against a vague description and found nothing. Repeated
+with what is now known - argument buffers, automatic hazard tracking, a content-
+independent white, memory-pressure gating - two things came back that are worth recording.
+
+**Apple's own position on hazard tracking with argument buffers** (WWDC "Go bindless with
+Metal 3", "Explore bindless rendering in Metal"): with tracked resources Metal inserts
+synchronisation itself, and `useResource` is what tells it a resource is in play. The
+documented hole is heaps - resources suballocated from a heap are *not* protected unless
+the heap opts into hazard tracking, and tracking is at heap granularity. This backend does
+not use heaps, so the documented hole does not apply to it, but it confirms that
+argument-buffer reads are tracked only through what `useResource` declares.
+
+**The closest published fault to ours**: [mlx#3689](https://github.com/ml-explore/mlx/issues/3689),
+"use-after-free under memory pressure: buffer-cache trim frees an MTLBuffer still used by
+an in-flight command buffer". Same shape as this fault's gating - memory pressure is what
+distinguishes a complex daylight scene from a night one, which is the day/night gate this
+document has never had a mechanism for. The associated failure mode is command buffers
+created with `commandBufferWithUnretainedReferences`, which do not retain what they
+reference.
+
+Checked and closed by reading: this backend builds command buffers from a plain
+`MTLCommandBufferDescriptor` and never touches `retainedReferences`, which defaults to
+YES. References are retained, so the mlx failure mode does not apply directly.
+
+Still absent from every search: any public report of this fault, on Ryujinx, Ryubing,
+MoltenVK, Apple's forums, wgpu or Dawn. The exclusion ledger here remains the only
+document of it.
