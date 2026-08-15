@@ -3131,3 +3131,27 @@ YES. References are retained, so the mlx failure mode does not apply directly.
 Still absent from every search: any public report of this fault, on Ryujinx, Ryubing,
 MoltenVK, Apple's forums, wgpu or Dawn. The exclusion ledger here remains the only
 document of it.
+
+### Validation is now silent: three violations fixed
+
+Working down what the layer reported, each fix re-running it to see the next:
+
+1. `setPurgeableState(Empty)` on buffers still in use by a command buffer - these include
+   the argument buffers carrying texture resource ids. Removed.
+2. 65535x65535 scissor rects against small passes. The clamp existed but ran against
+   `ulong.MaxValue` whenever the pass size was unknown, which is a no-op. Taking the size
+   from the descriptor was not enough - a diagnostic named the case, a pass reaching
+   `SetScissors` with all eight target slots and the depth slot null - so the scissor is
+   now simply left unset when the size is unknown, which is always legal and means the
+   whole attachment, exactly what a full-surface sentinel asks for.
+3. Compute dispatches with a zero dimension. Metal rejects them outright; Vulkan treats
+   them as a no-op, so nothing upstream filters them. Dropped here.
+
+`METAL_DEVICE_WRAPPER_TYPE=1 MTL_SHADER_VALIDATION=1` now reports nothing for a full
+boot into the reproducing save. Three genuine correctness bugs that no probe in this
+investigation could have found, from a tool that took minutes.
+
+Still to do, and it is the immediate next step: measure the flat rate on this build
+*without* validation, which is far too slow to measure under. The first two fixes were
+each measured null on their own (25% and 27.5%); the third has not been measured, and
+neither has all three together.

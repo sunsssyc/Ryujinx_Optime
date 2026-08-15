@@ -1747,8 +1747,24 @@ namespace Ryujinx.Graphics.Metal
                 return ((ulong)_currentState.DepthStencil.Width, (ulong)_currentState.DepthStencil.Height);
             }
 
+            // Reaching here means the pass size is unknown from both the descriptor and
+            // the bound state, and the caller will then clamp against ulong.MaxValue,
+            // which is no clamp at all. Metal's validation layer still reports 65535
+            // scissor rects against a 1x1 pass, so one path gets here; name it rather
+            // than guess. Once per distinct shape.
+            if (_unknownPassSizeReported.Add((_currentState.Scissors.Length, _currentState.RenderTargets.Length)))
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"pass size unknown at scissor time: targets={_currentState.RenderTargets.Length} " +
+                    $"depth={(_currentState.DepthStencil != null ? "yes" : "no")} " +
+                    $"scissors={_currentState.Scissors.Length} " +
+                    $"program={_currentState.RenderProgram?.DebugLabel ?? "<none>"}");
+            }
+
             return (ulong.MaxValue, ulong.MaxValue);
         }
+
+        private static readonly HashSet<(int, int)> _unknownPassSizeReported = [];
 
         private unsafe void SetScissors(MTLRenderCommandEncoder renderCommandEncoder)
         {
@@ -1773,6 +1789,18 @@ namespace Ryujinx.Graphics.Metal
                     // bakes). Clamp at apply time against the current pass size; the
                     // unclamped guest values stay in _currentState for the next pass.
                     (ulong passWidth, ulong passHeight) = GetRenderPassSize();
+
+                    // Unknown size means the clamp would run against ulong.MaxValue and
+                    // pass the guest's 65535 sentinel straight through - which is what
+                    // Metal's validation layer kept reporting against a 1x1 pass even
+                    // after the size was taken from the descriptor, because the bound
+                    // state is emptied again before this runs. Leaving the scissor unset
+                    // is always legal and means the whole attachment, which is what a
+                    // full-surface sentinel was asking for anyway.
+                    if (passWidth == ulong.MaxValue)
+                    {
+                        return;
+                    }
 
                     MTLScissorRect* clamped = stackalloc MTLScissorRect[count];
 

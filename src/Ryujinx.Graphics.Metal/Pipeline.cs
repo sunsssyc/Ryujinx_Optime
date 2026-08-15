@@ -1405,6 +1405,15 @@ namespace Ryujinx.Graphics.Metal
 
         public void DispatchCompute(int groupsX, int groupsY, int groupsZ, string debugGroupName)
         {
+            // Metal rejects a dispatch with any zero dimension outright - its validation
+            // layer asserts on threadgroupsPerGrid.width(0) - and without the layer it is
+            // undefined. The guest issues these; Vulkan accepts them as a no-op, so
+            // nothing upstream filters them out. Dropping them here is what a no-op means.
+            if (groupsX <= 0 || groupsY <= 0 || groupsZ <= 0)
+            {
+                return;
+            }
+
             MTLComputeCommandEncoder computeCommandEncoder = GetOrCreateComputeEncoder(true);
 
             ComputeSize localSize = _encoderStateManager.ComputeLocalSize;
