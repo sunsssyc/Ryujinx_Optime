@@ -4454,3 +4454,26 @@ machine and driver, is not in any of these values - it is in the shape of the co
 around them: 610 render encoders per frame against 329, 5,283 `useResource` declarations
 against 1,974, and store actions committed up front rather than deferred. Those are measured
 and unexplained, and they are the only place left where the two backends still differ.
+
+### MoltenVK-style deferred store actions break the picture
+
+The machinery already existed - `_elideEmptyStore`, behind
+`/tmp/ryujinx-metal-elide-empty-store`, defaulted off and never live in any measurement here.
+Turning it on makes this backend defer its store actions the way MoltenVK does, which was one
+of the three measured differences between them. The arm:
+
+    deferred stores   luma 69, flat 86.49%   VOID
+
+The gate rejects it, correctly, and the numbers say why: 86% of frames classified flat at a
+mean luma of 69 is not a dark scene, it is a broken one. `FixupStoreActions` resolves an
+`Unknown` store to `DontCare` when a pass drew nothing, and discarding those attachments
+visibly destroys the rendering rather than merely changing when the store is decided.
+
+So the resemblance to MoltenVK is superficial. MoltenVK defers the *decision* and then stores;
+this code defers the decision and then sometimes discards. Copying the shape without the
+policy makes things much worse, and the hot file must stay absent - it is, the run removes it.
+
+That leaves the encoder count and the `useResource` volume as the two unexplained differences,
+and both of them are downstream of the read-after-write split this fork turns on by default,
+which is also the one change that ever halved the flash. Reducing them means undoing the only
+thing that helped.
