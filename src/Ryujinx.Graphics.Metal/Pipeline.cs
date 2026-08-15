@@ -1721,6 +1721,18 @@ namespace Ryujinx.Graphics.Metal
                 Auto<DisposableBuffer> buffer = _renderer.BufferManager.GetBuffer(handle, false);
                 MTLBuffer mtlBuffer = buffer.Get(Cbs, 0, indexCount * sizeof(int)).Value;
 
+                // The last unread link in the chain from the presented pixel back to the
+                // draw. This buffer turns the blit's quad into two triangles; if its six
+                // entries are all zero, every invocation fetches vertex zero and the
+                // interpolated attribute is constant across the primitive - which is a
+                // screen filled with one texel, exactly what is measured.
+                if (UploadCorrelator.Enabled && indexCount >= 6 &&
+                    _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string idl &&
+                    idl.StartsWith("480117", StringComparison.Ordinal))
+                {
+                    UploadCorrelator.NoteIndices(mtlBuffer.Contents);
+                }
+
                 MTLRenderCommandEncoder renderCommandEncoder = GetOrCreateRenderEncoder(true);
                 ToneMapProbe.Record(_encoderStateManager.CurrentEncoderState);
 

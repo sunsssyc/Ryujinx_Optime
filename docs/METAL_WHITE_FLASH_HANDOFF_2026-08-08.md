@@ -4342,3 +4342,26 @@ and a lifetime fix on a rarely-taken path cannot substitute for it. If they are 
 on white frames as well, the index buffer is innocent and the collapse is in the vertex
 descriptor's attribute format or offset - the one remaining candidate in the fetch, and the
 only link in the chain from presented pixel to draw call that has never been read.
+
+### The blit does not use the generated index buffer at all
+
+The probe that reads the six indices was placed in the quad-to-triangles branch - the path
+that calls `GetIndexBufferPattern()` and `GetRepeatingBuffer`. On a gated arm (luma 140,
+11,399 frames, flat 22.00%) it printed **nothing**: not one line, on either outcome. The hook
+never fired.
+
+So program `480117` does not go through that path. Its `indexed=1` comes from the guest's own
+index buffer, bound normally, and this backend's quad conversion has nothing to do with it.
+The previous section's reasoning - that the fullscreen blit is indexed *because* this backend
+generates indices for it - was a wrong assumption dressed as a deduction, and the lifetime fix
+committed alongside it, while a genuine bug, was never going to be relevant to this draw.
+
+Recorded because the empty result is worth more than a number would have been: the hook was
+checked for firing before its output was read, which is the discipline that has caught four
+false negatives today.
+
+**Next: hook the real index buffer.** It is bound through the ordinary index-buffer path, not
+through `IndexBufferPattern`, and reading its first six entries by outcome is the same one
+measurement - just in the right place. If they are 0,1,2,0,2,3 on white frames too, the fetch
+collapse is in the vertex descriptor's attribute format or offset, which is then the only link
+in the chain never read.
