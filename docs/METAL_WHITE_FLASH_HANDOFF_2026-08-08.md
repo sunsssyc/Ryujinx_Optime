@@ -3469,3 +3469,39 @@ measured.
 Accessibility (to post key events) and Screen Recording (to photograph a window) in System
 Settings > Privacy & Security. Until then no unattended arm can reach gameplay, and every
 run will report flat=0 from a menu.
+
+### How the white is actually produced
+
+Read statically out of the composite's MSL, needing no run and no permissions. The shader
+ends in a normalised weighted average - sum of weighted taps over sum of weights - with the
+division done as the usual bit-hack reciprocal plus one Newton step:
+
+    temp_297 = temp_292 + temp_290;                          // the weight sum
+    temp_301 = -bits(temp_297);
+    temp_302 = temp_301 + 0x7EF19FFF;                        // ~ 1/temp_297
+    temp_307 = fma(temp_297, -temp_302, fp_c1->data[0].y);   // Newton: (2 - d*r)
+    temp_311 = temp_302 * temp_307;                          // refined 1/temp_297
+    temp_313 = temp_311 * temp_310;                          // weighted sum / weight sum
+    temp_314 = clamp(temp_313, 0.0f, 1.0f);
+    temp_319 = temp_314 * 3.5;                               // HDR, into RG11B10Float
+
+Put a zero weight sum through it: `bits(0)` is 0, so the reciprocal comes out as
+`0x7EF19FFF` ~ 1.6e38, the Newton step degenerates to `fma(0, ., 2.0)` = 2.0, the product
+is 3.2e38, and anything positive times that overflows. `clamp` turns that into 1.0 and the
+final multiply makes it **3.5 in all three channels** - a perfectly uniform HDR white,
+reached with finite arithmetic, no inf and no NaN required.
+
+Two things corroborate it. The measured flat-frame luma is **251, not 255**, which is what a
+fixed 3.5 becomes after the tonemap rather than what a saturated or filled surface would be.
+And it makes a falsifiable prediction the shape counters already added will settle: if this
+is the mechanism the white must be **uniform**, min == max across the grid.
+
+This also retires an old test. The 0x55 injection - constant fed to the composite's input,
+screen went red, 26.7% still white - was read as proof that the white is content
+independent. It is not: a constant input makes every tap identical, which is precisely what
+drives the weight sum to zero. That experiment could not have come out any other way, and
+its negative result was never evidence.
+
+If this holds, the fault is not in the composite at all - the shader is faithfully computing
+0/0 on a flat input - and the question becomes what leaves its input texture flat on a fifth
+of frames, and why MoltenVK never does.
