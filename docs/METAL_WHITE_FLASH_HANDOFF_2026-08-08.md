@@ -3775,3 +3775,33 @@ something else in the frame declared it - then the correct fix is an explicit `u
 on whichever buffer backs the argument table, every time it changes, with
 `MTLResourceUsageRead` and the fragment stage. Confirm first by counting how often the
 backing buffer changes identity between draws, split by outcome.
+
+### A real use-after-free, fixed, and it is not the flash
+
+`Pipeline.DisposeRenderTemporaryBuffers()` runs on the line after `drawPrimitives`, and
+`ScopedTemporaryBuffer.Dispose()` deleted the buffer outright when it came from the fallback
+path rather than from a staging reservation. One of those buffers is the argument buffer
+holding the resource ids the shader dereferences, so its `MTLBuffer` was destroyed before
+the GPU ran the draw. That is a genuine use-after-free and it is fixed: deletion is now
+deferred behind the fence of the command buffer that referenced the buffer
+(`BufferManager.DeleteWhenComplete`).
+
+It does not fix the flash, and the control says the use-after-free was never what made the
+own-allocation arm bad either:
+
+    baseline                              21.59%   (10,799 frames, luma 139)
+    deferred delete                       23.66%   (10,799 frames, luma 139)
+    own allocation, no fix                34.79%   ( 7,799 frames, luma 129)
+    own allocation, deferred delete       32.67%   ( 7,799 frames, luma 132)
+
+Forcing every argument buffer onto its own allocation still costs eleven points with the
+lifetime bug repaired, so what that arm demonstrates is not premature deletion. The fallback
+path is presumably rare on the default arm, which is why repairing it changes nothing there.
+
+So the argument buffer path remains causally connected to the rate - two arms, thirteen and
+eleven points - and the reason is still not identified. Residency is the remaining candidate:
+a fresh `MTLBuffer` per draw is not covered by whatever declaration keeps the staging buffer
+resident, and an argument table read while non-resident returns garbage ids, which points the
+taps at another texture and produces exactly the uniform fill that is measured. The next
+probe is to count `useResource` declarations naming the argument buffer itself, split by
+outcome, and compare the two allocation strategies.

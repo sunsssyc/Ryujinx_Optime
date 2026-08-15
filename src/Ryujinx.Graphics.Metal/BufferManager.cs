@@ -2,6 +2,7 @@ using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
 using SharpMetal.Metal;
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -34,7 +35,16 @@ namespace Ryujinx.Graphics.Metal
         {
             if (!_isReserved)
             {
-                _bufferManager.Delete(Range.Handle);
+                // Deferred, not immediate. These are disposed straight after the draw is
+                // encoded - Pipeline.DisposeRenderTemporaryBuffers runs on the line after
+                // drawPrimitives - and one of them is the argument buffer holding the
+                // resource ids the shader dereferences. Deleting it there destroys the
+                // MTLBuffer before the GPU has run the draw, so the shader reads freed
+                // memory where the texture ids should be and samples whatever now lives
+                // there. That is the white frame: every tap returns the same value, the
+                // weight sum is zero, and the composite's divide produces a uniform fill
+                // while its real input sits untouched and full of picture.
+                _bufferManager.DeleteWhenComplete(Range.Handle);
             }
         }
     }
@@ -260,6 +270,42 @@ namespace Ryujinx.Graphics.Metal
             if (TryGetBuffer(handle, out BufferHolder holder))
             {
                 holder.SetData(offset, data, cbs);
+            }
+        }
+
+        /// <summary>
+        /// Buffers whose command buffer has not finished with them yet, each held with the
+        /// fence of the command buffer that referenced it. Only the fallback path from
+        /// <see cref="ReserveOrCreate"/> lands here: a range reserved inside the staging
+        /// buffer is already lifetime-tracked, which is why the fault only appears when the
+        /// staging ring is full and the fallback runs.
+        /// </summary>
+        private readonly Queue<(BufferHandle Handle, FenceHolder Fence)> _pendingDeletes = new();
+
+        public void DeleteWhenComplete(BufferHandle handle)
+        {
+            DrainPendingDeletes();
+
+            FenceHolder fence = _pipeline?.Cbs.GetFence();
+
+            if (fence == null)
+            {
+                Delete(handle);
+                return;
+            }
+
+            fence.Get();
+            _pendingDeletes.Enqueue((handle, fence));
+        }
+
+        private void DrainPendingDeletes()
+        {
+            while (_pendingDeletes.TryPeek(out (BufferHandle Handle, FenceHolder Fence) pending) &&
+                   pending.Fence.IsSignaled())
+            {
+                _pendingDeletes.Dequeue();
+                Delete(pending.Handle);
+                pending.Fence.Put();
             }
         }
 
