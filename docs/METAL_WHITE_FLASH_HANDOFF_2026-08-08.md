@@ -3939,3 +3939,10 @@ The 0.93 on normal frames is the other half of the fact: on roughly seven percen
 frames the composite does not draw at all, while it is never absent when the frame goes
 white. It is always there to paint the white, which is consistent with everything else and
 narrows nothing further by itself.
+
+There is no switch for it. The MSL emitter produces texture types only in `SamplerType.cs`,
+and `Declarations.cs` has exactly one path for them - into the `Textures` struct that becomes
+the argument buffer. No alternative direct-binding path exists to be turned on, so the change
+really is four things moving together: the declaration emitter, every access site, the
+backend's binding path, and a `CodeGenVersion` bump with the full retranslation that implies.
+Checked, not estimated.
