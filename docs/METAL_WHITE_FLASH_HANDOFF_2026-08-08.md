@@ -3946,3 +3946,33 @@ the argument buffer. No alternative direct-binding path exists to be turned on, 
 really is four things moving together: the declaration emitter, every access site, the
 backend's binding path, and a `CodeGenVersion` bump with the full retranslation that implies.
 Checked, not estimated.
+
+### A symptom guard on the divide, and a verification trap
+
+The composite's white is produced by a fast-reciprocal division: seed `0x7EF19FFF`, one
+Newton step, and a weight sum of zero drives the product to overflow, clamp to 1.0, and get
+multiplied by 3.5 into all three channels. `Program.GuardReciprocal` patches the emitted MSL
+so the refined reciprocal is zero when the denominator is zero, which would make those frames
+dark instead of blinding. It is a symptom guard, not a cure - it does not explain why the
+weight sum reaches zero over an input texture that demonstrably holds a picture - but it is
+the decisive test of the mechanism.
+
+**It is not yet verified, and two runs were burned on a verification trap.** The obvious check
+is to grep the `RYUJINX_SHADER_DIFF` dump for the patched expression. That can never work:
+the dump is written by `ShaderTranslationDiff` inside the translator, upstream of the Metal
+backend's patcher, so it always shows unpatched code. Both runs reported zero matches and a
+baseline flat rate, which reads exactly like "the guard did nothing" when it may simply never
+have been observed.
+
+The patcher now logs `guard-rcp: patched N division(s), denominator temp_X` when it fires.
+The first attempt also genuinely did not match, for a second reason worth keeping: it
+required the seed line and the negation feeding it to be adjacent, and the emitted MSL puts a
+guest-address comment between every statement and schedules unrelated temps in between. It
+now matches them independently, and a dry run of exactly that logic against the dumped shader
+finds seed `temp_302`, denominator `temp_297`, and one division to patch.
+
+**Next session, first thing:** run one gated arm with `RYUJINX_METAL_GUARD_RCP=1` (the
+default) and check the log for `guard-rcp:` before reading any rate. If it fires and the flat
+frames go dark, the chain from the weight sum to the white is confirmed end to end and the
+remaining work is upstream. If it fires and they stay white at luma 250, the divide is not
+where the white is made and this document's central reading is wrong.

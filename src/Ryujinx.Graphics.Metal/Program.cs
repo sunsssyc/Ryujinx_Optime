@@ -308,6 +308,81 @@ namespace Ryujinx.Graphics.Metal
         ///
         /// RYUJINX_METAL_SHOWFETCH=&lt;label&gt;:&lt;tempA&gt;,&lt;tempB&gt;
         /// </summary>
+        /// <summary>
+        /// Guards the fast-reciprocal division that turns a zero weight sum into a full
+        /// white frame.
+        ///
+        /// The composite ends in a normalised weighted average whose division is the
+        /// classic bit-trick reciprocal seeded with 0x7EF19FFF, refined by one Newton step.
+        /// When the weight sum is zero the seed becomes about 1.6e38, the Newton step
+        /// degenerates to 2, and the product overflows - then clamp(x, 0, 1) returns 1.0
+        /// and the shader multiplies by 3.5 into all three channels. Finite arithmetic
+        /// throughout, no inf and no NaN, and the result is the exactly uniform white this
+        /// investigation measured (min 248, max 254, sd 1.8 across the sampled grid).
+        ///
+        /// The patch makes the refined reciprocal zero when the denominator is zero, so the
+        /// same frame comes out dark instead of blinding. That is a symptom guard, not a
+        /// cure - it does not explain why the weight sum reaches zero while the input
+        /// texture demonstrably holds a picture - but it is also the decisive test of the
+        /// mechanism: if the flashes turn dark, the chain from Sigma-w to the white is
+        /// confirmed end to end; if they stay white, the reading is wrong.
+        ///
+        /// RYUJINX_METAL_GUARD_RCP=0 to opt out.
+        /// </summary>
+        private static readonly bool _guardRcp =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_RCP") != "0";
+
+        private static string GuardReciprocal(string code)
+        {
+            // Matched independently rather than as adjacent lines: the emitted MSL carries a
+            // guest-address comment between every statement and schedules unrelated temps in
+            // between, so an adjacency pattern finds nothing. The first attempt at this did
+            // exactly that, matched zero shaders, and produced a baseline number that looked
+            // like a measurement.
+            Match seed = Regex.Match(code,
+                @"(temp_\d+) = as_type<int>\(as_type<uint>\((temp_\d+)\) \+ as_type<uint>\(as_type<int>\(0x7EF19FFF\)\)\);");
+
+            if (!seed.Success)
+            {
+                return code;
+            }
+
+            string recip = seed.Groups[1].Value;
+            string negated = seed.Groups[2].Value;
+
+            Match neg = Regex.Match(code,
+                $@"{Regex.Escape(negated)} = as_type<int>\(-as_type<uint>\(as_type<int>\((temp_\d+)\)\)\);");
+
+            if (!neg.Success)
+            {
+                return code;
+            }
+
+            string denom = neg.Groups[1].Value;
+
+            int guarded = 0;
+
+            string patched = Regex.Replace(code,
+                $@"(temp_\d+) = as_type<float>\({Regex.Escape(recip)}\) \* (temp_\d+);",
+                m =>
+                {
+                    guarded++;
+                    return $"{m.Groups[1].Value} = ({denom} == 0.0f) ? 0.0f : (as_type<float>({recip}) * {m.Groups[2].Value});";
+                });
+
+            // Logged because the obvious way to check - grepping the RYUJINX_SHADER_DIFF
+            // dump - cannot work: that dump is written by the translator, upstream of this
+            // patcher, so it always shows unpatched code. Two runs were spent before that
+            // was noticed, one of them reporting a clean baseline that meant nothing.
+            if (guarded != 0)
+            {
+                Logger.Info?.PrintMsg(LogClass.Gpu,
+                    $"guard-rcp: patched {guarded} division(s), denominator {denom}");
+            }
+
+            return patched;
+        }
+
         private static readonly bool _clampFetch =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_CLAMP_FETCH") == "1";
 
@@ -484,6 +559,11 @@ namespace Ryujinx.Graphics.Metal
             // Every patched shader then failed to compile, the pipeline came back null,
             // the draws were skipped, and the scene rendered black with the HUD intact -
             // which looks enough like the fault to be mistaken for it.
+            if (_guardRcp)
+            {
+                code = GuardReciprocal(code);
+            }
+
             if (_clampFetch)
             {
                 int clamped = 0;
