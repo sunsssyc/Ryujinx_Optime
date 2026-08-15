@@ -121,6 +121,36 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _rawSplitDefault = _rawSplit;
         private static long _rawSplits;
 
+        // Ending the encoder only stops two pieces of work being encoded together; it
+        // does not make the GPU wait. MoltenVK, translating a VkImageMemoryBarrier, has
+        // MTLFence available for that and this backend has never used one - there is no
+        // MTLFence and no MTLEvent anywhere in it. If the read-after-write split works by
+        // narrowing a race window rather than removing a cause, which is what the
+        // content-independent floor suggests, then a real wait is the difference between
+        // narrowing it and closing it. Same detection, stronger primitive.
+        // RYUJINX_METAL_RAW_FENCE=1, hot via /tmp/ryujinx-metal-raw-fence.
+        private static bool _rawFence =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_FENCE") == "1";
+
+        private static readonly bool _rawFenceDefault = _rawFence;
+        private MTLFence _fence;
+        private bool _fenceWaitPending;
+        private static long _fenceWaits;
+
+        private static void RefreshRawFence()
+        {
+            try
+            {
+                _rawFence = System.IO.File.Exists("/tmp/ryujinx-metal-raw-fence")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-raw-fence").Trim() == "1"
+                    : _rawFenceDefault;
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
+
         private static void RefreshRawSplit()
         {
             try
@@ -485,6 +515,20 @@ namespace Ryujinx.Graphics.Metal
                 DrawCount != _drawCountAtPassStart &&
                 _encoderStateManager.SamplesEarlierWrite())
             {
+                // Signal on the encoder that did the writing, before it ends, and wait on
+                // the one that will do the reading - the pairing MoltenVK produces for an
+                // image barrier.
+                if (_rawFence)
+                {
+                    if (_fence.NativePtr == IntPtr.Zero)
+                    {
+                        _fence = _device.NewFence;
+                    }
+
+                    Cbs.Encoders.RenderEncoder.UpdateFence(_fence, MTLRenderStages.RenderStageFragment);
+                    _fenceWaitPending = true;
+                }
+
                 EndCurrentPass(PassEndReason.FragmentDependency);
                 _encoderStateManager.SignalRenderDirty();
                 _rawSplits++;
@@ -584,6 +628,13 @@ namespace Ryujinx.Graphics.Metal
             }
 
             MTLRenderCommandEncoder renderCommandEncoder = Cbs.Encoders.EnsureRenderEncoder();
+
+            if (_fenceWaitPending)
+            {
+                renderCommandEncoder.WaitForFence(_fence, MTLRenderStages.RenderStageFragment);
+                _fenceWaitPending = false;
+                _fenceWaits++;
+            }
 
             if (forDraw)
             {
@@ -837,6 +888,7 @@ namespace Ryujinx.Graphics.Metal
             RefreshSkipDraws();
             RefreshSkipProgram();
             RefreshRawSplit();
+            RefreshRawFence();
             _passIndexInFrame = 0;
             RefreshBarrierToggle();
             EncoderStateManager.RefreshSamplingToggle();
@@ -1038,7 +1090,7 @@ namespace Ryujinx.Graphics.Metal
                     _lastStatsRenderPassCount = _renderPassCount;
 
                     string passText =
-                        $" skipped draws: {_skippedDraws}, by program: {_skippedByProgram}, raw splits: {_rawSplits}." +
+                        $" skipped draws: {_skippedDraws}, by program: {_skippedByProgram}, raw splits: {_rawSplits}, fence waits: {_fenceWaits}." +
                         $" per frame: {passes / (ulong)SyncStatsLogFrameInterval} passes, " +
                         $"{draws / (ulong)SyncStatsLogFrameInterval} draws " +
                         $"({(passes != 0 ? (double)draws / passes : 0):F1} draws/pass).";

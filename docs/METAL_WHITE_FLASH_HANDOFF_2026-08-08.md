@@ -2985,3 +2985,40 @@ implementable: a fence per command buffer, updated after a pass that writes a tr
 texture, waited on before a pass that samples it - the same pairs the read-after-write
 split already identifies, which means the detection is done and only the primitive
 changes.
+
+### MTLFence on top of the split: nothing
+
+The named next step was to replace the encoder boundary with a real GPU-side wait, since
+ending an encoder only stops work being encoded together. Same detection as the
+read-after-write split, stronger primitive: updateFence on the encoder that wrote, before
+it ends, and waitForFence on the encoder that reads - the pairing MoltenVK produces for a
+VkImageMemoryBarrier. RYUJINX_METAL_RAW_FENCE=1, and the counters confirm it engaged:
+1,159,640 fence waits against 2,550,493 splits, sync wait 326ms per 120 frames.
+
+    split only          172 150 165 155     mean 160.5 / 600
+    split + fence       145 166 162 134     mean 151.8 / 600
+    split only          141 174 160         mean 158.3 / 600
+
+Null. The strongest ordering primitive Metal offers, applied to exactly the pairs the
+split already identifies, changes nothing.
+
+So the floor is **not a synchronisation problem at all**. Ordering has now been attacked
+three ways - encoder splits at every read-after-write, near-total serialisation, and real
+fences - and the first bought 15 points while the other two bought zero.
+
+### The box, as it now stands
+
+    not ordering      splits partial, full serialisation nothing, fences nothing
+    not content       0x55 injected, screen red, 26.7% still white
+    not the binding   resource id, texture, root and program identical over 7,183 frames
+    not residency     declarations forced unconditional, no change
+    not the writer    one program writes the presented storage on both outcomes
+    not present       the FSR pass faithfully reproduces an already-white input
+    and Vulkan is at zero on the same machine, same driver, same save
+
+Everything reachable from the Metal side is measured identical between the outcomes, and
+every mechanism that could order or supply the data has been tried. What has never been
+compared is the one thing the two backends genuinely do not share: **the shader binary**.
+Both translate the same guest program, one to MSL and one to SPIR-V. The 1,771 pairs
+compared earlier in this document were MSL against GLSL, by operation count, not against
+what Vulkan actually runs. That is the remaining untouched axis.
