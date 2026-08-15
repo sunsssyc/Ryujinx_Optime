@@ -3838,3 +3838,9 @@ deletion, not a missing declaration by inspection, not a differing declaration c
 Note this arm sat on the menu for nine minutes before the drive-in's retries got it into the
 game - the menu figures (normal 3.00 over 15,000-odd frames, flat 0 over 0) are the title
 screen and mean nothing. Only the counts after `2527 draws/frame` appears are gameplay.
+
+The gate voids this arm's *rate* (luma 75, dragged down by the nine menu minutes), and that
+verdict is correct - 5.54% from this run must not be compared with anything. The declaration
+count survives it: three-versus-three is a structural property of a draw, not a rate, and the
+1,129 flat frames it averages over are gameplay frames, since flat frames do not occur on the
+menu at all.
