@@ -3876,3 +3876,28 @@ The gate voids this arm's rate as well (luma 100, so 11.93% must not be compared
 anything). As with the residency count, the mismatch figure is not a rate: zero mismatches
 across 2,505 genuine flat frames is zero whatever the scene's brightness, and flat frames
 only occur in gameplay.
+
+### Forcing a full rebind changes nothing
+
+`UpdateAndBind` only runs for a set whose dirty flag is set, so a draw whose textures are
+considered clean keeps whatever argument buffer was bound earlier - while
+`RenderEncoderBindings.Clear()` at the top of the prepass has already released the list that
+held it. That is a real hazard and it is not this fault:
+`RYUJINX_METAL_FULL_REBIND=1`, which rebuilds and rebinds every set from current handles on
+every draw, measures 22.32% on a gated arm (luma 141, 11,399 frames) against a 21-23%
+baseline. The binding is not stale.
+
+Every contained intervention on this axis has now been tried and measured:
+
+    deferred deletion of temporary buffers   no effect   (23.66% vs 21.59%)
+    argument buffer on its own allocation    worse       (34.79%, 32.67% with the fix)
+    forced full rebind every draw            no effect   (22.32%)
+    residency declarations at the draw       identical   (3.00 vs 3.00)
+    argument buffer overwritten by frame end never       (0/2,505 flat)
+
+The one intervention left on this axis is the one that cannot be done with a switch: taking
+the composite's textures out of the argument buffer entirely and binding them directly. The
+MSL declares them as `constant Textures &textures [[buffer(19)]]`, so this needs the MSL
+declaration emitter, every access site, and the backend's binding path to change together,
+plus a `CodeGenVersion` bump and a full retranslation. It is the only untried thing that
+removes the indirection whose *allocation strategy alone* moves the rate by eleven points.
