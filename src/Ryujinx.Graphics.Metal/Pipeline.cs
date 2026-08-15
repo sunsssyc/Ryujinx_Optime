@@ -209,6 +209,17 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        /// <summary>
+        /// A blit write - SetData, CopyTo - into this storage. Reached from Texture,
+        /// which has no view of the encoder state, and it is the same read-after-write
+        /// hazard as an attachment write: the Vulkan path barriers a transfer-write
+        /// before a shader read exactly as it barriers a colour-attachment write.
+        /// </summary>
+        internal void NoteStorageWritten(IntPtr root)
+        {
+            _encoderStateManager.NoteAttachmentWritten(root);
+        }
+
         private bool SkipThisDraw()
         {
             if (SkipThisProgram())
@@ -1106,10 +1117,13 @@ namespace Ryujinx.Graphics.Metal
 
             CommandBuffer = (Cbs = _renderer.CommandBufferPool.ReturnAndRent(Cbs)).CommandBuffer;
 
-            // The read-after-write set is scoped to a command buffer: Metal orders whole
-            // command buffers, so a write in the retired one is already ordered against
-            // anything the new one does. Carrying the set across would make every draw
-            // that samples anything split, forever.
+            // Scoped to the command buffer. Widening it to the whole frame was tried,
+            // on the reasoning that auto-flush rotates the command buffer ~245 times a
+            // frame and clearing here hides most read-after-write pairs from the check.
+            // It made every draw its own pass - 197 passes a frame became 2509, sync
+            // waits went to 10.8 seconds per 120 frames - and the flat rate did not move
+            // at all: 25.3% against 24.3% for this cheap version. The extra pairs it
+            // caught are not the ones that matter.
             _encoderStateManager.ClearWrittenThisCb();
 
             // Mirrors live in staging reservations owned by the command buffer that is

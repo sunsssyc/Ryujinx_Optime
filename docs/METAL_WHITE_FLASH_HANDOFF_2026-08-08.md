@@ -2860,3 +2860,32 @@ This reframes the whole investigation. The fault is a read-after-write hazard th
 Metal's automatic tracking does not fully cover in this backend's encoder structure. The
 driver is not misbehaving for no reason; we are asking it for something Vulkan never asks
 for, and it is only the two together that produce white.
+
+### The split has a floor at about 25%, and it is not a hazard
+
+Three variants were measured, each A/B/A in its own daylight window with the picture
+verified alive:
+
+    colour attachments, command-buffer scope   45.2% -> 24.3% -> 41.5%   +97 passes/frame
+    + depth, storage images, blit writes       41.2% -> 25.0% -> 42.4%   no change
+    + frame scope instead of command buffer    39.9% -> 25.3% -> 40.0%   2509 passes/frame
+
+The second added every other channel the Vulkan path would barrier - depth attachments,
+shader image stores, SetData and CopyTo - and bought nothing. The third widened the set
+to the whole frame, which with ~245 auto-flushes a frame means essentially nothing is
+hidden from the check any more; it made every draw its own pass, took sync waits to 10.8
+seconds per 120 frames, and the rate did not move.
+
+So serialisation buys about 15 points and then stops dead. The fault has two components:
+one that responds to ordering and one that is completely indifferent to it. That matches
+the ledger's oldest quantitative note - per-draw full serialisation moved 49% to 34% -
+which nobody could interpret at the time.
+
+The cheap variant is kept (colour attachments, command-buffer scope,
+RYUJINX_METAL_RAW_SPLIT=1) because it removes nearly half the occurrences for ~50% more
+passes. The expensive ones are reverted: they cost enormously and buy nothing.
+
+What is left is the floor: a quarter of frames come out white with the frame almost fully
+serialised, every write channel barriered, and every upstream observable measured
+identical. Vulkan is at zero under the same conditions, so the floor is still a backend
+difference - just not an ordering one.
