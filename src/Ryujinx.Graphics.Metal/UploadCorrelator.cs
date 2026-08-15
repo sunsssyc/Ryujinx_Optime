@@ -112,6 +112,12 @@ namespace Ryujinx.Graphics.Metal
         // exactly how a "this build might suppress it" result was once produced.
         private static double _lumaFlatSum, _lumaNormalSum;
 
+        // Shape of the sampled grid on flat frames: the per-frame darkest and brightest
+        // sample, the spread, and how many of the grid actually saturated. Kept separately
+        // for normal frames so the two can be read against each other.
+        private static double _flatMinSum, _flatMaxSum, _flatSdSum, _flatSatSum;
+        private static double _normalMinSum, _normalMaxSum, _normalSdSum;
+
         // What a viewer actually counts is flashes, not flat frames. Consecutive flat
         // frames are one flash; a change that halves the flat *frames* while leaving the
         // number of runs alone looks like no change at all, which is what was reported
@@ -496,6 +502,9 @@ namespace Ryujinx.Graphics.Metal
             byte* p = (byte*)_buf.Contents + index * Pixels * BytesPerPixel;
             int saturated = 0;
             double lumaSum = 0;
+            double lumaSqSum = 0;
+            double lumaMin = 255;
+            double lumaMax = 0;
 
             for (int i = 0; i < Pixels; i++)
             {
@@ -503,6 +512,17 @@ namespace Ryujinx.Graphics.Metal
                 double luma = (px[0] + px[1] + px[1] + px[2]) * 0.25;
 
                 lumaSum += luma;
+                lumaSqSum += luma * luma;
+
+                if (luma < lumaMin)
+                {
+                    lumaMin = luma;
+                }
+
+                if (luma > lumaMax)
+                {
+                    lumaMax = luma;
+                }
 
                 if (luma >= SaturatedLuma)
                 {
@@ -512,8 +532,23 @@ namespace Ryujinx.Graphics.Metal
 
             bool flat = saturated >= SaturatedNeeded;
 
+            // The shape of the white, not just the fact of it. Everything downstream of
+            // this classifier has been asking who wrote white; nothing has asked what the
+            // white looks like, and the two answers point at completely different faults.
+            // A uniform fill - an undefined allocation, a clear, a discarded store - has
+            // min == max and no spread. A real image driven to saturation by a bad
+            // exposure or tonemap keeps its dark pixels and its structure, so min stays
+            // well below max and the spread survives.
+            double mean = lumaSum / Pixels;
+            double variance = (lumaSqSum / Pixels) - (mean * mean);
+            double sd = variance > 0 ? Math.Sqrt(variance) : 0;
+
             if (flat)
             {
+                _flatMinSum += lumaMin;
+                _flatMaxSum += lumaMax;
+                _flatSdSum += sd;
+                _flatSatSum += saturated;
                 _lumaFlatSum += lumaSum / Pixels;
                 _runFrames++;
                 _currentRun++;
@@ -532,6 +567,9 @@ namespace Ryujinx.Graphics.Metal
             }
             else
             {
+                _normalMinSum += lumaMin;
+                _normalMaxSum += lumaMax;
+                _normalSdSum += sd;
                 _lumaNormalSum += lumaSum / Pixels;
                 _currentGap++;
 
@@ -660,6 +698,8 @@ namespace Ryujinx.Graphics.Metal
 
             sb.Append($"uploadcorr: classified={_flatFrames + _normalFrames} flat={_flatFrames} normal={_normalFrames} dropped={_dropped}");
             sb.Append($" | luma flat {(_flatFrames > 0 ? _lumaFlatSum / _flatFrames : 0):F0}, normal {(_normalFrames > 0 ? _lumaNormalSum / _normalFrames : 0):F0}");
+            sb.Append($" | shape flat min {(_flatFrames > 0 ? _flatMinSum / _flatFrames : 0):F0} max {(_flatFrames > 0 ? _flatMaxSum / _flatFrames : 0):F0} sd {(_flatFrames > 0 ? _flatSdSum / _flatFrames : 0):F1} sat {(_flatFrames > 0 ? _flatSatSum / _flatFrames : 0):F1}/{Pixels}");
+            sb.Append($", normal min {(_normalFrames > 0 ? _normalMinSum / _normalFrames : 0):F0} max {(_normalFrames > 0 ? _normalMaxSum / _normalFrames : 0):F0} sd {(_normalFrames > 0 ? _normalSdSum / _normalFrames : 0):F1}");
             sb.Append($" | upload: flat {_flatWithUpload}/{_flatFrames}, normal {_normalWithUpload}/{_normalFrames}");
             sb.Append($" | uploadOntoRT: flat {_flatWithUploadOntoRt}, normal {_normalWithUploadOntoRt}");
             sb.Append($" | copy: flat {_flatWithCopy}/{_flatFrames}, normal {_normalWithCopy}/{_normalFrames}");

@@ -3407,3 +3407,31 @@ which would defeat argument-buffer hazard tracking - is excluded on both sides.
 Texture allocation counts came out at 15,768 against 12,597 over comparable sessions. An
 earlier capped run made this look like a 33x gap; it is not, and the capped figure was
 never quoted for exactly that reason.
+
+### The shape of the white - instrument added, measurement blocked
+
+The classifier reduced every frame to a boolean and every probe since has asked *who wrote
+white*. Nobody asked what the white looks like. A uniform fill - an undefined allocation, a
+clear, a discarded store - has min == max and no spread. A real image driven to saturation
+by a bad exposure or tonemap keeps its dark pixels, so min stays well below max. Those two
+answers point at completely different faults and the existing 25-point grid could always
+have told them apart.
+
+`UploadCorrelator` now reports, per outcome, the mean per-frame darkest sample, brightest
+sample, spread, and how many of the 25 actually saturated. No MSL changed, so no
+CodeGenVersion bump.
+
+**The measurement did not happen: the repro save is no longer being loaded.** Two v134 runs
+both reported flat=0 over 10,199 frames with normal-frame mean luma of 57-58 and a spread of
+43, against 138 in every v132/v133 arm earlier the same day. That is real gameplay - the
+numbers drift slowly across the run - but in a dark scene, where this fault is known to go
+to zero. `drive_in.sh` selects the save by pressing A three times on the top of the load
+list, and this game has been launched a dozen-plus times today; TOTK writes autosaves, so
+the top entry is very likely no longer the 4:45 PM daylight save the repro depends on.
+
+Before any further measurement: confirm which entry the drive-in actually selects, and gate
+every arm on normal-frame mean luma being near 138. A dark run reports zero flat frames and
+reads exactly like a fix - the same failure mode the correlator already warns about for a
+black picture, arriving by a different route.
+
+The arms measured earlier today all show luma 138 and remain comparable with each other.
