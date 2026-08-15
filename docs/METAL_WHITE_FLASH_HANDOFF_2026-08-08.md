@@ -3435,3 +3435,26 @@ reads exactly like a fix - the same failure mode the correlator already warns ab
 black picture, arriving by a different route.
 
 The arms measured earlier today all show luma 138 and remain comparable with each other.
+
+### An admissibility gate for every arm
+
+`tools/arm_valid.py <run.log>` decides whether an arm may be quoted at all, and it is now
+the first thing to run on any measurement. It rejects a run whose normal-frame mean luma is
+far from the repro scene's 138, and one that classified too few frames to compare. Against
+today's arms:
+
+    setdata.log      OK    luma 138, 13799 frames, flat 18.94%
+    spvrun-fix.log   OK    luma 128,  6599 frames, flat 21.23%
+    ab-A-v132.log    OK    luma 135, 15599 frames, flat 17.25%
+    shape.log        VOID  luma 58 - 80 off the repro scene
+    shape2.log       VOID  luma 58 - 80 off the repro scene
+
+That is the whole point: both VOID runs reported flat=0 over 10,199 frames and would have
+read as a complete fix.
+
+Still open, and blocking the shape measurement: the drive-in no longer lands on the repro
+save. An attempt to screenshot the load list failed at window enumeration (`WID None`)
+rather than at the game, so which entry is now on top is still unknown. TOTK writes
+autosaves and this game has been launched well over a dozen times in one day, so the
+likeliest story remains that an autosave has displaced the 4:45 PM daylight save that
+`drive_in.sh` selects by pressing A three times on the top of the list.
