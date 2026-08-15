@@ -738,10 +738,20 @@ namespace Ryujinx.Graphics.Metal
             {
                 ShaderSource shader = _shaders[i];
 
+                // FastMathEnabled defaults to YES, so every shader here has been compiled
+                // with fast math whether or not anyone chose it. That permits
+                // flush-to-zero on denormals, and the composite ends in
+                // clamp(x * numerator, 0, 1) * 3.5 where numerator is a reciprocal: a
+                // denormal divisor flushed to zero gives infinity, which clamps to 1.0 -
+                // white, and white that owes nothing to what the texture holds, which is
+                // this fault's most stubborn property. The ledger's "Metal fast math"
+                // row belongs to the era whose probes were aimed at the tonemap, the
+                // wrong shader. RYUJINX_METAL_FAST_MATH=0 turns it off.
                 using MTLCompileOptions compileOptions = new()
                 {
                     PreserveInvariance = true,
                     LanguageVersion = MTLLanguageVersion.Version31,
+                    FastMathEnabled = Environment.GetEnvironmentVariable("RYUJINX_METAL_FAST_MATH") != "0",
                 };
                 int index = i;
 

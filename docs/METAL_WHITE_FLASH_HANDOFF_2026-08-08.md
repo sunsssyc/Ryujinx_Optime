@@ -3155,3 +3155,20 @@ Still to do, and it is the immediate next step: measure the flat rate on this bu
 *without* validation, which is far too slow to measure under. The first two fixes were
 each measured null on their own (25% and 27.5%); the third has not been measured, and
 neither has all three together.
+
+### Fast math: on by default all along, and not it either
+
+`MTLCompileOptions.FastMathEnabled` was never set, and its default is YES - so every
+shader here has been compiled with fast math whether or not anyone chose it. That permits
+flush-to-zero on denormals, and the composite ends in `clamp(x * numerator, 0, 1) * 3.5`
+with `numerator` a reciprocal: a denormal divisor flushed to zero gives infinity, which
+clamps to 1.0. White that owes nothing to the texture's contents - this fault's most
+stubborn property. The ledger's "Metal fast math, 31.90%" row belongs to the era whose
+probes were aimed at the tonemap, so it did not cover this.
+
+RYUJINX_METAL_FAST_MATH=0, CodeGenVersion 7376 so nothing comes from the warm cache,
+zero link failures: **30% against a floor of 27%**. Null.
+
+That closes the compile-options axis alongside the API-legality one. What remains
+untouched is still the shader binary itself - not its compile flags but its content,
+against what Vulkan actually runs.
