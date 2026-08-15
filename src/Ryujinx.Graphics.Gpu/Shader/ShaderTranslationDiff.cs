@@ -63,6 +63,23 @@ namespace Ryujinx.Graphics.Gpu.Shader
                     : ShaderCache.DecodeGraphicsShader(gpuAccessor, TargetApi.OpenGL, TranslationFlags.None, context.Address);
 
                 File.WriteAllText(stem + ".glsl", glslContext.Translate(asCompute).Code ?? "<no code>");
+
+                // And what Vulkan actually runs. The GLSL above was only ever a readable
+                // stand-in: on this platform the Vulkan backend compiles SPIR-V, so an
+                // MSL-against-GLSL comparison - which is what the 1,771 pairs in the
+                // handoff document were - never looked at the program that does not
+                // flash. Emitted as the binary the backend would hand to the driver;
+                // disassemble with `spirv-dis` to read it.
+                TranslatorContext spirvContext = context.Stage == ShaderStage.Compute
+                    ? ShaderCache.DecodeComputeShader(gpuAccessor, TargetApi.Vulkan, context.Address)
+                    : ShaderCache.DecodeGraphicsShader(gpuAccessor, TargetApi.Vulkan, TranslationFlags.None, context.Address);
+
+                byte[] spirv = spirvContext.Translate(asCompute).BinaryCode;
+
+                if (spirv != null)
+                {
+                    File.WriteAllBytes(stem + ".spv", spirv);
+                }
             }
             catch (Exception exception)
             {

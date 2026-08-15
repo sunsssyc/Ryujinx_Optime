@@ -3172,3 +3172,26 @@ zero link failures: **30% against a floor of 27%**. Null.
 That closes the compile-options axis alongside the API-legality one. What remains
 untouched is still the shader binary itself - not its compile flags but its content,
 against what Vulkan actually runs.
+
+### The MSL/SPIR-V comparison: tool ready, comparison not run
+
+`ShaderTranslationDiff` now emits three files per guest program instead of two: the MSL
+the Metal backend runs, the GLSL it always emitted, and **the SPIR-V the Vulkan backend
+actually compiles** (`.spv`, `TargetApi.Vulkan`, which resolves to `TargetLanguage.Spirv`
+since `EnableSpirvCompilationOnVulkan` is true). The 1,771 pairs compared earlier in this
+document were MSL against GLSL - a readable stand-in, never the program that does not
+flash.
+
+    RYUJINX_SHADER_DIFF=<dir>     writes <hash>-<stage>.{msl,glsl,spv}
+    spirv-dis <file>.spv          to read it (brew install spirv-tools)
+
+One trap, hit again while wiring this up and recorded here for the fifth time: with a
+warm shader cache nothing goes through Translate, so the dump directory comes out empty.
+CodeGenVersion is bumped to 7377 for that reason; bump it again for any future run that
+needs fresh translations.
+
+The comparison itself has not been made. What to look for, given everything else is
+excluded: the composite is `ee89b4e471373459`, twelve texel fetches at level 0 in MSL.
+The question is whether its SPIR-V fetches differ in a way MSL cannot express or expresses
+differently - operand order, the level argument, sampled-vs-storage image type, or the
+decorations Vulkan attaches that MSL has no equivalent for.
