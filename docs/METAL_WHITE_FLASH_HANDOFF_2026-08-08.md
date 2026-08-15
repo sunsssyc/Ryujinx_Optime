@@ -3871,3 +3871,8 @@ timing makes the fetch return stale memory despite correct descriptors - and Vul
 through MoltenVK to the same driver on the same machine and save, never does it.
 
 This is the point at which the ledger stops being an investigation and becomes a report.
+
+The gate voids this arm's rate as well (luma 100, so 11.93% must not be compared with
+anything). As with the residency count, the mismatch figure is not a rate: zero mismatches
+across 2,505 genuine flat frames is zero whatever the scene's brightness, and flat frames
+only occur in gameplay.
