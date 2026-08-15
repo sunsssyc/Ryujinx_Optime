@@ -4603,3 +4603,24 @@ If flat frames are the ones where a buffer committed out of rental order, the fa
 and the fix is to commit in order - which is what MoltenVK gets for free, because
 `kMVKQueueCountPerQueueFamily = 1` means Vulkan on this platform never has a second queue to
 race with.
+
+### Out-of-order commits happen, and they are not the flash
+
+`CommandBufferPool` now stamps each buffer with a rental sequence and compares it against the
+order they are committed. Gated arm: luma 139, 11,399 frames, flat 21.43%.
+
+    out-of-order commits per frame   flat 0.54   normal 0.58
+
+They happen - about once every two frames - and they are not correlated with the outcome; if
+anything they are slightly rarer on white frames. So the residual that survives full
+serialisation is not commit-order inversion between command buffers either.
+
+Worth keeping the counter: half an inversion per frame is a real ordering hazard in general,
+and it is now measured rather than assumed. It is simply not this fault.
+
+That is the ninth gated intervention or measurement aimed at the ordering axis and its
+neighbours today. The monotonic trend across split levels is real (45%, 24%, 17%) and
+unexplained by any specific ordering violation that has been looked for: not read-after-write
+within an encoder, not tile-memory residency, not stores, not cross-command-buffer commit
+order. Something about ending passes reduces the fault without any of the named mechanisms
+accounting for it.

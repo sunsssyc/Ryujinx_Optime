@@ -70,6 +70,9 @@ namespace Ryujinx.Graphics.Metal
         private int _queuedIndexesPtr;
         private int _queuedCount;
         private int _inUseCount;
+        private readonly long[] _rentSeq;
+        private long _rentCounter;
+        private long _lastCommittedRentSeq;
 
         public CommandBufferPool(MTLCommandQueue queue, bool isLight = false)
         {
@@ -82,6 +85,7 @@ namespace Ryujinx.Graphics.Metal
             _commandBuffers = new ReservedCommandBuffer[_totalCommandBuffers];
 
             _queuedIndexes = new int[_totalCommandBuffers];
+            _rentSeq = new long[_totalCommandBuffers];
             _queuedIndexesPtr = 0;
             _queuedCount = 0;
         }
@@ -222,6 +226,7 @@ namespace Ryujinx.Graphics.Metal
                         entry.Use(_queue, _defaultEncoderFactory);
 
                         _inUseCount++;
+                        _rentSeq[cursor] = ++_rentCounter;
 
                         return new CommandBufferScoped(this, entry.CommandBuffer, entry.Encoders, cursor);
                     }
@@ -252,6 +257,21 @@ namespace Ryujinx.Graphics.Metal
                 _inUseCount--;
 
                 MTLCommandBuffer commandBuffer = entry.CommandBuffer;
+                // Commit order against rental order. Splitting passes only orders work
+                // inside one command buffer; between them the GPU follows commit order, and
+                // a thread that encodes logically-earlier work but commits later inverts
+                // the dependency. Thirty-two command buffers a frame here against
+                // MoltenVK's twenty-four, and MoltenVK cannot have this problem at all -
+                // kMVKQueueCountPerQueueFamily = 1 leaves it nothing to race with.
+                long seq = _rentSeq[cbs.CommandBufferIndex];
+
+                if (seq < _lastCommittedRentSeq)
+                {
+                    UploadCorrelator.NoteOutOfOrderCommit();
+                }
+
+                _lastCommittedRentSeq = seq;
+
                 commandBuffer.Commit();
 
                 int ptr = (_queuedIndexesPtr + _queuedCount) % _totalCommandBuffers;

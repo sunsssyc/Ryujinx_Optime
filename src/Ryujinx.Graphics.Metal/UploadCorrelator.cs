@@ -81,6 +81,7 @@ namespace Ryujinx.Graphics.Metal
             public (int Count, int Inst, int First, int Indexed) Draw;
             public string Indices;
             public string Attrib;
+            public int OutOfOrder;
             public IntPtr ArgPtr;
             public ulong[] ArgExpected;
             public int ArgCount;
@@ -327,6 +328,17 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        public static void NoteOutOfOrderCommit()
+        {
+            if (Enabled)
+            {
+                _frameOutOfOrder++;
+            }
+        }
+
+        private static int _frameOutOfOrder;
+        private static double _flatOooSum, _normalOooSum;
+        private static long _flatOooN, _normalOooN;
         private static string _frameAttrib;
         private static readonly Dictionary<string, (long Flat, long Normal)> _attribStats = new();
         private static string _frameIndices;
@@ -804,6 +816,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.Draw = _frameDraw;
                 mine.Indices = _frameIndices;
                 mine.Attrib = _frameAttrib;
+                mine.OutOfOrder = _frameOutOfOrder;
                 mine.ArgPtr = _frameArgPtr;
                 mine.ArgCount = _frameArgCount;
 
@@ -856,6 +869,7 @@ namespace Ryujinx.Graphics.Metal
             _frameDraw = (-1, -1, -1, -1);
             _frameIndices = null;
             _frameAttrib = null;
+            _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;
             _frameArgCount = 0;
             _frameLateWriter = null;
@@ -986,6 +1000,9 @@ namespace Ryujinx.Graphics.Metal
                 _normalDrawSum += slot.CompositeDraws;
                 _normalDrawN++;
             }
+
+            if (flat) { _flatOooSum += slot.OutOfOrder; _flatOooN++; }
+            else { _normalOooSum += slot.OutOfOrder; _normalOooN++; }
 
             if (slot.Attrib != null && _attribStats.Count < 32)
             {
@@ -1296,6 +1313,7 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | blit vertex spread (distinct of 4): flat {(_flatVertN > 0 ? _flatVertSum / _flatVertN : 0):F2} over {_flatVertN}, normal {(_normalVertN > 0 ? _normalVertSum / _normalVertN : 0):F2} over {_normalVertN}");
             sb.Append($" | composite draws/frame: flat {(_flatDrawN > 0 ? _flatDrawSum / _flatDrawN : 0):F2}, normal {(_normalDrawN > 0 ? _normalDrawSum / _normalDrawN : 0):F2}");
             sb.Append($" | argbuf overwritten by frame end: flat {_flatArgMismatch}/{_flatArgChecked}, normal {_normalArgMismatch}/{_normalArgChecked}");
+            sb.Append($" | out-of-order commits/frame: flat {(_flatOooN > 0 ? _flatOooSum / _flatOooN : 0):F2}, normal {(_normalOooN > 0 ? _normalOooSum / _normalOooN : 0):F2}");
             sb.Append($" | composite residency decls: flat {(_flatResidencyN > 0 ? _flatResidencySum / _flatResidencyN : 0):F2} over {_flatResidencyN}, normal {(_normalResidencyN > 0 ? _normalResidencySum / _normalResidencyN : 0):F2} over {_normalResidencyN}");
             sb.Append($" | input written after the composite read it: flat {_flatLateWrites}/{_flatFrames}, normal {_normalLateWrites}/{_normalFrames}");
 
