@@ -289,6 +289,9 @@ namespace Ryujinx.Graphics.Metal
         ///
         /// RYUJINX_METAL_SHOWFETCH=&lt;label&gt;:&lt;tempA&gt;,&lt;tempB&gt;
         /// </summary>
+        private static readonly bool _clampFetch =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_CLAMP_FETCH") == "1";
+
         private static readonly string[] _showFetch =
             (Environment.GetEnvironmentVariable("RYUJINX_METAL_SHOWFETCH") ?? string.Empty)
                 .Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -432,6 +435,56 @@ namespace Ryujinx.Graphics.Metal
 
                     Logger.Warning?.PrintMsg(LogClass.Gpu,
                         $"diagnostic: {DebugLabel} greens pixels where any of {string.Join(",", temps)} is NaN");
+                }
+            }
+
+            // Clamp every texel fetch to the texture it reads.
+            //
+            // Metal leaves texture.read() with out-of-range coordinates undefined.
+            // Vulkan does not: OpImageFetch out of bounds is well defined and returns
+            // zero. That is a difference the two backends genuinely do not share, it
+            // needs no ordering to go wrong, it ignores what the texture contains, and
+            // dynamic resolution supplies the out-of-range coordinates for free - the
+            // GPU capture caught the scene at 800x448 while the shader was written for
+            // 1600x896. It even explains the day/night gate mechanically for the first
+            // time: dynamic resolution scales down when the GPU is loaded, which is a
+            // bright complex daylight scene and not a night one.
+            //
+            // The ledger has a "clamping the shader's texture fetches" row at 33.99%,
+            // but that whole table is about the tonemap - the shader the probes of that
+            // era were hardcoded to, which was later shown to be the wrong target. The
+            // composite has never been clamped.
+            //
+            // RYUJINX_METAL_CLAMP_FETCH=1. Rewrites tex.read(uint2(a, b), 0) into a form
+            // that clamps against get_width()/get_height(), which costs two extra ALU
+            // ops per fetch and cannot change a correct read.
+            //
+            // The texture name must be captured with its qualifier: these live in an
+            // argument buffer, so the receiver is "textures.tex_fp_t_tcb_8" and matching
+            // only \w+ produced "tex_fp_t_tcb_8.get_width()", an undefined identifier.
+            // Every patched shader then failed to compile, the pipeline came back null,
+            // the draws were skipped, and the scene rendered black with the HUD intact -
+            // which looks enough like the fault to be mistaken for it.
+            if (_clampFetch)
+            {
+                int clamped = 0;
+
+                code = System.Text.RegularExpressions.Regex.Replace(
+                    code,
+                    @"([\w.]+)\.read\(uint2\(([^()]+)\), 0\)",
+                    m =>
+                    {
+                        clamped++;
+                        string tex = m.Groups[1].Value;
+                        string coord = m.Groups[2].Value;
+
+                        return $"{tex}.read(min(uint2({coord}), uint2({tex}.get_width() - 1, {tex}.get_height() - 1)), 0)";
+                    });
+
+                if (clamped > 0)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"diagnostic: {DebugLabel} clamped {clamped} texel fetches to texture bounds");
                 }
             }
 

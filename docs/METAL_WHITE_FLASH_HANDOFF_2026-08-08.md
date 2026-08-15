@@ -3022,3 +3022,36 @@ compared is the one thing the two backends genuinely do not share: **the shader 
 Both translate the same guest program, one to MSL and one to SPIR-V. The 1,771 pairs
 compared earlier in this document were MSL against GLSL, by operation count, not against
 what Vulkan actually runs. That is the remaining untouched axis.
+
+### Out-of-bounds texel fetch: the best-fitting hypothesis, and it is wrong
+
+Metal leaves `texture.read()` with out-of-range coordinates undefined; Vulkan does not -
+`OpImageFetch` out of bounds is well defined. That is a genuine difference the two
+backends do not share, it needs no ordering, it ignores what the texture contains, and
+dynamic resolution supplies out-of-range coordinates for free: the GPU capture caught the
+scene at 800x448 while the shader was written for 1600x896. It even explains the day/night
+gate mechanically for the first time - dynamic resolution scales down when the GPU is
+loaded, which is a bright complex daylight scene and not a night one.
+
+The ledger's "clamping the shader's texture fetches, 33.99%" row does not exclude it:
+that whole table is about the tonemap, the shader the probes of that era were hardcoded
+to and which was later shown to be the wrong target. The composite had never been clamped.
+
+RYUJINX_METAL_CLAMP_FETCH=1 rewrites every `tex.read(uint2(a, b), 0)` to clamp against
+get_width()/get_height(), with CodeGenVersion bumped to 7375 so nothing is served from
+the warm cache. Verified engaged on the right shader: `ee89b4e471373459 clamped 12 texel
+fetches`, the composite, with exactly the twelve fetches this document identified, and
+zero shader link failures.
+
+    24.7% flat, against a floor of 25-26% without it
+
+Null. Out-of-bounds fetch is excluded, which also fits the earlier coordinate measurement
+(spans 131/119 against 130/124 - the coordinates were never collapsing or running away).
+
+One instrument note, because the first attempt produced a result that looked like the
+fault: the rewrite captured the texture name with `\w+`, which drops the argument-buffer
+qualifier and yields `tex_fp_t_tcb_8.get_width()`. Every patched shader failed to link,
+the pipeline came back null, the draws were skipped, and the scene rendered **black with
+the HUD intact** - the same shape as the artefact. `Fragment shader linking failed` in
+the log is what separated them. Any shader patch must be checked for link failures before
+its measurement is believed.
