@@ -75,6 +75,7 @@ namespace Ryujinx.Graphics.Metal
             public bool InputSampled;
             public bool InputWrittenAfter;
             public int Residency;
+            public int CompositeDraws;
             public IntPtr ArgPtr;
             public ulong[] ArgExpected;
             public int ArgCount;
@@ -130,6 +131,13 @@ namespace Ryujinx.Graphics.Metal
         // premature deletion nor a missing declaration by inspection - so count what is
         // issued rather than what the source says should be.
         private static int _frameResidency = -1;
+
+        // How many times the composite draws in one frame. Nothing established this was
+        // once, and the per-frame program signatures show programs repeating - so every
+        // input measurement taken here may describe only the last invocation.
+        private static int _frameCompositeDraws;
+        private static double _flatDrawSum, _normalDrawSum;
+        private static long _flatDrawN, _normalDrawN;
 
         // The argument buffer's own bytes, remembered at the composite draw and re-read at
         // present. Everything so far compared the id Ryujinx computed; this compares the id
@@ -420,6 +428,7 @@ namespace Ryujinx.Graphics.Metal
 
             if (storage != null)
             {
+                _frameCompositeDraws++;
                 _compositeInputRoot = storage.CanonicalPtr;
                 _compositeSeq = _frameSeq;
             }
@@ -650,6 +659,7 @@ namespace Ryujinx.Graphics.Metal
 
                 mine.InputWrittenAfter = _frameInputWrittenAfter;
                 mine.Residency = _frameResidency;
+                mine.CompositeDraws = _frameCompositeDraws;
                 mine.ArgPtr = _frameArgPtr;
                 mine.ArgCount = _frameArgCount;
 
@@ -696,6 +706,7 @@ namespace Ryujinx.Graphics.Metal
             _frameSeq = 0;
             _frameInputWrittenAfter = false;
             _frameResidency = -1;
+            _frameCompositeDraws = 0;
             _frameArgPtr = IntPtr.Zero;
             _frameArgCount = 0;
             _frameLateWriter = null;
@@ -814,6 +825,17 @@ namespace Ryujinx.Graphics.Metal
                     _normalArgChecked++;
                     if (differs) { _normalArgMismatch++; }
                 }
+            }
+
+            if (flat)
+            {
+                _flatDrawSum += slot.CompositeDraws;
+                _flatDrawN++;
+            }
+            else
+            {
+                _normalDrawSum += slot.CompositeDraws;
+                _normalDrawN++;
             }
 
             if (slot.Residency >= 0)
@@ -1065,6 +1087,7 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
 
+            sb.Append($" | composite draws/frame: flat {(_flatDrawN > 0 ? _flatDrawSum / _flatDrawN : 0):F2}, normal {(_normalDrawN > 0 ? _normalDrawSum / _normalDrawN : 0):F2}");
             sb.Append($" | argbuf overwritten by frame end: flat {_flatArgMismatch}/{_flatArgChecked}, normal {_normalArgMismatch}/{_normalArgChecked}");
             sb.Append($" | composite residency decls: flat {(_flatResidencyN > 0 ? _flatResidencySum / _flatResidencyN : 0):F2} over {_flatResidencyN}, normal {(_normalResidencyN > 0 ? _normalResidencySum / _normalResidencyN : 0):F2} over {_normalResidencyN}");
             sb.Append($" | input written after the composite read it: flat {_flatLateWrites}/{_flatFrames}, normal {_normalLateWrites}/{_normalFrames}");

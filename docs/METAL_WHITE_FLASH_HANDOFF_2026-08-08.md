@@ -3923,3 +3923,19 @@ does mean the input side is less settled than the rest of this section reads.
 frame, split by outcome. It is a two-line change to the probe that already exists
 (`IsTexelFetchComposite` identifies the program), and if the count is greater than one, the
 input measurements need redoing per invocation rather than per frame.
+
+### The composite draws exactly once on a white frame - the hole is closed
+
+Gated arm: luma 142, 11,399 frames, flat 20.87%.
+
+    composite draws per frame   flat 1.00   normal 0.93
+
+Exactly one on every flat frame, with no variance. The worry raised in the previous section
+- that `NoteSceneBinding` keeps the last invocation and the composite might draw several
+times - does not apply on the frames that matter. Every input measurement in this document
+describes the only invocation there was, and those conclusions stand.
+
+The 0.93 on normal frames is the other half of the fact: on roughly seven percent of good
+frames the composite does not draw at all, while it is never absent when the frame goes
+white. It is always there to paint the white, which is consistent with everything else and
+narrows nothing further by itself.
