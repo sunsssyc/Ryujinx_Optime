@@ -3805,3 +3805,20 @@ resident, and an argument table read while non-resident returns garbage ids, whi
 taps at another texture and produces exactly the uniform fill that is measured. The next
 probe is to count `useResource` declarations naming the argument buffer itself, split by
 outcome, and compare the two allocation strategies.
+
+### Residency audit of the argument buffer: no gap found
+
+Every site that writes a resource id into the argument table was checked against the
+`AddResource` call that declares the same resource to the encoder. On the graphics path the
+pairing holds: the texture and image branches each declare what they name, the sampler
+branch writes sampler ids and correctly does not declare them (samplers need no residency),
+and the array branch declares once per texture in the same loop that writes the ids. The
+guard inside `AddResource` skips a null pointer, but `AddressForTexture` derives the id and
+the pointer from the same `MTLTexture`, so an id cannot be written for a resource whose
+pointer is null.
+
+So the eleven-point cost of a per-draw allocation is not a missing `useResource` either, on
+this reading of the code. What has not been done is to observe it rather than read it -
+count the declarations actually issued per draw under each allocation strategy, split by
+outcome, and see whether the counts differ. That is the next probe, and it is the last
+untried thing on this axis.
