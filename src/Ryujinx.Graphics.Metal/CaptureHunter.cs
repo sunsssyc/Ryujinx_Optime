@@ -72,6 +72,7 @@ namespace Ryujinx.Graphics.Metal
 
         private static bool _capturing;
         private static bool _closePending;
+        private static bool _awaitingVerdict;
         private static bool _armedThisFrame;
         private static bool _done;
         private static int _attempts;
@@ -265,7 +266,9 @@ namespace Ryujinx.Graphics.Metal
                 blit.CopyFromTexture(tex, 0, 0, origin, one, _watch,
                     (ulong)((watchSlot * Pixels + i) * BytesPerPixel), BytesPerPixel, BytesPerPixel);
 
-                if (_armedThisFrame)
+                // Also on the frame after a capture: the verdict is taken there, not on
+                // the captured frame.
+                if (_armedThisFrame || _awaitingVerdict)
                 {
                     blit.CopyFromTexture(tex, 0, 0, origin, one, _samples,
                         (ulong)(i * BytesPerPixel), BytesPerPixel, BytesPerPixel);
@@ -335,6 +338,37 @@ namespace Ryujinx.Graphics.Metal
 
             _frame++;
 
+            // The verdict on a capture is taken one frame late, deliberately. The
+            // presented surface was last a colour attachment one frame before it is
+            // shown - measured, not assumed: 1461 flat and 3911 normal frames at age 1
+            // against 1 and 26 at age 0 - so the white is written into it during frame
+            // N-1 and displayed at frame N. Every capture taken on the frame that
+            // *displays* white therefore holds the frame after the crime. This is the
+            // same one-frame error the ledger already recorded once for the in-frame
+            // probes, repeated here with a GPU capture.
+            if (_awaitingVerdict)
+            {
+                _awaitingVerdict = false;
+                _attempts++;
+
+                if (Verdict(out int saturated, out double meanLuma))
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"capture hunter: KEPT the frame before a flat one after {_attempts} attempts " +
+                        $"(next frame saturated {saturated}/{Pixels}, mean luma {meanLuma:F0}): {_outputPath}");
+
+                    _done = true;
+
+                    return;
+                }
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"capture hunter: attempt {_attempts} - the next frame was normal " +
+                    $"(saturated {saturated}/{Pixels}, mean luma {meanLuma:F0}), discarding");
+
+                Discard();
+            }
+
             if (_capturing)
             {
                 if (_closePending)
@@ -345,51 +379,12 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 _capturing = false;
+                _awaitingVerdict = true;
+                _armedThisFrame = false;
+
+                return;
                 _attempts++;
 
-                byte* p = (byte*)_samples.Contents;
-                int saturated = 0;
-                double lumaSum = 0;
-
-                for (int i = 0; i < Pixels; i++)
-                {
-                    byte* px = p + i * BytesPerPixel;
-                    double luma = (px[0] + px[1] + px[1] + px[2]) * 0.25;
-
-                    lumaSum += luma;
-
-                    if (luma >= SaturatedLuma)
-                    {
-                        saturated++;
-                    }
-                }
-
-                if (saturated >= SaturatedNeeded)
-                {
-                    Logger.Warning?.PrintMsg(LogClass.Gpu,
-                        $"capture hunter: KEPT a flat frame after {_attempts} attempts " +
-                        $"(saturated {saturated}/{Pixels}, mean luma {lumaSum / Pixels:F0}): {_outputPath}");
-
-                    _done = true;
-
-                    return;
-                }
-
-                Logger.Warning?.PrintMsg(LogClass.Gpu,
-                    $"capture hunter: attempt {_attempts} was a normal frame " +
-                    $"(saturated {saturated}/{Pixels}, mean luma {lumaSum / Pixels:F0}), discarding");
-
-                try
-                {
-                    if (Directory.Exists(_outputPath))
-                    {
-                        Directory.Delete(_outputPath, true);
-                    }
-                }
-                catch (IOException)
-                {
-                    // Leaving one behind is harmless; the name carries the attempt number.
-                }
             }
 
             if (_attempts >= _maxAttempts)
@@ -416,7 +411,46 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
-        public static bool WantsSyncThisFrame => Enabled && !_done && _armedThisFrame;
+        public static bool WantsSyncThisFrame => Enabled && !_done && (_armedThisFrame || _awaitingVerdict);
+
+        private static unsafe bool Verdict(out int saturated, out double meanLuma)
+        {
+            byte* p = (byte*)_samples.Contents;
+            saturated = 0;
+            double lumaSum = 0;
+
+            for (int i = 0; i < Pixels; i++)
+            {
+                byte* px = p + i * BytesPerPixel;
+                double luma = (px[0] + px[1] + px[1] + px[2]) * 0.25;
+
+                lumaSum += luma;
+
+                if (luma >= SaturatedLuma)
+                {
+                    saturated++;
+                }
+            }
+
+            meanLuma = lumaSum / Pixels;
+
+            return saturated >= SaturatedNeeded;
+        }
+
+        private static void Discard()
+        {
+            try
+            {
+                if (Directory.Exists(_outputPath))
+                {
+                    Directory.Delete(_outputPath, true);
+                }
+            }
+            catch (IOException)
+            {
+                // Leaving one behind is harmless; the name carries the attempt number.
+            }
+        }
 
         /// <summary>
         /// True when a capture is about to be started, so the caller knows to flush the

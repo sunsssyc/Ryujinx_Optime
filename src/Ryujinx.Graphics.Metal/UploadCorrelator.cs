@@ -68,6 +68,9 @@ namespace Ryujinx.Graphics.Metal
             public Binding Binding;
             public Binding BindingLast;
             public string Signature;
+            public IntPtr PresentRoot;
+            public long PresentAge;
+            public string Writers;
         }
 
         private static MTLBuffer _buf;
@@ -108,6 +111,43 @@ namespace Ryujinx.Graphics.Metal
         // picture went black reports zero flat frames and reads as a fix - which is
         // exactly how a "this build might suppress it" result was once produced.
         private static double _lumaFlatSum, _lumaNormalSum;
+
+        // Two questions the captures could not settle by eye, asked as numbers instead.
+        //
+        // The HUD renders correctly over the white on a flat frame, and the hardware
+        // coverage counter says the composite covered all 2,073,600 pixels, so the
+        // presented surface *is* written during the frame - which sits badly with three
+        // GPU captures in which no encoder's attachment looked white. Judging a
+        // RG11B10Float attachment by a thumbnail is not evidence; these are.
+        //
+        //   identity  - is a *different* storage selected for presentation on flat
+        //               frames? That is the "selected already white" reading, and it is
+        //               one comparison.
+        //   age       - how many frames since that storage was last a colour attachment.
+        //               Zero means the frame drew into it; a large value on flat frames
+        //               only would mean it was presented stale.
+        private static readonly Dictionary<IntPtr, long> _lastAttachmentFrame = new();
+        private static readonly Dictionary<string, (long Flat, long Normal)> _presentIdentity = new();
+        private static readonly Dictionary<long, (long Flat, long Normal)> _presentAge = new();
+        private static IntPtr _framePresentRoot;
+        private static long _framePresentAge = -1;
+
+        // Which programs drew into the storage that will be presented, recorded for the
+        // frame that writes it rather than the frame that shows it. The age table
+        // measured 1461 flat and 3911 normal frames at age 1 against 1 and 26 at age 0:
+        // the surface shown at frame N was last an attachment at N-1, so the content -
+        // and the white - is written a frame before it appears. Every instrument aimed
+        // at the frame that displays white, this one included until now, was looking a
+        // frame late. A GPU capture of the writing frame showed the presented surface
+        // taking only a draw-based clear inside the window, and nothing else; whether
+        // that is the whole story on flat frames is what this answers, over thousands of
+        // frames instead of one.
+        private const int MaxWriters = 24;
+        private static readonly string[] _frameWriters = new string[MaxWriters];
+        private static int _frameWriterCount;
+        private static readonly Dictionary<string, (long Flat, long Normal)> _writerStats = new();
+        private static readonly Dictionary<IntPtr, string[]> _pendingWriters = new();
+        private static readonly Dictionary<IntPtr, int> _pendingWriterCount = new();
 
         private static readonly ulong[] _frameShapes = new ulong[8];
         private static int _frameShapeCount;
@@ -157,6 +197,35 @@ namespace Ryujinx.Graphics.Metal
         /// ours; identical ids mean the driver returned white for a correctly bound,
         /// correctly filled texture.
         /// </summary>
+        /// <summary>
+        /// The storage actually handed to the window this frame, and how long since
+        /// anything rendered into it. Called at present, before the samples are encoded.
+        /// </summary>
+        public static void NotePresented(Texture src)
+        {
+            if (!Enabled || src == null)
+            {
+                return;
+            }
+
+            _framePresentRoot = src.CanonicalPtr;
+            _framePresentAge = _lastAttachmentFrame.TryGetValue(src.CanonicalPtr, out long last)
+                ? _frame - last
+                : -1;
+
+            // The writers recorded against this storage since it was last presented -
+            // i.e. what drew into it during the frame that produced what is about to be
+            // shown.
+            _frameWriterCount = _pendingWriterCount.TryGetValue(src.CanonicalPtr, out int wc) ? wc : 0;
+
+            if (_frameWriterCount > 0)
+            {
+                Array.Copy(_pendingWriters[src.CanonicalPtr], _frameWriters, _frameWriterCount);
+            }
+
+            _pendingWriterCount[src.CanonicalPtr] = 0;
+        }
+
         public static void NoteSceneBinding(ulong gpuAddress, IntPtr nativePtr, IntPtr canonicalPtr, string program)
         {
             if (!Enabled)
@@ -199,6 +268,45 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _attachedThisFrame.Add(target.CanonicalPtr);
+            _lastAttachmentFrame[target.CanonicalPtr] = _frame;
+        }
+
+        /// <summary>
+        /// A draw landing on a colour attachment, with the program that issued it.
+        /// Accumulated per storage so the frame that writes the presented surface can be
+        /// described by what actually drew into it.
+        /// </summary>
+        public static void NoteAttachmentDraw(IntPtr root, string program)
+        {
+            if (!Enabled || root == IntPtr.Zero)
+            {
+                return;
+            }
+
+            if (!_pendingWriters.TryGetValue(root, out string[] writers))
+            {
+                writers = new string[MaxWriters];
+                _pendingWriters[root] = writers;
+                _pendingWriterCount[root] = 0;
+            }
+
+            int count = _pendingWriterCount[root];
+            string label = program ?? "?";
+            label = label.Length > 6 ? label[..6] : label;
+
+            for (int i = 0; i < count; i++)
+            {
+                if (writers[i] == label)
+                {
+                    return;
+                }
+            }
+
+            if (count < MaxWriters)
+            {
+                writers[count] = label;
+                _pendingWriterCount[root] = count + 1;
+            }
         }
 
         public static void NoteUpload(Texture target)
@@ -339,6 +447,11 @@ namespace Ryujinx.Graphics.Metal
                 mine.Binding = _frameBinding;
                 mine.BindingLast = _frameBindingLast;
                 mine.Signature = $"n={_frameBinding.Count} " + string.Join(",", _frameProgs, 0, _frameProgCount);
+                mine.PresentRoot = _framePresentRoot;
+                mine.PresentAge = _framePresentAge;
+                mine.Writers = _frameWriterCount == 0
+                    ? "<none>"
+                    : string.Join(",", _frameWriters, 0, _frameWriterCount);
                 mine.Valid = true;
             }
 
@@ -347,6 +460,8 @@ namespace Ryujinx.Graphics.Metal
             _frameBinding = default;
             _frameBindingLast = default;
             _frameProgCount = 0;
+            _framePresentRoot = IntPtr.Zero;
+            _framePresentAge = -1;
             _frameShapeCount = 0;
             _frameUploads = 0;
             _frameBigUploads = 0;
@@ -462,6 +577,22 @@ namespace Ryujinx.Graphics.Metal
                 _bindingStats[lastKey] = flat ? (lf + 1, ln) : (lf, ln + 1);
             }
 
+            if (slot.PresentRoot != IntPtr.Zero)
+            {
+                string key = $"0x{slot.PresentRoot:X}";
+                (long pf, long pn) = _presentIdentity.TryGetValue(key, out (long Flat, long Normal) pv) ? (pv.Flat, pv.Normal) : (0L, 0L);
+                _presentIdentity[key] = flat ? (pf + 1, pn) : (pf, pn + 1);
+
+                (long af, long an) = _presentAge.TryGetValue(slot.PresentAge, out (long Flat, long Normal) av) ? (av.Flat, av.Normal) : (0L, 0L);
+                _presentAge[slot.PresentAge] = flat ? (af + 1, an) : (af, an + 1);
+
+                if (slot.Writers != null && (_writerStats.Count < 64 || _writerStats.ContainsKey(slot.Writers)))
+                {
+                    (long wf, long wn) = _writerStats.TryGetValue(slot.Writers, out (long Flat, long Normal) wv) ? (wv.Flat, wv.Normal) : (0L, 0L);
+                    _writerStats[slot.Writers] = flat ? (wf + 1, wn) : (wf, wn + 1);
+                }
+            }
+
             if (slot.Signature != null &&
                 (_signatureStats.Count < MaxSignatures || _signatureStats.ContainsKey(slot.Signature)))
             {
@@ -498,6 +629,31 @@ namespace Ryujinx.Graphics.Metal
             foreach (KeyValuePair<string, (long Flat, long Normal)> pair in _bindingStats)
             {
                 sb.Append($"\n    flat {pair.Value.Flat,6}  normal {pair.Value.Normal,6}   {pair.Key}");
+            }
+
+            sb.Append("\n  presented storage, by outcome:");
+
+            foreach (KeyValuePair<string, (long Flat, long Normal)> pair in _presentIdentity)
+            {
+                sb.Append($"\n    flat {pair.Value.Flat,6}  normal {pair.Value.Normal,6}   root={pair.Key}");
+            }
+
+            sb.Append("\n  what drew into the presented storage, by outcome:");
+
+            List<KeyValuePair<string, (long Flat, long Normal)>> writers = new(_writerStats);
+            writers.Sort((a, b) => (b.Value.Flat + b.Value.Normal).CompareTo(a.Value.Flat + a.Value.Normal));
+
+            for (int i = 0; i < writers.Count && i < 10; i++)
+            {
+                long total = writers[i].Value.Flat + writers[i].Value.Normal;
+                sb.Append($"\n    flat {writers[i].Value.Flat,6} / {total,6} = {(total > 0 ? 100.0 * writers[i].Value.Flat / total : 0),5:F1}%  {writers[i].Key}");
+            }
+
+            sb.Append("\n  frames since that storage was last an attachment (-1 = never):");
+
+            foreach (KeyValuePair<long, (long Flat, long Normal)> pair in _presentAge)
+            {
+                sb.Append($"\n    flat {pair.Value.Flat,6}  normal {pair.Value.Normal,6}   age={pair.Key}");
             }
 
             sb.Append($"\n  scene-sampling signatures: {_signatureStats.Count}");

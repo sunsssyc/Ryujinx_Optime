@@ -2746,3 +2746,59 @@ Next, and it needs no capture and no GUI: for the texture actually handed to Win
 on a flat frame, record when its host storage was last written and by what. The correlator
 already has the identity and the per-frame classification; this is one more field in the
 same table.
+
+## 2026-08-15: the presented surface, asked three ways, identical every time
+
+The captures kept failing to find a writer, so the same questions were asked of the
+correlator instead - as statistics over thousands of frames rather than one trace.
+
+**Identity.** The storage handed to the window, split by outcome:
+
+    flat  712  normal 1988   root=0xBF9C75400
+    flat  750  normal 1949   root=0xBF9C76580
+
+Two surfaces alternating, each carrying flat and normal frames in the same proportion.
+"A different, already-white texture was selected for presentation" is dead.
+
+**Timing.** Frames since that storage was last a colour attachment:
+
+    flat    1  normal   26   age=0
+    flat 1461  normal 3911   age=1
+
+The surface shown at frame N was last drawn into at frame N-1. **The white is written a
+frame before it appears** - which is why four aiming strategies and three GPU captures
+could not find its writer: every one of them was pointed at the frame that displays the
+fault, not the frame that causes it. This is the same one-frame error this document
+already recorded for the in-frame probes, repeated with a capture tool.
+
+Fixing that (capture frame N, keep it only if frame N+1 is flat) produced a trace of the
+writing frame. Filtering the debug navigator by the presented storage - the only method
+that works, since Reveal in Dependencies is disabled for textures and Filter only offers
+itself for resources bound in that capture - showed exactly one user of it: a render
+encoder containing a "Clear Color Float" debug group and a single TriangleStrip draw
+whose fragment stage binds no textures at all. The draw-based clear was already measured
+as (0,0,0,0) black in this document, and the preview agrees.
+
+**Authorship.** Which programs drew into the presented storage during the frame that
+wrote it, split by outcome, over 5,399 classified frames:
+
+    flat 1546 / 5399 = 28.6%   480117
+
+One signature. A single program, `480117a3b1123d65`, writes that surface on flat and
+normal frames alike - and it is the same program the signature census already identified
+as the frame's last scene-class sampler.
+
+### Where that leaves the emulator side
+
+Every observable upstream of the output is now measured identical between the two
+outcomes, and each was verified positively rather than by elimination:
+
+    presented storage identity   identical   (both surfaces carry both outcomes)
+    writer program               identical   (one signature, 5399 frames)
+    write timing                 identical   (age 1 on both)
+    argument-buffer binding      identical   (four fields, byte for byte)
+    sampled texture's memory     holds the constant we injected
+    what the shader reads        uniform near-white
+
+Same inputs, same code, same timing, same bindings - and 28.6% of the time the output is
+white. There is no remaining observable on this side of the driver that differs.

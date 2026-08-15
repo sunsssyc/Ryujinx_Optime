@@ -169,6 +169,26 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        /// <summary>
+        /// Attributes this draw to the storage it is drawing into, so the presented
+        /// surface can be described by what actually wrote it - in the frame that wrote
+        /// it, which the age table showed is the frame before it is shown.
+        /// </summary>
+        private void NoteAttachmentWriter()
+        {
+            if (!UploadCorrelator.Enabled)
+            {
+                return;
+            }
+
+            if (_encoderStateManager.RenderTargets[0] is Texture target)
+            {
+                UploadCorrelator.NoteAttachmentDraw(
+                    target.CanonicalPtr,
+                    _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel);
+            }
+        }
+
         private bool SkipThisDraw()
         {
             if (SkipThisProgram())
@@ -877,6 +897,7 @@ namespace Ryujinx.Graphics.Metal
 
             // Same contract as FrameProbe.Capture: encode-only sampling here, classified
             // several presents later, never waited on, never logged per frame.
+            UploadCorrelator.NotePresented(src);
             UploadCorrelator.OnPresent(Cbs, src);
 
             CaptureHunter.NotePresentSource(src);
@@ -1514,6 +1535,8 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            NoteAttachmentWriter();
+
             AutoFlushPreDraw();
 
             if (_hardSync && _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel == "3ebc3a8f6b77cc8f")
@@ -1677,6 +1700,8 @@ namespace Ryujinx.Graphics.Metal
             {
                 return;
             }
+
+            NoteAttachmentWriter();
 
             if (indexCount == 0)
             {
