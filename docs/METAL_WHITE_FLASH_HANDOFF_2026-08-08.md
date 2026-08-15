@@ -3505,3 +3505,33 @@ its negative result was never evidence.
 If this holds, the fault is not in the composite at all - the shader is faithfully computing
 0/0 on a flat input - and the question becomes what leaves its input texture flat on a fifth
 of frames, and why MoltenVK never does.
+
+### The shape of the white, measured: uniform, and the mechanism is confirmed
+
+The divide-by-zero reading of the composite came with a falsifiable prediction: if the
+white is produced by `Σw = 0` driving a bit-trick reciprocal to overflow, clamp and then
+`× 3.5`, then it must be *exactly uniform* - not a picture. An arm that passes the
+admissibility gate (luma 140, 10,799 frames, flat 21.49%) says:
+
+    flat frames    min 248   max 254   sd 1.8    saturated 24.3/25
+    normal frames  min  49   max 232   sd 57.9
+
+A range of 6 out of 255 and a standard deviation of 1.8. That is a fill, and the normal
+frames alongside it are a real image with structure. The exposure/tonemap reading - a
+correct picture blown out by a bad multiplier - is dead: a saturated image keeps its dark
+pixels and this has none.
+
+So the composite is not the fault. It is faithfully computing 0/0 over a flat input, and
+the question moves upstream: **what makes `tex_fp_t_tcb_8` constant on a fifth of frames,
+when MoltenVK never does.** Note the texel-fetch offset bug collapsed the twelve taps onto
+one texel too, and fixing it did not lower the rate - so it is the input texture itself
+that is flat, not the sampling of it.
+
+Getting this number needed three unrelated repairs, all worth keeping. `drive_in.sh` now
+drives by evidence: it presses through the sequence and checks draws per frame, since
+gameplay runs ~2,500 and the menus sit near 340, and four consecutive arms had been
+measuring menus and reporting flat=0. `tools/arm_valid.py` refuses any arm whose
+normal-frame luma is far from the repro scene's 138. And the whole late-session collapse -
+refused screenshots, ignored keypresses, `import Quartz` failing outright - was macOS TCC:
+toggling the grants invalidated the running process's own, and the host app had to be
+restarted before Accessibility and Screen Recording applied.
