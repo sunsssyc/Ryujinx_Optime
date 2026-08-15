@@ -4171,3 +4171,28 @@ w. Read `480117a3b1123d65-vertex.metal`, which the same trace already dumped, an
 makes its outputs degenerate on a fifth of frames - a zero or NaN `w`, a vertex buffer that
 is not what it should be, or attributes that are not being written at all. The vertex stage
 of this draw has never been examined.
+
+### The UVs come from a vertex attribute
+
+`480117a3b1123d65-vertex.metal` computes `out.outAttr0.xy` from `in.inAttr0.xyz` - a vertex
+attribute read from a vertex buffer - after initialising both the position and the attribute
+to zero. So a degenerate UV across the primitive means `in.inAttr0` is constant, and the
+short list of ways that happens is:
+
+- the vertex buffer bound for this draw does not hold what it should;
+- the attribute is not being fetched at all, leaving the zero initialisation in place;
+- the draw is issued with a vertex count or stride that makes every vertex read the same
+  element.
+
+Binding is the least likely of the three. `SetVertexBuffers` sits behind
+`DirtyFlags.RenderPipeline`, so a stale binding was a real candidate - but
+`RYUJINX_METAL_FULL_REBIND=1`, which sets that flag on every draw, measured 22.32% against a
+21-23% baseline. Forcing the vertex buffers to be rebound every draw changes nothing, so what
+is wrong is more likely the buffer's *contents* or the draw's parameters than which buffer is
+attached.
+
+**Next: capture `in.inAttr0` for this draw, split by outcome.** The vertex buffer is a
+`BufferRef` like the constant buffers already sampled, and the same CPU-side read that
+photographed `fp_c1` and `fp_c3` works on it. If it is constant on flat frames and varied on
+normal ones, the fault is upstream in whatever fills that buffer; if it is varied on both,
+the fetch itself is not happening and the fault is in the vertex descriptor or the draw call.
