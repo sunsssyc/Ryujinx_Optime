@@ -185,6 +185,16 @@ namespace Ryujinx.Graphics.Metal
             if (Enabled && target != null)
             {
                 _frameSceneTex = target;
+
+                // Also arm the late-write tracker on THIS texture. The conclusion that the
+                // blit's source holds a picture on white frames rests on a sample taken at
+                // present, after every pass in the frame - and the check for a later writer
+                // was only ever wired to the texel-fetch shader's input, never to this one.
+                // If something writes this surface between the blit reading it and the frame
+                // ending, the sample shows content the blit never saw, and "the source holds
+                // a picture" is not a statement about the frame that went white.
+                _compositeInputRoot = target.CanonicalPtr;
+                _compositeSeq = _frameSeq;
             }
         }
 

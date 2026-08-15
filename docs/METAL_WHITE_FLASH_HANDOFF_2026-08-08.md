@@ -4424,3 +4424,33 @@ only things that vary are the buffer contents (measured: correct), the indices (
 correct), and the draw parameters (measured: constant). The chain as drawn cannot produce an
 intermittent fault, which means one of its links is being measured in a way that misses the
 frames that matter - most plausibly the ones sampled at present rather than at the draw.
+
+### The sampling-time hole is closed, and the contradiction is airtight
+
+Armed the late-write tracker on the blit's *source* - the check that had only ever been wired
+to the texel-fetch shader's input:
+
+    source written after the blit read it   flat 1/2,496   normal 23/8,903
+
+Essentially never, on either outcome. So the sample taken at present is what the blit read,
+and "the source holds a picture on white frames" survives the objection raised against it.
+
+Which makes the contradiction complete, with every link measured at the moment it matters:
+
+- the blit's source holds a picture when the blit reads it - no late writers;
+- the blit is `out.color0 = tex.sample(samp, float2(u, v))` and nothing else;
+- its vertex buffer holds four distinct vertices, read at encode time, not at present;
+- the stride walking them is 16, constant;
+- the six indices are `0,2,1,1,2,3`, correct on every white frame;
+- the draw is `count=6 inst=1 first=0 indexed=1`, one signature on both outcomes;
+- and the output is a uniform fill on 22% of frames.
+
+Everything this backend hands the GPU for that draw is correct on exactly the frames that
+fail. That is now established at encode time, not inferred from a frame-end snapshot, which
+was the last standing objection to it.
+
+The remaining difference between this backend and MoltenVK, which never flashes on the same
+machine and driver, is not in any of these values - it is in the shape of the command stream
+around them: 610 render encoders per frame against 329, 5,283 `useResource` declarations
+against 1,974, and store actions committed up front rather than deferred. Those are measured
+and unexplained, and they are the only place left where the two backends still differ.
