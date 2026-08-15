@@ -2889,3 +2889,26 @@ What is left is the floor: a quarter of frames come out white with the frame alm
 serialised, every write channel barriered, and every upstream observable measured
 identical. Vulkan is at zero under the same conditions, so the floor is still a backend
 difference - just not an ordering one.
+
+### Two more cross-backend candidates, both excluded by reading
+
+The method that found the barrier difference was applied twice more before stopping.
+
+**Swizzle to one.** `AddressForTexture` carries a comment that is almost a confession:
+RG11B10Float has no alpha, so a swizzle routing a component to alpha or to one samples
+as exactly 1.0 - white, and *independent of the texture's contents*, which would explain
+the single most puzzling fact in this document (0x55 red injected, white still read).
+Already measured, though: sampling through the identity view instead of the swizzled one
+gives 37.67% against 36.17%. The identity view has no swizzle at all and still flashes.
+Dead.
+
+**Capability divergence.** This file's own note - "Vulkan not flashing: the shared layer
+branches on backend capabilities" - points at a different axis entirely: the two backends
+may be handed different work, not merely translate the same work differently. Checked the
+flag that matters most here, `supportsMismatchingViewFormat`, since the guest genuinely
+aliases the scene storage as RGBA8Unorm: **both backends report true**. So do
+`needsFragmentOutputSpecialization` and `reduceShaderPrecision`, which the Vulkan backend
+sets from `IsMoltenVk` and are therefore also true on this machine. Not a divergence.
+
+A systematic diff of the whole capability struct has not been done and is the obvious
+place to resume: it is a read, not an experiment, and this axis has never been walked.
