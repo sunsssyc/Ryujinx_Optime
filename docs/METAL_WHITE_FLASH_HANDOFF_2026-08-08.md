@@ -3366,3 +3366,44 @@ The texture-descriptor comparison is the part that is nearly ready, and the raw 
 far (Metal 15,768 against MoltenVK's few thousand, and MoltenVK's flattening out while
 Metal keeps climbing) are suggestive but must not be quoted until both runs cover the same
 gameplay window - the earlier version of exactly this comparison was invalidated by that.
+
+### The command-stream comparison, made
+
+Frame boundary solved by swizzling `-[CAMetalLayer nextDrawable]`: acquiring a drawable is
+the one thing both backends must do once per frame, and CAMetalLayer is a public class, so
+it can be hooked from the constructor without waiting for an object to appear. Neither
+`presentDrawable:`, nor its with-time variant, nor a commit-count fallback ever fired under
+MoltenVK.
+
+Per 120 frames, both in gameplay on the same save:
+
+                          Metal backend      MoltenVK
+    render encoders           73,194           39,518      610/frame vs 329/frame
+    commits                    3,842            2,867
+    useResource              633,932          236,928      5,283/frame vs 1,974/frame
+      read-only              618,123          230,648
+      read-write              15,809            6,280
+      write-only                   0                0
+    colour load: Load        116,936           63,949
+    colour load: Clear           600              480
+    colour store: Store      116,576                0
+    colour store: Unknown        960           64,429
+
+Two real structural differences, neither of which is a white-flash mechanism:
+
+- **MoltenVK defers every store action.** Essentially all of its colour attachments are
+  created `MTLStoreAction.Unknown` and resolved at end of encoding with
+  `setColorStoreAction:`, which is the documented deferred pattern. Ryujinx-Metal commits
+  to `Store` up front. Ryujinx's choice is the conservative one - it cannot lose a store -
+  so the backend that flashes is the one being *safer* here. This also explains the ~8
+  Unknown attachments per frame seen on the Metal side as ordinary traffic rather than a
+  bug. Worth noting it is the reverse of what was suspected.
+- **Metal issues 1.9x the render encoders and 2.7x the useResource declarations.** Some of
+  the encoder gap is the read-after-write split this fork turns on by default.
+
+Neither backend ever declares a resource write-only, so a missing write declaration -
+which would defeat argument-buffer hazard tracking - is excluded on both sides.
+
+Texture allocation counts came out at 15,768 against 12,597 over comparable sessions. An
+earlier capped run made this look like a 33x gap; it is not, and the capped figure was
+never quoted for exactly that reason.
