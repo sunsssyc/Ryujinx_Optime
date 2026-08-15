@@ -4049,3 +4049,15 @@ surface written by the composite is not.
 enumerate every pass that touches it between the composite and present, split by outcome.**
 The writer census exists; it needs re-running without the assumption that the composite is
 the writer of interest.
+
+The existing writer census cannot answer the new question as it stands. Its table prints
+scene-sampling signatures - the `n=NN` program lists - because `slot.Writers` comes out empty:
+what it captures is who *sampled* a scene-class texture, not who *wrote* the presented
+storage. That distinction did not matter while the composite was the suspect and it is the
+whole question now. `NoteAttachmentDraw(root, program)` is the right hook and it is already
+called; what is missing is that the presented surface's root is not the root it is keyed on
+for these frames.
+
+The presented storage's age is clean and unchanged: `age=1` on flat 2,559 and normal 8,807,
+so the surface shown was an attachment in the previous frame in essentially every case,
+whatever the outcome.
