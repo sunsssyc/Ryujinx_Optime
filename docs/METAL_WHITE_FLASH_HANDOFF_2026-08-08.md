@@ -4687,3 +4687,30 @@ an encoder, which is a driver-behaviour claim but a testable one, and it would e
 monotonic curve without any of the ordering mechanisms that have been excluded. If it does
 nothing, the split's benefit is not residency either, and the list of things ending a pass
 changes is then empty - which would itself be a strong statement.
+
+### Residency re-declaration is not it either, and the list is now empty
+
+`RYUJINX_METAL_REDECLARE=1` clears the per-encoder residency memory before every draw, so
+every resource is declared again without the pass ending. Gated arm, and the isolation held -
+passes stayed at 599 per frame, so no extra splitting crept in:
+
+    residency re-declared every draw   luma 140, 11,399 frames, flat 22.13%
+    today's baselines                  20.4% - 23.7%
+
+Null. So splitting does not help because it re-issues `useResource`.
+
+**That empties the list.** Ending a pass is known to do five things, and each has now been
+measured: it orders work (full serialisation helps but specific ordering violations are all
+excluded), it resolves stores (always `Store` here, unconditionally), it moves contents out
+of tile memory (a consequence of the store, which always happens), it re-declares residency
+(just excluded), and it rebuilds bindings and argument buffers (the forced-rebind arm was
+null). Splitting reduces the flash from 45% to 24% to 17% and none of the five accounts for it.
+
+That is where this stands and it is a genuine result, not a shrug: the only lever that works
+does so through a mechanism that is not among the effects the API says it has. Either one of
+the five is being measured wrongly - and each was checked for engagement, which is what caught
+seven false negatives today - or ending a pass has a sixth effect on this hardware that is not
+in the documentation. The second is worth taking seriously now that the first has been worked
+through this thoroughly, and it is the kind of claim a driver report can be built on: not "our
+frames go white" but "pass boundaries change the outcome and we can account for every
+documented effect of them."

@@ -175,6 +175,17 @@ namespace Ryujinx.Graphics.Metal
         /// ends and so does not need repeating. The encoder retains what it has been
         /// given, so a live declaration's pointer cannot be recycled underneath this.
         /// </summary>
+        /// <summary>
+        /// Drops the record of what has been declared to this encoder, so the next draw
+        /// declares everything again without the pass ending. Ending a pass is the only way
+        /// residency is currently re-issued, and more splitting is the one thing that
+        /// reduces the flash - this separates the two.
+        /// </summary>
+        public void ForgetResidency()
+        {
+            _resident.Clear();
+        }
+
         public bool IsResident(MTLRenderCommandEncoder encoder, IntPtr resource, MTLResourceUsage usage, MTLRenderStages stages)
         {
             Retarget(encoder);
@@ -891,6 +902,14 @@ namespace Ryujinx.Graphics.Metal
             }
 
             MTLResource[] resources = bindings.GetResourceScratch(bindings.Resources.Count);
+
+            // RYUJINX_METAL_REDECLARE=N re-declares residency every N draws without ending
+            // the pass, which is the experiment that separates "splitting helps because it
+            // re-issues useResource" from "splitting helps for some other reason".
+            if (_redeclareEvery > 0 && _pipeline.DrawCount % (ulong)_redeclareEvery == 0)
+            {
+                _applied.ForgetResidency();
+            }
 
             UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read, MTLRenderStages.RenderStageVertex);
             UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read, MTLRenderStages.RenderStageFragment);
@@ -2070,6 +2089,9 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private static readonly string _watchLabel =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_LABEL") ?? "480117";
+
+        private static readonly int _redeclareEvery =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_REDECLARE"), out int rd) ? rd : 0;
 
         private static bool _passStoreUnknown;
         private static ulong _passColorMask;
