@@ -38,6 +38,25 @@ namespace Ryujinx.Graphics.Metal
         private bool _firstBackgroundUse;
         private string _debugLabel;
         private bool _sourcesDumped;
+        private bool? _isTexelFetchComposite;
+
+        /// <summary>
+        /// The composite is the one fragment shader of 3,626 dumped from this game that
+        /// uses a texel fetch, so it identifies itself by what it does and needs no label
+        /// table that would go stale the moment a shader is retranslated.
+        /// </summary>
+        public bool IsTexelFetchComposite
+        {
+            get
+            {
+                _isTexelFetchComposite ??= _shaders.Any(
+                    shader => shader.Stage == ShaderStage.Fragment &&
+                              shader.Code != null &&
+                              shader.Code.Contains(".read(uint2("));
+
+                return _isTexelFetchComposite.Value;
+            }
+        }
 
         /// <summary>
         /// Stable across runs: XXH3-128 of all stage sources, truncated to 16 hex

@@ -72,6 +72,8 @@ namespace Ryujinx.Graphics.Metal
             public long PresentAge;
             public string Writers;
             public bool InputSampled;
+            public float[] Cb;
+            public bool[] CbSeen;
         }
 
         private static MTLBuffer _buf;
@@ -100,6 +102,36 @@ namespace Ryujinx.Graphics.Metal
         // and the question is what makes THIS flat on a fifth of frames. Identity was
         // already shown identical across outcomes, so only contents can differ.
         private static Texture _frameSceneTex;
+
+        // The composite's constant buffers, first four floats of each slot. The weight sum
+        // does not come from the taps alone: fp_c3 feeds the fetch coordinates and fp_c1
+        // carries the Newton constant, so a zeroed or stale buffer produces the same 0/0
+        // over a perfectly good texture. Never looked at before, because every binding
+        // check compared identities, which a constant buffer keeps while its contents move.
+        private const int MaxCbSlots = 32;
+        private static readonly float[] _frameCb = new float[MaxCbSlots * 4];
+        private static readonly bool[] _frameCbSeen = new bool[MaxCbSlots];
+        private static readonly double[] _cbFlatSum = new double[MaxCbSlots * 4];
+        private static readonly double[] _cbNormalSum = new double[MaxCbSlots * 4];
+        private static readonly long[] _cbFlatN = new long[MaxCbSlots];
+        private static readonly long[] _cbNormalN = new long[MaxCbSlots];
+
+        public static unsafe void NoteCompositeConstants(int slot, IntPtr contents, int offset)
+        {
+            if (!Enabled || contents == IntPtr.Zero || (uint)slot >= MaxCbSlots)
+            {
+                return;
+            }
+
+            float* f = (float*)((byte*)contents + offset);
+
+            for (int i = 0; i < 4; i++)
+            {
+                _frameCb[slot * 4 + i] = f[i];
+            }
+
+            _frameCbSeen[slot] = true;
+        }
 
         // The programs that sampled a scene-class texture this frame, in order. The
         // count alone already steps the rate hard - zero flat in 803 frames at eleven
@@ -498,6 +530,11 @@ namespace Ryujinx.Graphics.Metal
                     }
                 }
 
+                mine.Cb ??= new float[MaxCbSlots * 4];
+                mine.CbSeen ??= new bool[MaxCbSlots];
+                Array.Copy(_frameCb, mine.Cb, _frameCb.Length);
+                Array.Copy(_frameCbSeen, mine.CbSeen, _frameCbSeen.Length);
+
                 mine.Fence = cbs.GetFence();
                 mine.Fence.Get();
                 mine.Frame = _frame;
@@ -525,6 +562,7 @@ namespace Ryujinx.Graphics.Metal
             _frameBinding = default;
             _frameBindingLast = default;
             _frameSceneTex = null;
+            Array.Clear(_frameCbSeen);
             _frameProgCount = 0;
             _framePresentRoot = IntPtr.Zero;
             _framePresentAge = -1;
@@ -614,6 +652,27 @@ namespace Ryujinx.Graphics.Metal
             double mean = lumaSum / Pixels;
             double variance = (lumaSqSum / Pixels) - (mean * mean);
             double sd = variance > 0 ? Math.Sqrt(variance) : 0;
+
+            if (slot.CbSeen != null)
+            {
+                double[] into = flat ? _cbFlatSum : _cbNormalSum;
+                long[] n = flat ? _cbFlatN : _cbNormalN;
+
+                for (int c = 0; c < MaxCbSlots; c++)
+                {
+                    if (!slot.CbSeen[c])
+                    {
+                        continue;
+                    }
+
+                    n[c]++;
+
+                    for (int i = 0; i < 4; i++)
+                    {
+                        into[c * 4 + i] += slot.Cb[c * 4 + i];
+                    }
+                }
+            }
 
             if (flat)
             {
@@ -786,6 +845,26 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($", normal min {(_normalFrames > 0 ? _normalMinSum / _normalFrames : 0):F0} max {(_normalFrames > 0 ? _normalMaxSum / _normalFrames : 0):F0} sd {(_normalFrames > 0 ? _normalSdSum / _normalFrames : 0):F1}");
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
+
+            for (int c = 0; c < MaxCbSlots; c++)
+            {
+                if (_cbFlatN[c] == 0 && _cbNormalN[c] == 0)
+                {
+                    continue;
+                }
+
+                sb.Append($"\n  cb{c}: flat[");
+                for (int i = 0; i < 4; i++)
+                {
+                    sb.Append($"{(_cbFlatN[c] > 0 ? _cbFlatSum[c * 4 + i] / _cbFlatN[c] : 0):G6}{(i < 3 ? " " : string.Empty)}");
+                }
+                sb.Append($"] n={_cbFlatN[c]}  normal[");
+                for (int i = 0; i < 4; i++)
+                {
+                    sb.Append($"{(_cbNormalN[c] > 0 ? _cbNormalSum[c * 4 + i] / _cbNormalN[c] : 0):G6}{(i < 3 ? " " : string.Empty)}");
+                }
+                sb.Append($"] n={_cbNormalN[c]}");
+            }
             sb.Append($" | upload: flat {_flatWithUpload}/{_flatFrames}, normal {_normalWithUpload}/{_normalFrames}");
             sb.Append($" | uploadOntoRT: flat {_flatWithUploadOntoRt}, normal {_normalWithUploadOntoRt}");
             sb.Append($" | copy: flat {_flatWithCopy}/{_flatFrames}, normal {_normalWithCopy}/{_normalFrames}");

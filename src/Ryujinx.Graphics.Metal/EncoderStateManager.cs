@@ -2362,6 +2362,17 @@ namespace Ryujinx.Graphics.Metal
                             ref BufferRef buffer = ref _currentState.UniformBufferRefs[index];
                             (ulong gpuAddress, IntPtr nativePtr) = AddressForBuffer(ref buffer);
 
+                            // Contents, not identity. The composite's weight sum can be
+                            // driven to zero by its constants alone, and identity is what
+                            // every previous binding check compared.
+                            if (UploadCorrelator.Enabled && buffer.Buffer != null &&
+                                program.IsTexelFetchComposite)
+                            {
+                                MTLBuffer cb = buffer.Buffer.GetUnsafe().Value;
+                                UploadCorrelator.NoteCompositeConstants(
+                                    index, cb.Contents, (int)(buffer.Range?.Offset ?? 0));
+                            }
+
                             if (HdrPassProbe.Enabled && buffer.Buffer != null && index == 20 &&
                                 program.DebugLabel == _inputWatchLabel)
                             {
@@ -2470,7 +2481,7 @@ namespace Ryujinx.Graphics.Metal
                                 {
                                     UploadCorrelator.NoteSceneBinding(
                                         gpuAddress, nativePtr, sceneCandidate.CanonicalPtr, program.DebugLabel,
-                                        sceneCandidate);
+                                        program.IsTexelFetchComposite ? sceneCandidate : null);
                                 }
 
                                 if (HdrPassProbe.Enabled && hasTexture &&

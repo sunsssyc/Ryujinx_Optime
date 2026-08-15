@@ -3593,3 +3593,40 @@ remains at 0% on the same machine, same driver, same save.
 
 **Builds.** `v135-inputshape` is current. `v134-shape` added the shape counters, `v133`
 the texel-fetch offset fix, `CodeGenVersion` 7378.
+
+### The composite's constants, and an input that is still not flat
+
+Pinned this time to the program that actually performs the twelve texel fetches - it
+identifies itself by containing `.read(uint2(`, being the one fragment shader of 3,626 that
+does, so no label table can go stale. Gated arm: luma 130, 11,399 frames, flat 20.53%.
+
+**The input is still not flat, even pinned to the composite.**
+
+    input distinct   flat 19.72 of 25 (2,338 frames)   normal 20.78 of 25 (8,532)
+
+A real difference, and far too small to matter: nineteen distinct values in twenty-five
+samples is a picture, not a single colour. So the composite's output is uniform while its
+input is not, and "the input got flattened" is dead in its pinned form too.
+
+**Constants, first four floats of every buffer bound on that draw:**
+
+    cb0    flat [0 0 0 0]                                normal [0 0 0 0]
+    cb20   flat [7.97373e-20  2         0 0]             normal [7.97279e-20  1.99977  0 0]
+    cb22   flat [-22.5431  0.826443  -14.274   0.898843] normal [-21.6839  0.826799  -15.6355  1.01359]
+
+One of these is worth chasing and two are not. `cb22` drifts steadily across reporting
+intervals (-28.2, -25.9, -24.2, -22.5 on the flat side alone), so it is a scene quantity and
+any difference of means between outcomes is confounded by time, not evidence. `cb0` is zero
+in both.
+
+`cb20.y` is **exactly 2.000000 on flat frames and 1.99977 on normal ones**, stable across
+every interval. Two is the Newton constant in the reciprocal refinement
+`fma(Σw, -r, fp_c1->data[0].y)`. A mean of exactly 2 with no deviation means it is 2 on
+*every* flat frame, while normal frames sometimes carry something slightly lower.
+
+That is suggestive and not yet a finding: a mean cannot distinguish "always 2 on flat
+frames" from "flat frames happen to be the subset where it is 2". The next measurement is
+the distribution, not the average - what fraction of frames in each outcome has it exactly
+2.0 - and, alongside it, the twelve taps of a single pixel rather than 25 points spread
+across the image, since the weight sum is computed per pixel from a local neighbourhood and
+a globally varied texture can still be locally flat.
