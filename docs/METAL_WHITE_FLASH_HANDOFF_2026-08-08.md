@@ -4529,3 +4529,22 @@ stores on this path are load-bearing in a way nobody has mapped.
 Next: log, per frame and split by outcome, the store action actually resolved for the blit's
 source texture's last writing pass. Not how many encoders there were - what happened to that
 one attachment.
+
+Refuted immediately, from data already in this document. The command-stream probe measured
+Ryujinx's colour attachments at 116,576 `Store` against 960 `Unknown` per 120 frames, and the
+Unknowns are the GUI's own Metal traffic - `_elideEmptyStore` is off, so this backend resolves
+every attachment to `Store` unconditionally. Every pass stores. There is no population of
+passes that skip the store, so "the contents have not landed" has nothing to stand on unless
+the store itself is ineffective, which is a driver claim, and MoltenVK reaches the same driver
+without flashing.
+
+So the reframing above is wrong too, and the measurement it proposed would return a constant.
+Recorded rather than deleted because the sequence matters: a direction was proposed from a
+real observation, checked against data already collected, and discarded before spending an
+arm on it. That check cost nothing and would have cost a ten-minute run and a
+confidently-wrong conclusion.
+
+What survives from it is narrower and still true: the read-after-write split halved the flash
+and full serialisation did not, so the split's effect is not ordering *and* not stores. Those
+two facts together are the sharpest unexplained thing in this document, and no hypothesis
+offered today accounts for both.
