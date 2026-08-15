@@ -4111,3 +4111,35 @@ every frame, and nothing about it has been examined - not its inputs, not its co
 its arithmetic. `RYUJINX_SHADER_DIFF` names files by guest-code hash while the census names
 programs by `DebugLabel` (XXH3 of the MSL sources), so the two have to be joined through
 `Program.DumpSources`, which writes `{DebugLabel}-fragment.metal`.
+
+### The real last writer is a pass-through blit
+
+Dumped by firing the existing draw trace (`touch /tmp/ryujinx-metal-trace` during gameplay
+writes every drawing program's MSL to `/tmp/ryujinx-metal-shaders`).
+`480117a3b1123d65-fragment.metal` is 112 lines and contains no arithmetic worth the name:
+
+    temp_7  = 1.0f / temp_0;                      // perspective divide
+    temp_8  = temp_7 * temp_3;                    // u
+    temp_9  = temp_7 * temp_6;                    // v
+    temp_10 = tex_fp_t_tcb_8.sample(samp_fp_t_tcb_8, float2(temp_8, temp_9));
+    out.color0 = temp_10;                         // straight out
+
+One sample, written through unchanged. **It cannot manufacture white.** So a uniform white
+output leaves exactly two possibilities, and they are cleanly separable:
+
+1. **Its source texture is already uniform white** - the fault is upstream of it, and this
+   blit is faithfully reproducing what it was given. This is the same shape as the earlier
+   note that FSR RCAS reproduces a white input, and it is now the whole question rather than
+   an aside.
+2. **Its UVs are degenerate.** `temp_0` is the interpolated w; if it goes to zero or the
+   attributes collapse, `u` and `v` are constant across the primitive, the sampler returns
+   the same texel for every pixel, and the screen is a uniform fill of whatever colour that
+   texel holds. That produces exactly the measured signature - no structure, tiny spread -
+   without anything being wrong with the source texture at all.
+
+Possibility 2 has never been considered anywhere in this document and it fits the
+measurements as well as possibility 1 does. It is also cheap to separate: sample this
+shader's source texture at present, the way the texel-fetch shader's input was sampled, and
+compare its uniformity against the presented surface's. If the source has structure while the
+output does not, the UVs are the fault and the whole search moves to the vertex stage that
+produces `inAttr0` and `position.w`.
