@@ -3195,3 +3195,47 @@ excluded: the composite is `ee89b4e471373459`, twelve texel fetches at level 0 i
 The question is whether its SPIR-V fetches differ in a way MSL cannot express or expresses
 differently - operand order, the level argument, sampled-vs-storage image type, or the
 decorations Vulkan attaches that MSL has no equivalent for.
+
+---
+
+## RESUME HERE (2026-08-15)
+
+**State.** The flash is halved and not fixed. `RYUJINX_METAL_RAW_SPLIT` is on by default
+(45% -> 24%, no frame cost); a floor of ~25% remains. Six real bugs were fixed on the way,
+none of them the flash. Latest build: `artifacts/terminal/Ryujinx-metal-v130-spvdiff`.
+
+**The one thing to do next.** Compare the composite's MSL against the SPIR-V Vulkan
+actually runs. The tool is wired and unrun:
+
+```bash
+# CodeGenVersion is at 7377; bump it in DiskCacheHostStorage.cs before each fresh run
+# or the warm cache skips Translate and the directory comes out empty (hit 5 times).
+brew install spirv-tools
+RYUJINX_SHADER_DIFF=/tmp/spvdiff ./Ryujinx --graphics-backend Metal <rom>
+spirv-dis /tmp/spvdiff/<hash>-Fragment.spv
+```
+
+The composite is `ee89b4e471373459`: twelve texel fetches at level 0, one
+`texture2d<float>`, no sampler. Look for whatever its SPIR-V does that MSL cannot express
+or expresses differently - operand order, the level argument, sampled-vs-storage image
+type, decorations with no MSL equivalent.
+
+**Why that is the only axis left.** Everything else is measured identical between flat and
+normal frames, and each was verified positively rather than by elimination: ordering
+(encoder splits, full serialisation, MTLFence), content (0x55 injection - screen red, 27%
+still white), binding (7,183 frames, four fields byte-identical), residency, authorship,
+present, out-of-bounds fetch, compile options (fast math), API legality (Metal's validation
+layer is now silent), and the capability struct. Vulkan is at 0% on the same machine, same
+driver, same save, with Metal argument buffers on in both.
+
+**Harness.** `tools/drive_in.sh <build> <log> [env...]` drives into the reproducing save
+unattended (`RYUJINX_BACKEND=Vulkan` for the other backend). `RYUJINX_METAL_UPLOAD_CORR=1`
+gives per-frame flat classification and every by-outcome split. `tools/flatshots.py <winid>
+<n> <dir>` classifies compositor screenshots when the correlator is unavailable
+(cross-backend). A/B by hot file, always A/B/A, always check the picture is alive: a black
+or blank arm reports zero flat frames and reads as a fix.
+
+**Two standing traps, both hit repeatedly.** Verify a toggle actually took effect before
+believing its measurement (`SPLIT_QUEUE` and `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` were
+both overridden). Re-publish the artifact after reverting source, or the next run measures
+the old binary.
