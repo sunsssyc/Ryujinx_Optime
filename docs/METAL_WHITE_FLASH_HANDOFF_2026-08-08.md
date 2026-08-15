@@ -3288,3 +3288,18 @@ or blank arm reports zero flat frames and reads as a fix.
 believing its measurement (`SPLIT_QUEUE` and `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` were
 both overridden). Re-publish the artifact after reverting source, or the next run measures
 the old binary.
+
+### Three more doors closed, 2026-08-15
+
+- **Load and store actions.** Colour attachments load with `Load` or `Clear` and store with
+  `Store`. The one `MTLStoreAction.DontCare` in the backend is the zero-draw elision added
+  in `4ca16c68`, gated on `/tmp/ryujinx-metal-elide-empty-store`, which is absent - so it
+  was never live in any measurement here. No pass discards its contents.
+- **Heap aliasing.** There is no `MTLHeap` anywhere in the backend; every texture is a
+  standalone `Device.NewTexture`. Two textures cannot be sharing memory.
+- **The off-thread `SetData` race.** This was the standing prime suspect, recorded as such
+  for a week. `RYUJINX_METAL_LOG_SETDATA_THREAD=1` over a full drive-in session including
+  movement: **zero** off-thread calls. The probe prints on the first one. The asymmetry
+  with `GetData` is real in the source and is never exercised. The lead is dead.
+
+Flat rate across the three v133 runs: 20.8%, 21.2%, 19.8%. Against v132 at 17.25%.
