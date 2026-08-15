@@ -47,12 +47,34 @@ namespace Ryujinx.Graphics.Gpu.Shader
                 string name = Convert.ToHexString(MD5.HashData(code))[..16];
                 string stem = Path.Combine(_path, $"{name}-{context.Stage}");
 
-                if (File.Exists(stem + ".msl"))
+                if (File.Exists(stem + ".seen"))
                 {
                     return;
                 }
 
-                File.WriteAllText(stem + ".msl", translated.Code ?? "<no code>");
+                File.WriteAllText(stem + ".seen", string.Empty);
+
+                // The primary artifact: whatever the backend running right now actually
+                // compiles, written with no re-translation at all. Under Metal that is
+                // MSL text; under Vulkan it is a SPIR-V module and Code is null. Run the
+                // game once per backend into two directories and the guest-code hash in
+                // the filename lines the pairs up.
+                //
+                // Re-deriving the other backend's output in-process was the obvious way
+                // to get both from one run, and it does not work for the shader this
+                // investigation is about: re-translating it to SPIR-V throws
+                // InvalidCastException in SpirvGenerator, while the very same shader
+                // translates fine as the primary. So the only trustworthy SPIR-V is the
+                // one a Vulkan run produces for itself.
+                if (translated.BinaryCode != null)
+                {
+                    File.WriteAllBytes(stem + ".spv", translated.BinaryCode);
+                }
+
+                if (translated.Code != null)
+                {
+                    File.WriteAllText(stem + ".msl", translated.Code);
+                }
 
                 // The same guest program through the same front-end, targeting OpenGL so
                 // the GLSL backend runs instead of the MSL one. Everything before code
@@ -64,22 +86,6 @@ namespace Ryujinx.Graphics.Gpu.Shader
 
                 File.WriteAllText(stem + ".glsl", glslContext.Translate(asCompute).Code ?? "<no code>");
 
-                // And what Vulkan actually runs. The GLSL above was only ever a readable
-                // stand-in: on this platform the Vulkan backend compiles SPIR-V, so an
-                // MSL-against-GLSL comparison - which is what the 1,771 pairs in the
-                // handoff document were - never looked at the program that does not
-                // flash. Emitted as the binary the backend would hand to the driver;
-                // disassemble with `spirv-dis` to read it.
-                TranslatorContext spirvContext = context.Stage == ShaderStage.Compute
-                    ? ShaderCache.DecodeComputeShader(gpuAccessor, TargetApi.Vulkan, context.Address)
-                    : ShaderCache.DecodeGraphicsShader(gpuAccessor, TargetApi.Vulkan, TranslationFlags.None, context.Address);
-
-                byte[] spirv = spirvContext.Translate(asCompute).BinaryCode;
-
-                if (spirv != null)
-                {
-                    File.WriteAllBytes(stem + ".spv", spirv);
-                }
             }
             catch (Exception exception)
             {

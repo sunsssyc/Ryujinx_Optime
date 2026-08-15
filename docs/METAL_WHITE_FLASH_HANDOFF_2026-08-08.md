@@ -3196,6 +3196,55 @@ The question is whether its SPIR-V fetches differ in a way MSL cannot express or
 differently - operand order, the level argument, sampled-vs-storage image type, or the
 decorations Vulkan attaches that MSL has no equivalent for.
 
+### The MSL/SPIR-V comparison, made: a real codegen bug that is not the flash
+
+The comparison finally ran, and it found something. The Metal backend **silently drops
+the constant offset on a texel fetch**. In `InstGenMemory.TextureSample` the entire
+offset-assembly block sat behind `if (!intCoords)` with `// TODO: Support reads with
+offsets.` beside it - and `intCoords` true is exactly the texel-fetch case, so the offset
+was neither assembled nor its source operands consumed.
+
+The effect is visible in the one shader this investigation has been circling. Of 3,626
+fragment shaders dumped, exactly one uses a texel fetch: `9E7042ABC827EC13-Fragment`, the
+composite. Its GLSL is twelve `texelFetchOffset` calls with twelve *distinct* offsets -
+(-1,0) (-1,1) (0,-1) (0,1) (0,2) (1,-1) (1,0) (1,1) (1,2) (2,0) (2,1) and one unoffset, a
+4x3 neighbourhood. Its MSL was twelve `.read()` calls at the *same* coordinate. A
+neighbourhood filter degenerating into one texel fetched twelve times.
+
+Fixed by folding the offset into the coordinate, which is the only place Metal's `read()`
+will take it: `uint2(int2(x, y) + int2(ox, oy))`, added signed and converted after, so a
+negative offset at the left or top edge wraps the way `texelFetchOffset` does. The
+coordinate, array index, shadow compare and lod all had to become buffered and emitted
+together, because the offset sits after the coordinate in the source list and `Src()` is a
+cursor. `CodeGenVersion` 7378. The twelve offsets in the regenerated MSL match the GLSL
+set exactly.
+
+**It does not fix the flash.** Measured, not assumed:
+
+    v132, offset dropped   2691 / 15599 flat   17.25%
+    v133, offset fixed     1401 /  6599 flat   21.23%   (a second v133 run: 20.8%)
+
+The fixed arm is *higher*. The two v133 runs agree with each other, which argues the
+difference is not noise, but two arms of the same condition have drifted ~4 points before
+in this investigation (the RAW_SPLIT A/B/A was 45.2 / 24.3 / 41.5), so the honest reading
+is no improvement detected, in the direction of slightly worse.
+
+The fix stays: it is a genuine rendering-correctness bug, it makes Metal agree with every
+other backend, and it was found by the method rather than guessed. But the cross-backend
+asymmetry - Vulkan 0/120 on the same machine, same driver, same save - remains unexplained,
+and this was the last untouched axis. Note the result is at least self-consistent with the
+0x55 injection: with a constant input the twelve taps are identical whether or not the
+offsets are applied, so that test could never have distinguished this.
+
+Tooling worth keeping. Dump the real thing from each backend rather than re-translating
+in-process: `RYUJINX_SHADER_DIFF=<dir>` now writes whatever the running backend actually
+compiles - MSL text under Metal, a SPIR-V module under Vulkan - and the guest-code hash in
+the filename lines the two runs up. Re-deriving the other backend's output in-process does
+not work for this shader: it throws InvalidCastException in `SpirvGenerator` (an assignment
+whose destination is an `AstTextureOperation`, which that generator assumes is always an
+`AstOperand`) while the same shader translates fine as the primary. `tools/spvdis.py` reads
+the `.spv` without needing spirv-tools installed.
+
 ---
 
 ## RESUME HERE (2026-08-15)

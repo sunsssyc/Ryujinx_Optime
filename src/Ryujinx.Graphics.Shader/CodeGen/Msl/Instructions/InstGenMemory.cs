@@ -415,7 +415,6 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
 
             string AssemblePVector(int count)
             {
-                string coords;
                 if (count > 1)
                 {
                     string[] elems = new string[count];
@@ -425,29 +424,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                         elems[index] = Src(coordType);
                     }
 
-                    coords = string.Join(", ", elems);
-                }
-                else
-                {
-                    coords = Src(coordType);
+                    return string.Join(", ", elems);
                 }
 
-                string prefix = intCoords ? "uint" : "float";
-
-                return prefix + (count > 1 ? count : string.Empty) + "(" + coords + ")";
+                return Src(coordType);
             }
 
-            Append(AssemblePVector(pCount));
-
-            if (isArray)
-            {
-                Append(Src(AggregateType.S32));
-            }
-
-            if (isShadow)
-            {
-                Append(Src(AggregateType.FP32));
-            }
+            // Built here because the sources have to be consumed in order, but emitted
+            // further down: a texel fetch carries its constant offset in a later source
+            // and Metal's read() has no offset parameter, so the only place that offset
+            // can go is inside the coordinate itself.
+            string coords = AssemblePVector(pCount);
+            string arrayIndex = isArray ? Src(AggregateType.S32) : null;
+            string shadowCompare = isShadow ? Src(AggregateType.FP32) : null;
 
             string AssembleDerivativesVector(int count)
             {
@@ -485,11 +474,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                 samplingOption = $"{gradientType}({dPdx}, {dPdy})";
             }
 
+            string lodLevel = null;
+
             if (hasLodLevel)
             {
                 if (intCoords)
                 {
-                    Append(Src(coordType));
+                    lodLevel = Src(coordType);
                 }
                 else
                 {
@@ -518,24 +509,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
 
             string offset = null;
 
-            // TODO: Support reads with offsets.
-            if (!intCoords)
+            if (hasOffset)
             {
-                if (hasOffset)
+                offset = AssembleOffsetVector(coordsCount);
+            }
+            else if (hasOffsets)
+            {
+                // Consume all four source offsets even though Metal does not
+                // expose the equivalent multi-offset gather overload here.
+                for (int index = 0; index < 4; index++)
                 {
-                    offset = AssembleOffsetVector(coordsCount);
+                    AssembleOffsetVector(coordsCount);
                 }
-                else if (hasOffsets)
-                {
-                    // Consume all four source offsets even though Metal does not
-                    // expose the equivalent multi-offset gather overload here.
-                    for (int index = 0; index < 4; index++)
-                    {
-                        AssembleOffsetVector(coordsCount);
-                    }
 
-                    Logger.Warning?.PrintMsg(LogClass.Gpu, "Multiple offsets on gathers are not yet supported!");
-                }
+                Logger.Warning?.PrintMsg(LogClass.Gpu, "Multiple offsets on gathers are not yet supported!");
             }
 
             // LodBias follows offsets in the IR source list, but Metal expects
@@ -543,6 +530,45 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
             if (hasLodBias)
             {
                 samplingOption = $"bias({Src(AggregateType.FP32)})";
+            }
+
+            string vecSuffix = pCount > 1 ? pCount.ToString() : string.Empty;
+
+            if (intCoords)
+            {
+                // read() has no offset parameter, so a constant offset has to be added to
+                // the coordinate. Dropping it, which is what this did before, is silent
+                // and severe: a neighbourhood filter degenerates into the same texel
+                // fetched N times. The addition is signed, and only then converted, so a
+                // negative offset near the left or top edge wraps the same way the other
+                // backends' texelFetchOffset does rather than becoming a huge unsigned
+                // coordinate.
+                coords = offset != null
+                    ? $"uint{vecSuffix}(int{vecSuffix}({coords}) + {offset})"
+                    : $"uint{vecSuffix}({coords})";
+
+                offset = null;
+            }
+            else
+            {
+                coords = $"float{vecSuffix}({coords})";
+            }
+
+            Append(coords);
+
+            if (arrayIndex != null)
+            {
+                Append(arrayIndex);
+            }
+
+            if (shadowCompare != null)
+            {
+                Append(shadowCompare);
+            }
+
+            if (lodLevel != null)
+            {
+                Append(lodLevel);
             }
 
             if (samplingOption != null)
