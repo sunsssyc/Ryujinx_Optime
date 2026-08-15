@@ -76,6 +76,7 @@ namespace Ryujinx.Graphics.Metal
             public bool InputWrittenAfter;
             public int Residency;
             public int CompositeDraws;
+            public int VertexDistinct;
             public IntPtr ArgPtr;
             public ulong[] ArgExpected;
             public int ArgCount;
@@ -220,6 +221,48 @@ namespace Ryujinx.Graphics.Metal
         private static bool _cbExtremaInit;
         private static readonly long[] _cbFlatN = new long[MaxCbSlots];
         private static readonly long[] _cbNormalN = new long[MaxCbSlots];
+
+        /// <summary>
+        /// Four vertices a stride apart, compared with each other. A degenerate UV means the
+        /// attribute is constant *across* the primitive's vertices, which reading vertex zero
+        /// alone cannot see - and vertex zero came out bit-identical on both outcomes, which
+        /// settles nothing. Reported as the number of distinct vertices of four.
+        /// </summary>
+        public static unsafe void NoteVertexSpread(IntPtr contents, int offset, int stride)
+        {
+            if (!Enabled || contents == IntPtr.Zero || stride <= 0)
+            {
+                return;
+            }
+
+            int distinct = 0;
+
+            for (int i = 0; i < 4; i++)
+            {
+                ulong a = *(ulong*)((byte*)contents + offset + i * stride);
+                bool seen = false;
+
+                for (int j = 0; j < i; j++)
+                {
+                    if (*(ulong*)((byte*)contents + offset + j * stride) == a)
+                    {
+                        seen = true;
+                        break;
+                    }
+                }
+
+                if (!seen)
+                {
+                    distinct++;
+                }
+            }
+
+            _frameVertexDistinct = distinct;
+        }
+
+        private static int _frameVertexDistinct = -1;
+        private static double _flatVertSum, _normalVertSum;
+        private static long _flatVertN, _normalVertN;
 
         public static unsafe void NoteCompositeConstants(int slot, IntPtr contents, int offset)
         {
@@ -681,6 +724,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.InputWrittenAfter = _frameInputWrittenAfter;
                 mine.Residency = _frameResidency;
                 mine.CompositeDraws = _frameCompositeDraws;
+                mine.VertexDistinct = _frameVertexDistinct;
                 mine.ArgPtr = _frameArgPtr;
                 mine.ArgCount = _frameArgCount;
 
@@ -728,6 +772,7 @@ namespace Ryujinx.Graphics.Metal
             _frameInputWrittenAfter = false;
             _frameResidency = -1;
             _frameCompositeDraws = 0;
+            _frameVertexDistinct = -1;
             _frameArgPtr = IntPtr.Zero;
             _frameArgCount = 0;
             _frameLateWriter = null;
@@ -857,6 +902,12 @@ namespace Ryujinx.Graphics.Metal
             {
                 _normalDrawSum += slot.CompositeDraws;
                 _normalDrawN++;
+            }
+
+            if (slot.VertexDistinct >= 0)
+            {
+                if (flat) { _flatVertSum += slot.VertexDistinct; _flatVertN++; }
+                else { _normalVertSum += slot.VertexDistinct; _normalVertN++; }
             }
 
             if (slot.Residency >= 0)
@@ -1108,6 +1159,7 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
 
+            sb.Append($" | blit vertex spread (distinct of 4): flat {(_flatVertN > 0 ? _flatVertSum / _flatVertN : 0):F2} over {_flatVertN}, normal {(_normalVertN > 0 ? _normalVertSum / _normalVertN : 0):F2} over {_normalVertN}");
             sb.Append($" | composite draws/frame: flat {(_flatDrawN > 0 ? _flatDrawSum / _flatDrawN : 0):F2}, normal {(_normalDrawN > 0 ? _normalDrawSum / _normalDrawN : 0):F2}");
             sb.Append($" | argbuf overwritten by frame end: flat {_flatArgMismatch}/{_flatArgChecked}, normal {_normalArgMismatch}/{_normalArgChecked}");
             sb.Append($" | composite residency decls: flat {(_flatResidencyN > 0 ? _flatResidencySum / _flatResidencyN : 0):F2} over {_flatResidencyN}, normal {(_normalResidencyN > 0 ? _normalResidencySum / _normalResidencyN : 0):F2} over {_normalResidencyN}");

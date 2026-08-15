@@ -1928,6 +1928,7 @@ namespace Ryujinx.Graphics.Metal
                         vlabel.StartsWith(_watchLabel, StringComparison.Ordinal))
                     {
                         UploadCorrelator.NoteCompositeConstants(31, mtlBuffer.Contents, offset);
+                        UploadCorrelator.NoteVertexSpread(mtlBuffer.Contents, offset, bufferStates[i].Stride);
                     }
                 }
             }

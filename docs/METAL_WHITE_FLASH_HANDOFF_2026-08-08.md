@@ -4220,3 +4220,31 @@ stride or format, or a draw call whose parameters make every vertex read element
 
 The stride is what the probe is missing; it is available on the same `VertexBufferState` that
 already yields the buffer and offset.
+
+### The vertex data is not degenerate - the fetch is
+
+Gated arm: luma 140, 11,399 frames, flat 21.77%. Four vertices read a stride apart from the
+blit's vertex buffer and compared with each other:
+
+    distinct vertices of four    flat 4.00    normal 4.00
+
+All four differ, on white frames exactly as on good ones. So the buffer holds a proper quad
+and nothing upstream has flattened it. Combined with the previous sections this closes the
+loop tightly:
+
+- the presented surface is written by a pass-through blit that cannot manufacture white;
+- that blit's source texture holds a picture on the frames that present white;
+- so the sampler is returning one texel for every pixel, and the UVs are constant;
+- the attribute those UVs come from is *not* constant in memory - four distinct vertices.
+
+**The collapse is therefore in the fetch, not the data.** Something between four distinct
+vertices in a buffer and a constant attribute in the shader: the vertex descriptor's stride
+or format for attribute 0, an index buffer that reads element zero four times, or draw
+parameters - `vertexCount`, `baseVertex`, `firstIndex` - that make every invocation land on
+the same element.
+
+**Next:** record the vertex descriptor's stride and format for attribute 0, and the draw
+call's parameters, split by outcome. All of them are on the encoder state at the same site
+that already photographs the buffer, and every one is a small integer, so a difference will
+be obvious rather than statistical. This is the last link in a chain that now runs
+unbroken from the presented pixel back to the draw call.
