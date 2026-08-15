@@ -4666,3 +4666,24 @@ number is quoted; it caught five false negatives today, four of them arms that w
 a menu screen. `drive_in.sh` verifies it reached gameplay by draws per frame (~2,500 against
 ~340 in menus). Any probe must be checked for firing before its output is read - that caught
 two more.
+
+### The one thing ending a pass changes that has not been excluded
+
+Residency is per-encoder. Ending a pass forces every resource to be declared to the new
+encoder again, and `UseRenderResources` deduplicates *within* an encoder via
+`_applied.IsResident` - so the only way a resource gets re-declared is a new encoder. More
+splits therefore means more frequent re-declaration, and that is the one consequence of
+ending a pass that the nine measurements have not touched.
+
+It is not the same as the forced-rebind arm, which was null: `RYUJINX_METAL_FULL_REBIND=1`
+rebuilds *bindings* and argument buffers every draw, but the encoder is unchanged, so
+`IsResident` still suppresses the repeat `useResource`. Rebinding and re-declaring residency
+are different things and only the first has been tested.
+
+**The experiment that separates it:** re-issue `useResource` for the bound set periodically
+inside a long encoder, without ending the pass - clear `_applied`'s residency memory every N
+draws. If that reproduces the split's benefit, the mechanism is residency going stale within
+an encoder, which is a driver-behaviour claim but a testable one, and it would explain the
+monotonic curve without any of the ordering mechanisms that have been excluded. If it does
+nothing, the split's benefit is not residency either, and the list of things ending a pass
+changes is then empty - which would itself be a strong statement.
