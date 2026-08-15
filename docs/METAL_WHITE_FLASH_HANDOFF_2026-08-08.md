@@ -3844,3 +3844,30 @@ verdict is correct - 5.54% from this run must not be compared with anything. The
 count survives it: three-versus-three is a structural property of a draw, not a rate, and the
 1,129 flat frames it averages over are gameplay frames, since flat frames do not occur on the
 menu at all.
+
+### The argument buffer is never overwritten, and that closes the CPU side
+
+Every check before this compared the resource id Ryujinx *computed*. This one compares the
+id still sitting in the argument buffer's memory when the frame ends against the one written
+at the composite's draw - the bytes the GPU dereferences, not the intent behind them.
+
+    argument buffer overwritten by frame end   flat 0/2,505   normal 0/17,814
+
+Never, on either outcome. So on a frame that goes white:
+
+- the argument buffer holds exactly the ids Ryujinx wrote, unmodified;
+- those ids name a texture that holds a picture, across adjacent texels;
+- nothing writes that texture between the composite's read and the frame boundary;
+- the fetch coordinates are unscaled, `render_scale` being exactly 1.0;
+- the Newton constant is exactly 2.0;
+- the draw declares its three resources, the same three as on a good frame;
+- and the result is a uniform fill.
+
+**Everything Ryujinx puts in front of the GPU is correct on exactly the frames that fail.**
+That is the strongest statement this investigation has been able to make, and it is now made
+from measurements rather than from elimination. What remains is on the far side of the API:
+either the driver misreads a correctly-formed argument table, or something in GPU-side
+timing makes the fetch return stale memory despite correct descriptors - and Vulkan, going
+through MoltenVK to the same driver on the same machine and save, never does it.
+
+This is the point at which the ledger stops being an investigation and becomes a report.

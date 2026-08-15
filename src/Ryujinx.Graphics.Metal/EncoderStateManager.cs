@@ -2792,6 +2792,12 @@ namespace Ryujinx.Graphics.Metal
             {
                 fragArgBuffer.Holder.SetDataUnchecked(fragArgBuffer.Offset, MemoryMarshal.AsBytes(fragResourceIds));
                 MTLBuffer mtlFragArgBuffer = _bufferManager.GetBuffer(fragArgBuffer.Handle, false).Get(_pipeline.Cbs).Value;
+
+                if (UploadCorrelator.Enabled && program.IsTexelFetchComposite)
+                {
+                    UploadCorrelator.NoteArgBuffer(
+                        mtlFragArgBuffer.Contents, fragArgBuffer.Range.Offset, fragResourceIds);
+                }
                 bindings.FragmentBuffers.Add(new BufferResource(mtlFragArgBuffer, (uint)fragArgBuffer.Range.Offset, SetIndexToBindingIndex(setIndex)));
             }
         }

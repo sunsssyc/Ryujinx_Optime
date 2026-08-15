@@ -75,6 +75,9 @@ namespace Ryujinx.Graphics.Metal
             public bool InputSampled;
             public bool InputWrittenAfter;
             public int Residency;
+            public IntPtr ArgPtr;
+            public ulong[] ArgExpected;
+            public int ArgCount;
             public string LateWriter;
             public float[] Cb;
             public bool[] CbSeen;
@@ -127,6 +130,34 @@ namespace Ryujinx.Graphics.Metal
         // premature deletion nor a missing declaration by inspection - so count what is
         // issued rather than what the source says should be.
         private static int _frameResidency = -1;
+
+        // The argument buffer's own bytes, remembered at the composite draw and re-read at
+        // present. Everything so far compared the id Ryujinx computed; this compares the id
+        // still sitting in memory when the frame ends against the one written. They differ
+        // only if something overwrote the table between the draw being encoded and the GPU
+        // reading it - which would point the taps at another texture and produce exactly
+        // the uniform fill that is measured, with the real input untouched.
+        private const int MaxArgIds = 8;
+        private static IntPtr _frameArgPtr;
+        private static readonly ulong[] _frameArgExpected = new ulong[MaxArgIds];
+        private static int _frameArgCount;
+        private static long _flatArgMismatch, _normalArgMismatch, _flatArgChecked, _normalArgChecked;
+
+        public static unsafe void NoteArgBuffer(IntPtr contents, int offset, ReadOnlySpan<ulong> ids)
+        {
+            if (!Enabled || contents == IntPtr.Zero)
+            {
+                return;
+            }
+
+            _frameArgPtr = (IntPtr)((byte*)contents + offset);
+            _frameArgCount = Math.Min(ids.Length, MaxArgIds);
+
+            for (int i = 0; i < _frameArgCount; i++)
+            {
+                _frameArgExpected[i] = ids[i];
+            }
+        }
         private static double _flatResidencySum, _normalResidencySum;
         private static long _flatResidencyN, _normalResidencyN;
 
@@ -619,6 +650,14 @@ namespace Ryujinx.Graphics.Metal
 
                 mine.InputWrittenAfter = _frameInputWrittenAfter;
                 mine.Residency = _frameResidency;
+                mine.ArgPtr = _frameArgPtr;
+                mine.ArgCount = _frameArgCount;
+
+                if (_frameArgCount > 0)
+                {
+                    mine.ArgExpected ??= new ulong[MaxArgIds];
+                    Array.Copy(_frameArgExpected, mine.ArgExpected, _frameArgCount);
+                }
                 mine.LateWriter = _frameLateWriter;
                 mine.Cb ??= new float[MaxCbSlots * 4];
                 mine.CbSeen ??= new bool[MaxCbSlots];
@@ -657,6 +696,8 @@ namespace Ryujinx.Graphics.Metal
             _frameSeq = 0;
             _frameInputWrittenAfter = false;
             _frameResidency = -1;
+            _frameArgPtr = IntPtr.Zero;
+            _frameArgCount = 0;
             _frameLateWriter = null;
             Array.Clear(_frameCbSeen);
             _frameProgCount = 0;
@@ -748,6 +789,32 @@ namespace Ryujinx.Graphics.Metal
             double mean = lumaSum / Pixels;
             double variance = (lumaSqSum / Pixels) - (mean * mean);
             double sd = variance > 0 ? Math.Sqrt(variance) : 0;
+
+            if (slot.ArgCount > 0 && slot.ArgPtr != IntPtr.Zero)
+            {
+                ulong* now = (ulong*)slot.ArgPtr;
+                bool differs = false;
+
+                for (int i = 0; i < slot.ArgCount; i++)
+                {
+                    if (now[i] != slot.ArgExpected[i])
+                    {
+                        differs = true;
+                        break;
+                    }
+                }
+
+                if (flat)
+                {
+                    _flatArgChecked++;
+                    if (differs) { _flatArgMismatch++; }
+                }
+                else
+                {
+                    _normalArgChecked++;
+                    if (differs) { _normalArgMismatch++; }
+                }
+            }
 
             if (slot.Residency >= 0)
             {
@@ -998,6 +1065,7 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
 
+            sb.Append($" | argbuf overwritten by frame end: flat {_flatArgMismatch}/{_flatArgChecked}, normal {_normalArgMismatch}/{_normalArgChecked}");
             sb.Append($" | composite residency decls: flat {(_flatResidencyN > 0 ? _flatResidencySum / _flatResidencyN : 0):F2} over {_flatResidencyN}, normal {(_normalResidencyN > 0 ? _normalResidencySum / _normalResidencyN : 0):F2} over {_normalResidencyN}");
             sb.Append($" | input written after the composite read it: flat {_flatLateWrites}/{_flatFrames}, normal {_normalLateWrites}/{_normalFrames}");
 
