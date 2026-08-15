@@ -4548,3 +4548,33 @@ What survives from it is narrower and still true: the read-after-write split hal
 and full serialisation did not, so the split's effect is not ordering *and* not stores. Those
 two facts together are the sharpest unexplained thing in this document, and no hypothesis
 offered today accounts for both.
+
+### Full serialisation does reduce the flash - the old result was wrong
+
+Re-measured under the gate, with the intervention verified to engage: 2,506 passes for 2,506
+draws, one pass per draw, against the usual ~600.
+
+    full serialisation   luma 119, 4,199 frames, flat 16.79%
+    today's baselines    20.4% - 23.7%
+
+About five points below the range, roughly eight standard errors. **So "full serialisation
+changed nothing" is false.** That result predates the admissibility gate and the drive-in's
+draw-count check, and today five arms turned out to be menus or dark scenes reporting a clean
+zero - the suspicion that it was one of them was correct.
+
+Two caveats, stated because this arm is weaker than the others: luma 119 sits at the low edge
+of the gate, and a darker scene depresses the rate on its own; and one pass per draw is slow
+enough that the window only reached 4,199 frames. The direction is real, the magnitude is
+soft.
+
+What it means is that the ordering axis was never properly closed, and the trend across the
+three points is monotonic - no split 45%, read-after-write split 24%, full serialisation 17%.
+More splitting, less flashing, and it does not reach zero. That last part is the important
+one: **serialising every draw against every other still leaves one frame in six white**, so
+ordering is not the whole fault even though it is part of it.
+
+The section above that concluded "the split's effect is neither ordering nor stores" is
+therefore half wrong: it is ordering, at least in part. The reasoning was sound and its
+premise - the old full-serialisation result - was not. Corrected here rather than deleted,
+because the same premise underpins the "sharpest unexplained thing" claim, which no longer
+stands.

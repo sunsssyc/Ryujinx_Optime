@@ -123,6 +123,18 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _splitBlit =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_SPLIT_BLIT") == "1";
 
+        /// <summary>
+        /// Ends the pass before every draw, not only those SamplesEarlierWrite() flags.
+        /// "Full serialisation changed nothing" is recorded in the handoff from an earlier
+        /// session, and by today's standards that result is not trustworthy: it predates the
+        /// admissibility gate and the drive-in's draw-count check, and five arms measured
+        /// today turned out to be menus or dark scenes reporting a clean zero. If the split's
+        /// benefit is monotonic in how much it splits, this is where it ends up.
+        /// RYUJINX_METAL_SPLIT_ALL=1.
+        /// </summary>
+        private static readonly bool _splitAll =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_SPLIT_ALL") == "1";
+
         private static readonly bool _rawSplitDefault = _rawSplit;
         private static long _rawSplits;
 
@@ -524,13 +536,17 @@ namespace Ryujinx.Graphics.Metal
             // of the few things left that has not been.
             string blitLabel = _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel;
 
+            bool forceAllSplit = forDraw && _splitAll &&
+                Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
+                DrawCount != _drawCountAtPassStart;
+
             bool forceBlitSplit = forDraw && _rawSplit && _splitBlit &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
                 DrawCount != _drawCountAtPassStart &&
                 blitLabel != null &&
                 blitLabel.StartsWith("480117", StringComparison.Ordinal);
 
-            if (forceBlitSplit || (forDraw && _rawSplit &&
+            if (forceAllSplit || forceBlitSplit || (forDraw && _rawSplit &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
                 DrawCount != _drawCountAtPassStart &&
                 _encoderStateManager.SamplesEarlierWrite()))
