@@ -4270,3 +4270,26 @@ picture on white frames; therefore its UVs are constant; the attribute behind th
 distinct vertices in memory; the stride that walks them is 16 and constant. The collapse
 happens between a correct buffer and a constant attribute, and three named places remain to
 look.
+
+### The draw parameters are identical - and they name the last suspect
+
+Gated arm. One signature only, on both outcomes:
+
+    blit draw   count=6 inst=1 first=0 indexed=1    flat 2,718   normal 8,680
+
+Six indices, one instance, starting at zero. Two triangles - a fullscreen quad, which is what
+a pass-through blit should be. The parameters do not vary, so they are not the collapse.
+
+What they establish is that **the draw is indexed**, and that is the last candidate standing.
+The vertex buffer holds four distinct vertices; the stride that walks them is 16; the draw
+asks for six indices. If those six indices are all zero on a white frame, every invocation
+fetches element zero, the attribute is constant across the primitive, the UVs collapse, and
+the sampler returns one texel for the whole screen. That is the entire observed fault, and it
+is consistent with every measurement in this document - a correct vertex buffer, a correct
+stride, correct draw parameters, a correct source texture, and a uniform white frame.
+
+**Next, and it is one measurement:** read the six indices for this draw and compare them by
+outcome. The index buffer reaches the encoder the same way the vertex buffer does, so the
+same CPU-side read that photographed four vertices works on it unchanged. If they are all
+zero on flat frames and 0,1,2,0,2,3 on normal ones, the fault is found and the search moves
+to whatever writes that index buffer.

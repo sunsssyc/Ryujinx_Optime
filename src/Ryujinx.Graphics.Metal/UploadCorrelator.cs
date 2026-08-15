@@ -78,6 +78,7 @@ namespace Ryujinx.Graphics.Metal
             public int CompositeDraws;
             public int VertexDistinct;
             public int VertexStride;
+            public (int Count, int Inst, int First, int Indexed) Draw;
             public IntPtr ArgPtr;
             public ulong[] ArgExpected;
             public int ArgCount;
@@ -275,6 +276,16 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        public static void NoteDrawParams(int count, int instances, int first, int indexed)
+        {
+            if (Enabled)
+            {
+                _frameDraw = (count, instances, first, indexed);
+            }
+        }
+
+        private static (int Count, int Inst, int First, int Indexed) _frameDraw = (-1, -1, -1, -1);
+        private static readonly Dictionary<string, (long Flat, long Normal)> _drawParamStats = new();
         private static int _frameVertexStride = -1;
         private static double _flatStrideSum, _normalStrideSum;
         private static long _flatStrideN, _normalStrideN;
@@ -745,6 +756,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.CompositeDraws = _frameCompositeDraws;
                 mine.VertexDistinct = _frameVertexDistinct;
                 mine.VertexStride = _frameVertexStride;
+                mine.Draw = _frameDraw;
                 mine.ArgPtr = _frameArgPtr;
                 mine.ArgCount = _frameArgCount;
 
@@ -794,6 +806,7 @@ namespace Ryujinx.Graphics.Metal
             _frameCompositeDraws = 0;
             _frameVertexDistinct = -1;
             _frameVertexStride = -1;
+            _frameDraw = (-1, -1, -1, -1);
             _frameArgPtr = IntPtr.Zero;
             _frameArgCount = 0;
             _frameLateWriter = null;
@@ -923,6 +936,13 @@ namespace Ryujinx.Graphics.Metal
             {
                 _normalDrawSum += slot.CompositeDraws;
                 _normalDrawN++;
+            }
+
+            if (slot.Draw.Count >= 0 && _drawParamStats.Count < 32)
+            {
+                string k = $"count={slot.Draw.Count} inst={slot.Draw.Inst} first={slot.Draw.First} indexed={slot.Draw.Indexed}";
+                (long df, long dn) = _drawParamStats.TryGetValue(k, out (long Flat, long Normal) dv) ? (dv.Flat, dv.Normal) : (0L, 0L);
+                _drawParamStats[k] = flat ? (df + 1, dn) : (df, dn + 1);
             }
 
             if (slot.VertexStride >= 0)
@@ -1195,6 +1215,11 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($", normal min {(_normalFrames > 0 ? _normalMinSum / _normalFrames : 0):F0} max {(_normalFrames > 0 ? _normalMaxSum / _normalFrames : 0):F0} sd {(_normalFrames > 0 ? _normalSdSum / _normalFrames : 0):F1}");
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
+
+            foreach (KeyValuePair<string, (long Flat, long Normal)> d in _drawParamStats)
+            {
+                sb.Append($"\n  blit draw {d.Key}: flat {d.Value.Flat}, normal {d.Value.Normal}");
+            }
 
             sb.Append($" | blit stride: flat {(_flatStrideN > 0 ? _flatStrideSum / _flatStrideN : 0):F1} [{(_flatStrideN > 0 ? _flatStrideMin : 0)},{(_flatStrideN > 0 ? _flatStrideMax : 0)}] over {_flatStrideN}, normal {(_normalStrideN > 0 ? _normalStrideSum / _normalStrideN : 0):F1} over {_normalStrideN}");
             sb.Append($" | blit vertex spread (distinct of 4): flat {(_flatVertN > 0 ? _flatVertSum / _flatVertN : 0):F2} over {_flatVertN}, normal {(_normalVertN > 0 ? _normalVertSum / _normalVertN : 0):F2} over {_normalVertN}");

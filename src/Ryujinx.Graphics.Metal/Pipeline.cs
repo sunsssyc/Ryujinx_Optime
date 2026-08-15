@@ -1589,6 +1589,18 @@ namespace Ryujinx.Graphics.Metal
 
         private void TraceDraw(string kind, int count, int instanceCount, int firstIndexOrVertex, int firstInstance)
         {
+            // Outside the trace gate on purpose. The chain is measured as far as "a correct
+            // vertex buffer, a stride of 16, and a constant attribute in the shader", and
+            // the draw's own parameters are one of the three places left where those can
+            // stop agreeing - a count of one, or a first-vertex that pins every invocation
+            // to the same element, collapses the UVs exactly as observed.
+            if (UploadCorrelator.Enabled &&
+                _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string dl &&
+                dl.StartsWith("480117", StringComparison.Ordinal))
+            {
+                UploadCorrelator.NoteDrawParams(count, instanceCount, firstIndexOrVertex, kind == "DrawIndexed" ? 1 : 0);
+            }
+
             if (_renderer.FrameCapture.DrawTraceActive)
             {
                 Texture target = _encoderStateManager.RenderTargets[0];
