@@ -2778,6 +2778,11 @@ namespace Ryujinx.Graphics.Metal
 
             if (program.ArgumentBufferSizes[setIndex] > 0)
             {
+                if (UploadCorrelator.Enabled && program.IsTexelFetchComposite)
+                {
+                    UploadCorrelator.NoteResidency(bindings.Resources.Count);
+                }
+
                 vertArgBuffer.Holder.SetDataUnchecked(vertArgBuffer.Offset, MemoryMarshal.AsBytes(vertResourceIds));
                 MTLBuffer mtlVertArgBuffer = _bufferManager.GetBuffer(vertArgBuffer.Handle, false).Get(_pipeline.Cbs).Value;
                 bindings.VertexBuffers.Add(new BufferResource(mtlVertArgBuffer, (uint)vertArgBuffer.Range.Offset, SetIndexToBindingIndex(setIndex)));

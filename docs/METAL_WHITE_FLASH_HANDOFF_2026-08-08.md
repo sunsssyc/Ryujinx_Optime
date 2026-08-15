@@ -3822,3 +3822,19 @@ this reading of the code. What has not been done is to observe it rather than re
 count the declarations actually issued per draw under each allocation strategy, split by
 outcome, and see whether the counts differ. That is the next probe, and it is the last
 untried thing on this axis.
+
+### Residency declarations are identical by outcome
+
+Counted rather than read: how many resources the composite's draw actually declares to the
+encoder, split by outcome.
+
+    composite residency declarations   flat 3.00   normal 3.00
+
+Exactly three, on both, with no variance. The declaration count is not what differs on a
+white frame, which closes the residency reading in its countable form and leaves the
+argument buffer's eleven-point effect unexplained by anything measured so far: not premature
+deletion, not a missing declaration by inspection, not a differing declaration count.
+
+Note this arm sat on the menu for nine minutes before the drive-in's retries got it into the
+game - the menu figures (normal 3.00 over 15,000-odd frames, flat 0 over 0) are the title
+screen and mean nothing. Only the counts after `2527 draws/frame` appears are gameplay.

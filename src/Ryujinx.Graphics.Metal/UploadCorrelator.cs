@@ -74,6 +74,7 @@ namespace Ryujinx.Graphics.Metal
             public string Writers;
             public bool InputSampled;
             public bool InputWrittenAfter;
+            public int Residency;
             public string LateWriter;
             public float[] Cb;
             public bool[] CbSeen;
@@ -119,6 +120,23 @@ namespace Ryujinx.Graphics.Metal
         private static bool _frameInputWrittenAfter;
         private static string _frameLateWriter;
         private static long _flatLateWrites, _normalLateWrites;
+
+        // How many resources the composite's draw actually declares to the encoder. Read
+        // from the code the pairing looks exact, but the argument buffer's allocation
+        // strategy moves the flash rate by eleven points for a reason that is neither
+        // premature deletion nor a missing declaration by inspection - so count what is
+        // issued rather than what the source says should be.
+        private static int _frameResidency = -1;
+        private static double _flatResidencySum, _normalResidencySum;
+        private static long _flatResidencyN, _normalResidencyN;
+
+        public static void NoteResidency(int count)
+        {
+            if (Enabled)
+            {
+                _frameResidency = count;
+            }
+        }
         private static readonly Dictionary<string, (long Flat, long Normal)> _lateWriterStats = new();
 
         private static void NoteWriteOrdering(IntPtr root, string who)
@@ -600,6 +618,7 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 mine.InputWrittenAfter = _frameInputWrittenAfter;
+                mine.Residency = _frameResidency;
                 mine.LateWriter = _frameLateWriter;
                 mine.Cb ??= new float[MaxCbSlots * 4];
                 mine.CbSeen ??= new bool[MaxCbSlots];
@@ -637,6 +656,7 @@ namespace Ryujinx.Graphics.Metal
             _compositeSeq = -1;
             _frameSeq = 0;
             _frameInputWrittenAfter = false;
+            _frameResidency = -1;
             _frameLateWriter = null;
             Array.Clear(_frameCbSeen);
             _frameProgCount = 0;
@@ -728,6 +748,20 @@ namespace Ryujinx.Graphics.Metal
             double mean = lumaSum / Pixels;
             double variance = (lumaSqSum / Pixels) - (mean * mean);
             double sd = variance > 0 ? Math.Sqrt(variance) : 0;
+
+            if (slot.Residency >= 0)
+            {
+                if (flat)
+                {
+                    _flatResidencySum += slot.Residency;
+                    _flatResidencyN++;
+                }
+                else
+                {
+                    _normalResidencySum += slot.Residency;
+                    _normalResidencyN++;
+                }
+            }
 
             if (slot.InputWrittenAfter)
             {
@@ -964,6 +998,7 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
 
+            sb.Append($" | composite residency decls: flat {(_flatResidencyN > 0 ? _flatResidencySum / _flatResidencyN : 0):F2} over {_flatResidencyN}, normal {(_normalResidencyN > 0 ? _normalResidencySum / _normalResidencyN : 0):F2} over {_normalResidencyN}");
             sb.Append($" | input written after the composite read it: flat {_flatLateWrites}/{_flatFrames}, normal {_normalLateWrites}/{_normalFrames}");
 
             foreach ((string who, (long Flat, long Normal) w) in _lateWriterStats)
