@@ -96,6 +96,26 @@ namespace Ryujinx.Graphics.Metal
         private static string[] _skipPrograms = [];
         private static long _skippedByProgram;
 
+        private static bool _rawSplit =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT") == "1";
+
+        private static readonly bool _rawSplitDefault = _rawSplit;
+        private static long _rawSplits;
+
+        private static void RefreshRawSplit()
+        {
+            try
+            {
+                _rawSplit = System.IO.File.Exists("/tmp/ryujinx-metal-raw-split")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-raw-split").Trim() == "1"
+                    : _rawSplitDefault;
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
+
         private static void RefreshSkipProgram()
         {
             try
@@ -432,6 +452,23 @@ namespace Ryujinx.Graphics.Metal
             {
                 EndCurrentPass(PassEndReason.FragmentDependency);
                 _encoderStateManager.SignalRenderDirty();
+            }
+
+            // Split where Vulkan is forced to split. A draw that samples storage written
+            // as a colour attachment earlier in this command buffer is a read-after-write
+            // that MoltenVK cannot express inside an encoder and therefore resolves by
+            // ending it; this backend emits no barrier at all and trusts Metal's automatic
+            // tracking. /tmp/ryujinx-metal-raw-split holds 1 to enable, re-read once a
+            // frame. Decided from bound state before the prepass, never from inside
+            // encoder acquisition - the constraint the feedback split had to learn.
+            if (forDraw && _rawSplit &&
+                Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
+                DrawCount != _drawCountAtPassStart &&
+                _encoderStateManager.SamplesEarlierWrite())
+            {
+                EndCurrentPass(PassEndReason.FragmentDependency);
+                _encoderStateManager.SignalRenderDirty();
+                _rawSplits++;
             }
 
             // Partial-render discriminator. AGX splits a render pass by itself when the
@@ -780,6 +817,7 @@ namespace Ryujinx.Graphics.Metal
             RefreshBounceScene();
             RefreshSkipDraws();
             RefreshSkipProgram();
+            RefreshRawSplit();
             _passIndexInFrame = 0;
             RefreshBarrierToggle();
             EncoderStateManager.RefreshSamplingToggle();
@@ -981,7 +1019,7 @@ namespace Ryujinx.Graphics.Metal
                     _lastStatsRenderPassCount = _renderPassCount;
 
                     string passText =
-                        $" skipped draws: {_skippedDraws}, by program: {_skippedByProgram}." +
+                        $" skipped draws: {_skippedDraws}, by program: {_skippedByProgram}, raw splits: {_rawSplits}." +
                         $" per frame: {passes / (ulong)SyncStatsLogFrameInterval} passes, " +
                         $"{draws / (ulong)SyncStatsLogFrameInterval} draws " +
                         $"({(passes != 0 ? (double)draws / passes : 0):F1} draws/pass).";
@@ -1067,6 +1105,12 @@ namespace Ryujinx.Graphics.Metal
             }
 
             CommandBuffer = (Cbs = _renderer.CommandBufferPool.ReturnAndRent(Cbs)).CommandBuffer;
+
+            // The read-after-write set is scoped to a command buffer: Metal orders whole
+            // command buffers, so a write in the retired one is already ordered against
+            // anything the new one does. Carrying the set across would make every draw
+            // that samples anything split, forever.
+            _encoderStateManager.ClearWrittenThisCb();
 
             // Mirrors live in staging reservations owned by the command buffer that is
             // being retired, so none of them survive the swap.

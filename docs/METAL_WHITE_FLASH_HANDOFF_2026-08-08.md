@@ -2802,3 +2802,61 @@ outcomes, and each was verified positively rather than by elimination:
 
 Same inputs, same code, same timing, same bindings - and 28.6% of the time the output is
 white. There is no remaining observable on this side of the driver that differs.
+
+## 2026-08-15: the backend difference, and the largest effect measured on this fault
+
+"Why would it be the GPU when Vulkan barely flashes on the same machine?" - the right
+question, and the answer is that every comparison in this document until now was made
+*within* the Metal backend, flat frames against normal ones. A difference that is
+constant across both outcomes is invisible to that method by construction, and the 175x
+gap is between backends, not between outcomes. Wrong dimension.
+
+Current numbers rather than the July ones. Same machine, same save, same spot, standing
+still, compositor sampling:
+
+    Vulkan   0 white out of 120 samples
+    Metal    about 40%
+
+Two candidate differences were checked before any experiment:
+
+  - **Argument buffers: not it.** This backend routes every texture through Tier 2
+    argument buffers and has no setFragmentTexture call anywhere. But
+    `MVKInitialization.Initialize()` sets `config.UseMetalArgumentBuffers = true`
+    unconditionally, through vkSetMoltenVKConfigurationMVK - which also overrides the
+    MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS environment variable. Both backends use Metal
+    argument buffers. (Reading that saved running an experiment whose knob was already
+    overridden - the second time today a toggle needed verifying before use.)
+
+  - **Barriers: it.** Ryujinx's Vulkan backend issues real pipeline barriers. Metal has
+    no way to express a read-after-write barrier inside a render encoder, so MoltenVK
+    resolves one by ending the encoder: **the Vulkan path splits the pass at every
+    read-after-write, automatically.** This backend issues no barrier of any kind - no
+    MTLFence, no MTLEvent - and leans entirely on Metal's automatic hazard tracking,
+    which for argument-buffer reads is fed by useResource rather than by anything the
+    driver observes directly.
+
+The ledger's earlier "strict barrier" test keyed on guest TextureBarrier calls, which
+this game issues rarely. This keys on the hazard actually occurring: a draw that samples
+storage written as a colour attachment earlier in the same command buffer ends the pass
+first (RYUJINX_METAL_RAW_SPLIT=1, hot file /tmp/ryujinx-metal-raw-split).
+
+A/B/A in one daylight window, in gameplay, picture verified alive throughout (flat luma
+252, normal 99-106), flat frames per 600:
+
+    split off   253 292 291 269 249     mean 271   45.2%
+    split on    151 142 147 143         mean 146   24.3%
+    split off   249 249                 mean 249   41.5%
+
+Reversible, 16 SE, and about 97 extra passes a frame. **The largest effect anything has
+had on this fault** - the previous best was 6 points from capping draws per pass; this is
+21, roughly half the occurrences.
+
+Not a complete fix: 24% against Vulkan's zero. The tracking here covers colour
+attachments only. Writes through blit (SetData, CopyTo), depth attachments and compute
+image stores are not yet in the set, and each is a read-after-write the Vulkan path would
+also have barriered. Extending it is the obvious next step and is cheap.
+
+This reframes the whole investigation. The fault is a read-after-write hazard that
+Metal's automatic tracking does not fully cover in this backend's encoder structure. The
+driver is not misbehaving for no reason; we are asking it for something Vulkan never asks
+for, and it is only the two together that produce white.

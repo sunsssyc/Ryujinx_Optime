@@ -519,6 +519,7 @@ namespace Ryujinx.Graphics.Metal
                     // earlier pass, which is what buried the feedback signal twice.
                     FeedbackProbe.NoteAttachment(i, tex);
                     UploadCorrelator.NoteAttachment(tex);
+                    NoteAttachmentWritten(tex.CanonicalPtr);
                 }
             }
 
@@ -2059,6 +2060,71 @@ namespace Ryujinx.Graphics.Metal
             }
 
             return any;
+        }
+
+        /// <summary>
+        /// Storage written as a colour attachment since the current command buffer began,
+        /// and whether anything now bound for sampling is in that set.
+        ///
+        /// This is where the two backends part company. Ryujinx's Vulkan path issues real
+        /// pipeline barriers, and MoltenVK has nowhere to put a read-after-write barrier
+        /// inside a Metal render encoder, so it ends the encoder - Vulkan therefore splits
+        /// the pass at every read-after-write, automatically. This backend issues no
+        /// barriers at all and leans entirely on Metal's automatic hazard tracking, which
+        /// for argument-buffer reads is fed by useResource rather than by anything the
+        /// driver can see directly. Same machine, same driver, same save, argument buffers
+        /// on in both: Vulkan 0 flat frames in 120 samples, Metal about 40%.
+        ///
+        /// The ledger's "strict barrier" test keyed on guest TextureBarrier calls, which
+        /// this game issues rarely; this keys on the hazard actually occurring.
+        /// </summary>
+        private readonly HashSet<IntPtr> _writtenThisCb = new();
+
+        public readonly void NoteAttachmentWritten(IntPtr root)
+        {
+            if (root != IntPtr.Zero)
+            {
+                _writtenThisCb.Add(root);
+            }
+        }
+
+        public readonly void ClearWrittenThisCb()
+        {
+            _writtenThisCb.Clear();
+        }
+
+        public readonly bool SamplesEarlierWrite()
+        {
+            if (_writtenThisCb.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (TextureRef reference in _currentState.TextureRefs)
+            {
+                if (reference.Storage is Texture sampled && _writtenThisCb.Contains(sampled.CanonicalPtr))
+                {
+                    return true;
+                }
+            }
+
+            foreach (EncoderState.ArrayRef<TextureArray> arrayRef in _currentState.TextureArrayRefs)
+            {
+                if (arrayRef.Array == null)
+                {
+                    continue;
+                }
+
+                foreach (TextureRef reference in arrayRef.Array.GetTextureRefs())
+                {
+                    if (reference.Storage is Texture sampled && _writtenThisCb.Contains(sampled.CanonicalPtr))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
