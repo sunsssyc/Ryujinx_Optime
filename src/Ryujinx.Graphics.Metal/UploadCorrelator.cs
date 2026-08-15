@@ -77,6 +77,7 @@ namespace Ryujinx.Graphics.Metal
             public int Residency;
             public int CompositeDraws;
             public int VertexDistinct;
+            public int VertexStride;
             public IntPtr ArgPtr;
             public ulong[] ArgExpected;
             public int ArgCount;
@@ -260,6 +261,24 @@ namespace Ryujinx.Graphics.Metal
             _frameVertexDistinct = distinct;
         }
 
+        /// <summary>
+        /// The stride the fetch uses. Four distinct vertices sit in the buffer on a white
+        /// frame and the shader still sees a constant attribute, so the collapse is between
+        /// them - and a stride of zero makes every vertex read element zero, which is
+        /// exactly that.
+        /// </summary>
+        public static void NoteVertexStride(int stride)
+        {
+            if (Enabled)
+            {
+                _frameVertexStride = stride;
+            }
+        }
+
+        private static int _frameVertexStride = -1;
+        private static double _flatStrideSum, _normalStrideSum;
+        private static long _flatStrideN, _normalStrideN;
+        private static int _flatStrideMin = int.MaxValue, _flatStrideMax = int.MinValue;
         private static int _frameVertexDistinct = -1;
         private static double _flatVertSum, _normalVertSum;
         private static long _flatVertN, _normalVertN;
@@ -725,6 +744,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.Residency = _frameResidency;
                 mine.CompositeDraws = _frameCompositeDraws;
                 mine.VertexDistinct = _frameVertexDistinct;
+                mine.VertexStride = _frameVertexStride;
                 mine.ArgPtr = _frameArgPtr;
                 mine.ArgCount = _frameArgCount;
 
@@ -773,6 +793,7 @@ namespace Ryujinx.Graphics.Metal
             _frameResidency = -1;
             _frameCompositeDraws = 0;
             _frameVertexDistinct = -1;
+            _frameVertexStride = -1;
             _frameArgPtr = IntPtr.Zero;
             _frameArgCount = 0;
             _frameLateWriter = null;
@@ -902,6 +923,22 @@ namespace Ryujinx.Graphics.Metal
             {
                 _normalDrawSum += slot.CompositeDraws;
                 _normalDrawN++;
+            }
+
+            if (slot.VertexStride >= 0)
+            {
+                if (flat)
+                {
+                    _flatStrideSum += slot.VertexStride;
+                    _flatStrideN++;
+                    if (slot.VertexStride < _flatStrideMin) { _flatStrideMin = slot.VertexStride; }
+                    if (slot.VertexStride > _flatStrideMax) { _flatStrideMax = slot.VertexStride; }
+                }
+                else
+                {
+                    _normalStrideSum += slot.VertexStride;
+                    _normalStrideN++;
+                }
             }
 
             if (slot.VertexDistinct >= 0)
@@ -1159,6 +1196,7 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
 
+            sb.Append($" | blit stride: flat {(_flatStrideN > 0 ? _flatStrideSum / _flatStrideN : 0):F1} [{(_flatStrideN > 0 ? _flatStrideMin : 0)},{(_flatStrideN > 0 ? _flatStrideMax : 0)}] over {_flatStrideN}, normal {(_normalStrideN > 0 ? _normalStrideSum / _normalStrideN : 0):F1} over {_normalStrideN}");
             sb.Append($" | blit vertex spread (distinct of 4): flat {(_flatVertN > 0 ? _flatVertSum / _flatVertN : 0):F2} over {_flatVertN}, normal {(_normalVertN > 0 ? _normalVertSum / _normalVertN : 0):F2} over {_normalVertN}");
             sb.Append($" | composite draws/frame: flat {(_flatDrawN > 0 ? _flatDrawSum / _flatDrawN : 0):F2}, normal {(_normalDrawN > 0 ? _normalDrawSum / _normalDrawN : 0):F2}");
             sb.Append($" | argbuf overwritten by frame end: flat {_flatArgMismatch}/{_flatArgChecked}, normal {_normalArgMismatch}/{_normalArgChecked}");

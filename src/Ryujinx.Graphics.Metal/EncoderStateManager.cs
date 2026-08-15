@@ -1929,6 +1929,7 @@ namespace Ryujinx.Graphics.Metal
                     {
                         UploadCorrelator.NoteCompositeConstants(31, mtlBuffer.Contents, offset);
                         UploadCorrelator.NoteVertexSpread(mtlBuffer.Contents, offset, bufferStates[i].Stride);
+                        UploadCorrelator.NoteVertexStride(bufferStates[i].Stride);
                     }
                 }
             }

@@ -4248,3 +4248,25 @@ call's parameters, split by outcome. All of them are on the encoder state at the
 that already photographs the buffer, and every one is a small integer, so a difference will
 be obvious rather than statistical. This is the last link in a chain that now runs
 unbroken from the presented pixel back to the draw call.
+
+### The stride is not it either
+
+Gated arm: luma 140, 11,399 frames, flat 21.34%.
+
+    fetch stride    flat 16.0, range [16,16]    normal 16.0
+
+Sixteen bytes on every frame of both outcomes, with no spread. A zero stride would have made
+every vertex read element zero and produced exactly this fault; it is not zero and it does not
+vary. Note this also confirms the spread measurement was reading real vertices - it walked
+0, 16, 32, 48 and found four distinct ones.
+
+So within the fetch the remaining candidates are the attribute's format and offset in the
+vertex descriptor, an index buffer that supplies element zero four times, and the draw call's
+own parameters. All three are recordable at the same site and all are small integers.
+
+Where this stands: the chain from the presented pixel back to the draw is unbroken and every
+link is measured, not inferred. A pass-through blit writes the surface; its source holds a
+picture on white frames; therefore its UVs are constant; the attribute behind them is four
+distinct vertices in memory; the stride that walks them is 16 and constant. The collapse
+happens between a correct buffer and a constant attribute, and three named places remain to
+look.
