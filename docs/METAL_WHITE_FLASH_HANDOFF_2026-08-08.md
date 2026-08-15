@@ -3976,3 +3976,33 @@ default) and check the log for `guard-rcp:` before reading any rate. If it fires
 frames go dark, the chain from the weight sum to the white is confirmed end to end and the
 remaining work is upstream. If it fires and they stay white at luma 250, the divide is not
 where the white is made and this document's central reading is wrong.
+
+### The divide-by-zero reading is refuted
+
+The guard fired - `guard-rcp: patched 1 division(s), denominator temp_297` - and the white
+did not move:
+
+    gated arm, guard active   luma 140, 11,399 frames, flat 22.19%
+    flat frames               min 248  max 254  sd 1.9   luma 252
+
+Clamping the reciprocal to zero when its denominator is zero changes nothing. The frames are
+still uniform white at 252. **So the white is not produced by that division.** Whatever makes
+these frames white, `temp_297` being zero is not the trigger.
+
+This is the most load-bearing thing in the document and it is now false. The uniformity
+result - min 248, max 254, sd 1.8 - was read as confirming the divide-by-zero derivation, and
+it does not: uniform white is equally consistent with a fill arriving from somewhere else
+entirely. Everything downstream that treated "the composite computes 0/0" as established
+needs re-reading in that light, including the entire line of enquiry into what flattens its
+input, which was chasing a condition that does not produce the symptom.
+
+What survives, because it was measured directly rather than derived: the white is a uniform
+fill and not a saturated picture; the composite draws exactly once on every white frame and
+is never absent; its input holds a picture; nothing overwrites that input; `render_scale` is
+1.0; the constants are exact; the argument buffer is never overwritten; and the argument
+buffer's allocation strategy moves the rate by eleven points.
+
+The open question is now blunter than it has been all day: **what writes the uniform white,
+if not this division?** The composite is the last thing to touch the surface before present -
+but "last writer" was established by a census that assumed the composite produces the white,
+and that assumption is gone. Re-run the writer census without it.
