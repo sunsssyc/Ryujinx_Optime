@@ -3708,3 +3708,40 @@ present, or to identify what writes that texture after the composite and check w
 runs on flat frames. The second is cheaper and answers the aliasing question directly: the
 per-storage writer census already exists and needs only to be restricted to the composite's
 input and split by outcome.
+
+### Nothing overwrites the input, so the contradiction is real
+
+Gated arm: luma 139, 10,799 frames, flat 21.59%.
+
+    input written after the composite read it   flat 0/2331   normal 4/8468
+
+Zero on flat frames. The worry that the input probe was sampling at present and therefore
+after some later writer does not apply: on the frames that go white, nothing touches that
+texture between the composite's read and the frame boundary, so what the probe sampled is
+what the shader read. Every earlier "the input is not flat" measurement stands.
+
+Which sharpens the contradiction into something quite specific. On a white frame:
+
+- the composite's input holds a picture - 19.15 distinct values among 25 *adjacent* texels;
+- nothing overwrites it afterwards;
+- the fetch coordinates are unscaled, `render_scale` being exactly 1.0 with zero spread;
+- the Newton constant is exactly 2.0 with zero spread;
+- and the output is a uniform white fill.
+
+A shader reading that texture at those coordinates cannot produce that output. So the taps
+are not returning the contents of that texture, which is precisely what the constant
+injection experiment concluded long ago and what the comment at the scene-binding site still
+records: the fetch returns something that is not in that texture's memory.
+
+**The next target is the argument buffer, not the binding.** Everything called a "binding
+check" in this document compared the values Ryujinx *intended* - `gpuAddress`, `nativePtr`,
+`CanonicalPtr` - captured at the point of binding. What the GPU dereferences is the resource
+id written into the Tier 2 argument buffer, and those are not the same object: a stale or
+half-updated argument buffer hands the shader a different texture, and if that texture is
+uniform - a cleared surface, an unwritten allocation - every tap returns the same value, the
+weight sum is zero, and the frame goes white with a perfectly good input texture sitting
+untouched in memory.
+
+That reading survives every measurement in this document, and it is the only one that does.
+Read the argument buffer's own bytes for the composite's texture slot at that draw, and
+compare them by outcome against the resource id Ryujinx believes it wrote.

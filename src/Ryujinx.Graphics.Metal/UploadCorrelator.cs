@@ -73,6 +73,8 @@ namespace Ryujinx.Graphics.Metal
             public long PresentAge;
             public string Writers;
             public bool InputSampled;
+            public bool InputWrittenAfter;
+            public string LateWriter;
             public float[] Cb;
             public bool[] CbSeen;
         }
@@ -103,6 +105,32 @@ namespace Ryujinx.Graphics.Metal
         // and the question is what makes THIS flat on a fifth of frames. Identity was
         // already shown identical across outcomes, so only contents can differ.
         private static Texture _frameSceneTex;
+
+        // Does anything write the composite's input AFTER the composite has read it?
+        // Every "the input is not flat" result here sampled that texture at present, which
+        // is after every pass in the frame - so a later writer would mean the probe never
+        // saw what the shader actually read. Ordering is tracked with a counter rather than
+        // by moving the sample, because sampling at the draw needs the render encoder to
+        // end and restart, which is the read-after-write split already known to move the
+        // flash rate: the probe would perturb what it measures.
+        private static IntPtr _compositeInputRoot;
+        private static long _compositeSeq = -1;
+        private static long _frameSeq;
+        private static bool _frameInputWrittenAfter;
+        private static string _frameLateWriter;
+        private static long _flatLateWrites, _normalLateWrites;
+        private static readonly Dictionary<string, (long Flat, long Normal)> _lateWriterStats = new();
+
+        private static void NoteWriteOrdering(IntPtr root, string who)
+        {
+            _frameSeq++;
+
+            if (_compositeSeq >= 0 && root != IntPtr.Zero && root == _compositeInputRoot)
+            {
+                _frameInputWrittenAfter = true;
+                _frameLateWriter = who;
+            }
+        }
 
         // The composite's constant buffers, first four floats of each slot. The weight sum
         // does not come from the taps alone: fp_c3 feeds the fetch coordinates and fp_c1
@@ -341,6 +369,12 @@ namespace Ryujinx.Graphics.Metal
             _frameBindingLast.Program = program;
             _frameSceneTex = storage ?? _frameSceneTex;
 
+            if (storage != null)
+            {
+                _compositeInputRoot = storage.CanonicalPtr;
+                _compositeSeq = _frameSeq;
+            }
+
             if (_frameProgCount < MaxFrameProgs)
             {
                 string label = program ?? "?";
@@ -368,6 +402,8 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         public static void NoteAttachmentDraw(IntPtr root, string program)
         {
+            NoteWriteOrdering(root, program);
+
             if (!Enabled || root == IntPtr.Zero)
             {
                 return;
@@ -401,11 +437,15 @@ namespace Ryujinx.Graphics.Metal
 
         public static void NoteUpload(Texture target)
         {
+            NoteWriteOrdering(target.CanonicalPtr, "upload");
+
             Note(target, isCopy: false);
         }
 
         public static void NoteCopyIn(Texture target)
         {
+            NoteWriteOrdering(target.CanonicalPtr, "copy");
+
             Note(target, isCopy: true);
         }
 
@@ -559,6 +599,8 @@ namespace Ryujinx.Graphics.Metal
                     }
                 }
 
+                mine.InputWrittenAfter = _frameInputWrittenAfter;
+                mine.LateWriter = _frameLateWriter;
                 mine.Cb ??= new float[MaxCbSlots * 4];
                 mine.CbSeen ??= new bool[MaxCbSlots];
                 Array.Copy(_frameCb, mine.Cb, _frameCb.Length);
@@ -591,6 +633,11 @@ namespace Ryujinx.Graphics.Metal
             _frameBinding = default;
             _frameBindingLast = default;
             _frameSceneTex = null;
+            _compositeInputRoot = IntPtr.Zero;
+            _compositeSeq = -1;
+            _frameSeq = 0;
+            _frameInputWrittenAfter = false;
+            _frameLateWriter = null;
             Array.Clear(_frameCbSeen);
             _frameProgCount = 0;
             _framePresentRoot = IntPtr.Zero;
@@ -681,6 +728,24 @@ namespace Ryujinx.Graphics.Metal
             double mean = lumaSum / Pixels;
             double variance = (lumaSqSum / Pixels) - (mean * mean);
             double sd = variance > 0 ? Math.Sqrt(variance) : 0;
+
+            if (slot.InputWrittenAfter)
+            {
+                if (flat)
+                {
+                    _flatLateWrites++;
+                }
+                else
+                {
+                    _normalLateWrites++;
+                }
+
+                if (slot.LateWriter != null && _lateWriterStats.Count < MaxSignatures)
+                {
+                    _lateWriterStats.TryGetValue(slot.LateWriter, out (long Flat, long Normal) w);
+                    _lateWriterStats[slot.LateWriter] = flat ? (w.Flat + 1, w.Normal) : (w.Flat, w.Normal + 1);
+                }
+            }
 
             if (slot.CbSeen != null)
             {
@@ -898,6 +963,13 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($", normal min {(_normalFrames > 0 ? _normalMinSum / _normalFrames : 0):F0} max {(_normalFrames > 0 ? _normalMaxSum / _normalFrames : 0):F0} sd {(_normalFrames > 0 ? _normalSdSum / _normalFrames : 0):F1}");
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
+
+            sb.Append($" | input written after the composite read it: flat {_flatLateWrites}/{_flatFrames}, normal {_normalLateWrites}/{_normalFrames}");
+
+            foreach ((string who, (long Flat, long Normal) w) in _lateWriterStats)
+            {
+                sb.Append($"\n  late writer {who}: flat {w.Flat}, normal {w.Normal}");
+            }
 
             for (int c = 0; c < MaxCbSlots; c++)
             {
