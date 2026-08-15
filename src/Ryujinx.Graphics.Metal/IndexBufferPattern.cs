@@ -67,7 +67,14 @@ namespace Ryujinx.Graphics.Metal
             if (_repeatingBuffer != BufferHandle.Null)
             {
                 _renderer.Pipeline.CopyBuffer(_repeatingBuffer, newBuffer, 0, 0, _currentSize * sizeof(int));
-                _renderer.BufferManager.Delete(_repeatingBuffer);
+                // Deferred. The CopyBuffer above is only *encoded* here; destroying the
+                // source outright means the GPU performs that copy out of freed memory, so
+                // the grown index buffer can come back filled with whatever now lives
+                // there. Zeros make every vertex fetch element zero, which collapses the
+                // interpolated attribute across the primitive - and this pattern is what
+                // turns the fullscreen blit's quad into two triangles, so a collapsed
+                // attribute there is a screen filled with a single texel.
+                _renderer.BufferManager.DeleteWhenComplete(_repeatingBuffer);
             }
 
             _repeatingBuffer = newBuffer;
@@ -110,7 +117,14 @@ namespace Ryujinx.Graphics.Metal
         {
             if (_repeatingBuffer != BufferHandle.Null)
             {
-                _renderer.BufferManager.Delete(_repeatingBuffer);
+                // Deferred. The CopyBuffer above is only *encoded* here; destroying the
+                // source outright means the GPU performs that copy out of freed memory, so
+                // the grown index buffer can come back filled with whatever now lives
+                // there. Zeros make every vertex fetch element zero, which collapses the
+                // interpolated attribute across the primitive - and this pattern is what
+                // turns the fullscreen blit's quad into two triangles, so a collapsed
+                // attribute there is a screen filled with a single texel.
+                _renderer.BufferManager.DeleteWhenComplete(_repeatingBuffer);
                 _repeatingBuffer = BufferHandle.Null;
             }
         }

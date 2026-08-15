@@ -4318,3 +4318,27 @@ place, reached from a completely different direction.
 `IndexBufferPattern` to how that buffer is allocated and how its lifetime is managed against
 the command buffer. The deferred-deletion fix committed earlier covers `ScopedTemporaryBuffer`;
 whether the pattern's buffer goes through the same path has not been checked.
+
+### The index buffer's lifetime bug is real, and it is not the flash either
+
+`IndexBufferPattern.GetRepeatingBuffer` grows its buffer by encoding a `CopyBuffer` from the
+old one into the new and then calling `BufferManager.Delete` on the source - destroying it
+while the GPU has not yet performed the copy. Fixed the same way as `ScopedTemporaryBuffer`,
+with `DeleteWhenComplete`, at both sites.
+
+Measured, and it does not move the flash:
+
+    index pattern deferred deletion   luma 140, 11,399 frames, flat 22.37%
+    today's gated baselines           20.4% - 23.7%
+
+Squarely inside the range. The likely reason is the same as for the earlier lifetime fix: the
+repeating buffer stops growing once it is large enough, so in steady gameplay the delete path
+is almost never taken. Both fixes are correct and both are on paths that this workload
+barely exercises.
+
+**The measurement it was meant to shortcut is still outstanding.** Reading the six indices at
+the draw, split by outcome, is the thing that confirms or kills the index hypothesis outright,
+and a lifetime fix on a rarely-taken path cannot substitute for it. If they are 0,1,2,0,2,3
+on white frames as well, the index buffer is innocent and the collapse is in the vertex
+descriptor's attribute format or offset - the one remaining candidate in the fetch, and the
+only link in the chain from presented pixel to draw call that has never been read.
