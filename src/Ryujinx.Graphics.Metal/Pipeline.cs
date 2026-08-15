@@ -118,6 +118,11 @@ namespace Ryujinx.Graphics.Metal
         private static bool _rawSplit =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT") != "0";
 
+        // Forces the split for the blit that writes the presented surface, whether or not
+        // SamplesEarlierWrite() notices the dependency. RYUJINX_METAL_SPLIT_BLIT=1.
+        private static readonly bool _splitBlit =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_SPLIT_BLIT") == "1";
+
         private static readonly bool _rawSplitDefault = _rawSplit;
         private static long _rawSplits;
 
@@ -510,10 +515,25 @@ namespace Ryujinx.Graphics.Metal
             // tracking. /tmp/ryujinx-metal-raw-split holds 1 to enable, re-read once a
             // frame. Decided from bound state before the prepass, never from inside
             // encoder acquisition - the constraint the feedback split had to learn.
-            if (forDraw && _rawSplit &&
+            // Unconditionally for the blit that writes the presented surface. The
+            // read-after-write split relies on SamplesEarlierWrite() noticing that this
+            // draw samples something the same encoder wrote; if it misses this one, the
+            // blit reads a texture still resident in tile memory with no barrier, which on
+            // this hardware returns undefined - uniform - content. Everything else about
+            // this draw has been measured correct, so whether the split fires for it is one
+            // of the few things left that has not been.
+            string blitLabel = _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel;
+
+            bool forceBlitSplit = forDraw && _rawSplit && _splitBlit &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
                 DrawCount != _drawCountAtPassStart &&
-                _encoderStateManager.SamplesEarlierWrite())
+                blitLabel != null &&
+                blitLabel.StartsWith("480117", StringComparison.Ordinal);
+
+            if (forceBlitSplit || (forDraw && _rawSplit &&
+                Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
+                DrawCount != _drawCountAtPassStart &&
+                _encoderStateManager.SamplesEarlierWrite()))
             {
                 // Signal on the encoder that did the writing, before it ends, and wait on
                 // the one that will do the reading - the pairing MoltenVK produces for an

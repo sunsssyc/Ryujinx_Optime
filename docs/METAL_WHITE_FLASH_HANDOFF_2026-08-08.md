@@ -4477,3 +4477,23 @@ That leaves the encoder count and the `useResource` volume as the two unexplaine
 and both of them are downstream of the read-after-write split this fork turns on by default,
 which is also the one change that ever halved the flash. Reducing them means undoing the only
 thing that helped.
+
+### Forcing the split before the blit changes nothing
+
+`RYUJINX_METAL_SPLIT_BLIT=1` ends the render encoder before the blit that writes the presented
+surface, whether or not `SamplesEarlierWrite()` notices the dependency - the worry being that
+the split misses this draw and the blit then samples a texture still resident in tile memory
+with no barrier, which on this hardware returns undefined content.
+
+    forced split before the blit   luma 140, 11,399 frames, flat 21.64%
+    today's gated baselines        20.4% - 23.7%
+
+Inside the range. The blit is not reading tile-resident content without a barrier, and the
+read-after-write split is not missing this draw.
+
+That is the seventh intervention measured on a gated arm today, and the picture they make
+together is consistent: **the flash rate does not respond to anything done at this draw.**
+Deferred deletion, own allocation, forced full rebind, deferred stores, the reciprocal guard
+in two forms, the index buffer's lifetime, and now a forced encoder split - one made it worse,
+one broke the picture, and the rest did nothing measurable. The only change that has ever
+moved it remains the read-after-write split itself, which halved it and is on by default.
