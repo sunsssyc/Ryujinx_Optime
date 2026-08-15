@@ -2940,3 +2940,48 @@ One process note, because it cost a measurement: the expensive frame-scoped vari
 reverted in source but the artifact was never re-published, so a later "cheap" run was
 actually the expensive binary - 2512 passes a frame - and the build handed over for
 play was the same one. Publish after reverting, or measure the wrong thing.
+
+## 2026-08-15 (cont.): the floor is the same fault, and two more exclusions
+
+**The floor is content-independent too.** The 0x55 injection had only ever been run with
+the split off, so it characterised the two components together. Repeated with the split
+on (default), the scene texture demonstrably holding the constant - the screen is red -
+and 60 frames sampled:
+
+    red 44   white 16   other 0      26.7% white
+
+So the remaining quarter behaves exactly like the half the split removed: the memory
+holds a constant and the read comes back white. Both components are the same phenomenon.
+
+That reframes what the split actually did. If it is one phenomenon and ordering removes
+exactly half of it, the split is most likely **narrowing a race window rather than
+removing a cause** - which fits everything else on record: the printf Heisenbug, the
+fault being suppressed while a GPU capture runs, and serialisation helping only partly.
+
+**Residency caching: excluded.** `IsResident` caches useResource declarations per encoder
+and skips the call when a resource is already declared, so a stale cache would leave a
+texture non-resident and its reads undefined - content-independent and not an ordering
+problem, which is exactly the floor's shape. The ledger's earlier residency test only
+varied *which handle* was declared. Dropping the state cache below LevelResidency makes
+every declaration unconditional; A/B/A on the running session:
+
+    cache = 3 (residency cached)      157 flat / 600
+    cache = 2 (always declared)       157 flat / 600
+    cache = 3                         165 flat / 600
+
+No effect.
+
+### Named next step: an actual fence
+
+If the floor is a race window rather than a cause, closing it needs real GPU-side
+ordering, not encoder boundaries. Splitting a pass only stops two pieces of work being
+encoded together; `MTLFence` with updateFence/waitForFence makes the GPU wait. This
+backend contains **no MTLFence and no MTLEvent anywhere** - checked at the start of this
+session - while MoltenVK has them available for translating VkImageMemoryBarrier, and
+Vulkan sits at zero.
+
+That is the one mechanism the Vulkan path can reach and this one never has. It is also
+implementable: a fence per command buffer, updated after a pass that writes a tracked
+texture, waited on before a pass that samples it - the same pairs the read-after-write
+split already identifies, which means the detection is done and only the primitive
+changes.
