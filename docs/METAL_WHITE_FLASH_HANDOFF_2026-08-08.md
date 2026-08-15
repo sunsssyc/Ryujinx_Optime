@@ -4084,3 +4084,30 @@ presents exactly what is measured: min 246, max 254, a spread of eight, no struc
 hooked, key them on the same `CanonicalPtr`, and split by outcome. If flat frames show a
 clear with no subsequent blit, the fault is found - and unlike everything chased today, that
 is a fault in ordering, which this backend has already been shown to get wrong once.
+
+### One writer, and it is not the shader this document has been calling the composite
+
+With attachment binds recorded as writers, the census works. Gated arm: luma 141, 11,399
+frames, flat 20.38%. It reports exactly one signature for the presented storage:
+
+    480117,attach     on every frame, flat and normal alike
+
+No variant, no frame with a clear and no blit. The ordering hypothesis of the previous
+section is dead: the presented surface has the same writer whatever the outcome.
+
+What it exposes instead is worth more. **The program that writes the presented surface is
+`480117`.** This document has spent the entire day on `9E7042ABC827EC13` - the one fragment
+shader of 3,626 that uses a texel fetch - and called it "the composite" because the
+divide-by-zero derivation made it the suspect. Those are not the same shader. `480117` is the
+last entry in every scene-sampling signature; the texel-fetch shader is somewhere upstream.
+
+That reconciles the result that relocated the fault: the texel-fetch shader writes a picture
+on frames that present white because **it was never the thing writing the presented
+surface**. Its output going to a different surface is not a contradiction, it is the
+expected consequence of having identified the wrong shader.
+
+**Next: dump and read `480117`.** It is the last writer of the surface that goes white, on
+every frame, and nothing about it has been examined - not its inputs, not its constants, not
+its arithmetic. `RYUJINX_SHADER_DIFF` names files by guest-code hash while the census names
+programs by `DebugLabel` (XXH3 of the MSL sources), so the two have to be joined through
+`Program.DumpSources`, which writes `{DebugLabel}-fragment.metal`.

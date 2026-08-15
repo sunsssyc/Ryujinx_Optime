@@ -465,6 +465,13 @@ namespace Ryujinx.Graphics.Metal
 
             _attachedThisFrame.Add(target.CanonicalPtr);
             _lastAttachmentFrame[target.CanonicalPtr] = _frame;
+
+            // Also a writer entry. NoteAttachmentDraw only fires per draw, so a pass that
+            // binds this surface and clears it without drawing leaves no trace - and the
+            // presented storage never appears as a draw target at all, while its age says
+            // it was an attachment one frame ago. A clear writes a uniform fill by
+            // definition, which is the shape of this fault.
+            NoteAttachmentDraw(target.CanonicalPtr, "attach");
         }
 
         /// <summary>
