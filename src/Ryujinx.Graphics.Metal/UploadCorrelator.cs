@@ -1,4 +1,5 @@
 using Ryujinx.Common.Logging;
+using Ryujinx.Graphics.Shader;
 using SharpMetal.Metal;
 using System;
 using System.Collections.Generic;
@@ -136,6 +137,24 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _frameCbSeen[slot] = true;
+
+            // Slot 0 is the support buffer, and its first four floats are the alpha-test
+            // field, which is why reading them showed nothing but zeros. What matters is
+            // render_scale: TexelFetchScale multiplies the fetch coordinate by
+            // render_scale[texture + 1].x, returning the coordinate untouched only when
+            // that is exactly 1.0. A wrong scale sends every tap somewhere the frame never
+            // wrote - inside the texture, since the scene target is allocated at 1600x896
+            // and rendered at 800x448, which is why clamping to texture bounds and
+            // injecting content both changed nothing. Parked in the last slot so the
+            // reporting path needs no new plumbing.
+            if (slot == 0)
+            {
+                float* rs = (float*)((byte*)contents + offset + SupportBuffer.GraphicsRenderScaleOffset);
+
+                _frameCb[(MaxCbSlots - 1) * 4 + 0] = rs[0];                  // render_scale[0].x
+                _frameCb[(MaxCbSlots - 1) * 4 + 1] = rs[SupportBuffer.FieldSize / sizeof(float)];
+                _frameCbSeen[MaxCbSlots - 1] = true;
+            }
         }
 
         // The programs that sampled a scene-class texture this frame, in order. The

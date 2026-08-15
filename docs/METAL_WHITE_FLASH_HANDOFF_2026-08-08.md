@@ -3673,3 +3673,38 @@ so:
 rendered region and the scale that `TexelFetchScale` applies. A mismatch on flat frames is
 the fault. Sampling the texture's far corner alongside its centre would corroborate it
 directly - the corner should be unwritten on flat frames.
+
+### render_scale is 1.0, and the input measurement has been reading the wrong moment
+
+Gated arm: luma 140, 10,799 frames, flat 22.78%.
+
+    render_scale[0].x   flat [1,1]   normal [1,1]
+    render_scale[1].x   flat [1,1]   normal [1,1]
+
+Exactly one, zero spread, on both outcomes. `TexelFetchScale` therefore takes its
+`temp_1 == 1.0f` early return and hands back the coordinate untouched, so the dynamic
+resolution reading - a stale scale sending the taps into the unrendered part of the texture
+- is dead. (The first attempt at this read the support buffer's first four floats, which are
+the alpha-test field and are legitimately zero; render_scale lives at
+`GraphicsRenderScaleOffset`.)
+
+That leaves a contradiction, and it is the useful part of this result. The input carries a
+picture, the coordinates are unscaled, the constants are right - and the output is uniform
+white on a fifth of frames. Something measured here is not measuring what it claims, and the
+candidate is specific:
+
+**The input texture is sampled at present, not at the composite draw.** The blit is encoded
+at the frame boundary, so it reads that texture's contents *after every pass in the frame*.
+If anything writes the texture between the composite and present, the probe reports content
+the composite never saw. Every "the input is not flat" result in this document - global and
+local, pinned and unpinned - inherits that flaw, and none of them is evidence about what the
+shader actually read.
+
+Fixing it means sampling inside the frame, at the composite's own draw, which needs the
+render encoder to end and restart - the same read-after-write split that is already known to
+move the flash rate, so the probe would perturb what it measures. The way around that is to
+sample the texture into a scratch copy at the start of the composite's pass rather than at
+present, or to identify what writes that texture after the composite and check whether it
+runs on flat frames. The second is cheaper and answers the aliasing question directly: the
+per-storage writer census already exists and needs only to be restricted to the composite's
+input and split by outcome.
