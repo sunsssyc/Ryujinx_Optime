@@ -4196,3 +4196,27 @@ attached.
 photographed `fp_c1` and `fp_c3` works on it. If it is constant on flat frames and varied on
 normal ones, the fault is upstream in whatever fills that buffer; if it is varied on both,
 the fetch itself is not happening and the fault is in the vertex descriptor or the draw call.
+
+### The first vertex is identical by outcome, which does not settle it
+
+Gated arm: luma 143, 11,399 frames, flat 20.79%. Reading the blit's vertex buffer at its
+binding offset:
+
+    cb31   flat [3.068894e-05, 0, 0.0078125, 0]   normal [3.068894e-05, 0, 0.0078125, 0]
+           range flat and normal both zero-width on all four components
+
+Bit-identical, no spread, on both outcomes. But this cannot decide the question and should
+not be read as if it does. A degenerate UV means the attribute is the same *across the
+vertices of the primitive*; reading the first vertex tells you nothing about whether the
+second, third and fourth differ from it. A quad whose four vertices all carry vertex 0's UV
+would produce exactly this measurement and exactly the fault.
+
+**Next: read several vertices, not one.** Take four samples at the binding offset plus
+multiples of the vertex stride and compare them to each other, split by outcome. If they are
+identical to each other on flat frames and distinct on normal ones, the vertex data is
+degenerate and the fault is upstream in whatever writes that buffer. If they are distinct on
+both, the buffer is fine and the collapse happens in the fetch - the vertex descriptor's
+stride or format, or a draw call whose parameters make every vertex read element zero.
+
+The stride is what the probe is missing; it is available on the same `VertexBufferState` that
+already yields the buffer and offset.

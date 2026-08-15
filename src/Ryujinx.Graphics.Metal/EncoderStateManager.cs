@@ -1918,6 +1918,17 @@ namespace Ryujinx.Graphics.Metal
                 if (mtlBuffer.NativePtr != IntPtr.Zero)
                 {
                     bindings.VertexBuffers.Add(new BufferResource(mtlBuffer, (ulong)offset, (ulong)i));
+
+                    // The UVs of the pass-through blit that writes the presented surface
+                    // come from a vertex attribute, and on a white frame they are constant
+                    // across the primitive. This photographs the buffer that attribute is
+                    // fetched from, so a constant one shows up as a constant here.
+                    if (i == 0 && _watchLabel.Length != 0 &&
+                        _currentState.RenderProgram?.DebugLabel is string vlabel &&
+                        vlabel.StartsWith(_watchLabel, StringComparison.Ordinal))
+                    {
+                        UploadCorrelator.NoteCompositeConstants(31, mtlBuffer.Contents, offset);
+                    }
                 }
             }
 
