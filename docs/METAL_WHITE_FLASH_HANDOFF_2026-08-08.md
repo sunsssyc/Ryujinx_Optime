@@ -5160,3 +5160,29 @@ itself a finding: on white frames every guest-side value measured is *more* cano
 on normal frames - cb20.y exactly 2.0, w exactly 1.0, indices exactly 0,2,1,1,2,3 - which
 reads less like corrupted input and more like a correct frame whose output is replaced by
 something else between the last write and present.
+
+---
+
+## RESUME HERE (2026-08-16 evening, current)
+
+Fifteen dimensions measured equal or exonerated between a backend that flashes 17-24% and one
+that flashes 0%. The full ledger is above; do not re-run anything in it.
+
+**The two live leads, in order:**
+
+1. **The 70->92 reinterpreting view.** MoltenVK creates an RGBA8Unorm-as-RG11B10Float alias
+   view of the scene format; this backend never does, despite its textures carrying
+   PixelFormatView usage. Find what our backend does where the guest reinterprets between
+   those formats (src/Ryujinx.Graphics.Metal/Texture.cs CreateView path) - if it substitutes
+   a copy or an identity view, that is a divergent content path on the scene surface itself.
+2. **The async PSO blind spot.** Hook `newRenderPipelineStateWithDescriptor:options:completionHandler:`
+   in tools/mtlspy.m and diff the 184 Metal PSO configs against MoltenVK's.
+
+**The shape of the fault, from everything measured:** on white frames every guest-side value
+is *more* canonical than on normal frames (cb20.y exactly 2.0, w exactly 1.0, indices exactly
+0,2,1,1,2,3). A correct frame's output is being replaced between the last write and present -
+the fault is in who else can touch the presented storage, not in the values feeding it.
+
+**Method (non-negotiable):** every arm through tools/arm_valid.py; drive_in.sh verifies
+gameplay by draws-per-frame; every probe must prove it fired before its number is read. These
+three rules caught nine false negatives across two days.
