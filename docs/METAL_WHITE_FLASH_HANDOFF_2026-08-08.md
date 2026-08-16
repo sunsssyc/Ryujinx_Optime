@@ -4932,3 +4932,43 @@ other does not. The remaining differences are in the command stream's shape - 61
 per frame against 329, and store actions committed up front rather than deferred - and the
 deferred-store arm broke the picture outright when tried. Nothing in the descriptor or the
 memory accounts for it.
+
+---
+
+## The difference: MoltenVK issues 167 fence pairs per frame. This backend issues none.
+
+Hooked `updateFence:afterStages:` and `waitForFence:beforeStages:` - the one form of
+synchronisation this probe had been blind to. Both backends, same instrument, both in gameplay:
+
+    VULKAN   fence up 20,094   wait 20,094   per 120 frames   (~167 pairs per frame)
+    METAL    fence up      0   wait      0                     (none, ever)
+
+MoltenVK expresses every Vulkan barrier it cannot express by ending an encoder as a real
+GPU-side `MTLFence`, and it does so 167 times a frame. This backend issues zero and relies
+entirely on Metal's automatic hazard tracking.
+
+**That is the structural difference, and it is the axis every other measurement has been
+pointing at.** More synchronisation means less flashing: no split 45%, read-after-write split
+24%, full serialisation 17%, and MoltenVK - which fences 167 times a frame on top of its own
+encoder splits - 0%. The curve and the fence count are the same story from both ends.
+
+It also accounts for the two results that looked contradictory:
+
+- **The `MTLFence` arm that did nothing.** It placed a fence only where
+  `SamplesEarlierWrite()` detects a read-after-write, which fires a few hundred times per
+  frame at most and only for dependencies this backend already knows about. MoltenVK fences
+  every barrier the guest's Vulkan usage implies, whether or not any heuristic spotted it.
+- **Why every value measured correct.** Nothing is wrong with the bytes. The GPU reads a
+  texture before another encoder's write to it has completed, and no fence tells it to wait.
+
+Automatic hazard tracking is supposed to cover this, and with argument buffers it covers only
+what `useResource` declares. Both backends declare read and read-write and neither declares
+write-only - so a write performed as a *render target* and read later through an argument
+buffer is a dependency automatic tracking has no declaration for. MoltenVK does not depend on
+it being covered; it fences.
+
+**The test, and it is direct:** make the read-after-write split issue a fence at every split
+instead of only ending the pass, and widen what counts as a dependency until the fence count
+approaches MoltenVK's. `RYUJINX_METAL_RAW_FENCE=1` already exists and already pairs
+`updateFence` on the writing encoder with `waitForFence` on the reading one - it was measured
+once, before the admissibility gate existed, and that measurement should not be trusted.
