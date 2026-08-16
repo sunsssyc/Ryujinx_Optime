@@ -5197,3 +5197,12 @@ fallback - then Metal bridges the scene surface with copies that Vulkan never pe
 bridge copy landing after the blit is a correct frame's output being replaced. Next session:
 trace 70<->92 through PropagateViewCompatibility on both backends, and instrument
 TextureGroup's copy-dependency flushes keyed on the presented storage, split by outcome.
+
+**A standing contradiction against lead 1, from data already in hand:** the correlator hooks
+`CopyTo` and `SetData`, and on white frames both are essentially silent - `copy: flat 0/2,496`,
+`copyOntoRT: flat 0`, `upload: flat 10/2,496`. If a copy-dependency bridge were replacing the
+presented surface on the frames that fail, it would have to travel a path neither hook sees
+(a blit encoder issued outside ITexture.CopyTo, or the window pass itself). So before
+instrumenting TextureGroup, check which encoder path dependency flushes actually use - if it
+is CopyTo, lead 1 is already dead and the remaining suspect is the present-side pass reading
+src across command buffers. Do not chase the bridge-copy theory without settling this first.
