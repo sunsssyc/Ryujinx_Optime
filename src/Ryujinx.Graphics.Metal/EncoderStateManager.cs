@@ -2547,6 +2547,7 @@ namespace Ryujinx.Graphics.Metal
                                     {
                                         UploadCorrelator.NoteCompositeOutput(sceneCandidate);
                                         UploadCorrelator.NoteBlitInputSerial(sceneCandidate.Serial);
+                                        UploadCorrelator.NoteBlitInputGen(sceneCandidate.CanonicalPtr);
 
                                         MTLViewport vp = _currentState.Viewports[0];
                                         MTLScissorRect sc = _currentState.Scissors[0];

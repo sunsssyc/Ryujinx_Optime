@@ -5302,3 +5302,32 @@ bumped generation between them on white frames would close the case: the cache r
 underlying MTLTexture between the write and the read, and the blit samples memory nobody
 painted this frame. That is one field, two recording sites, and one gated arm - and it is
 the sharpest still-untested mechanism in this ledger.
+
+### Handle generations: no swap, ever - and the ledger closes
+
+The decisive form of the identity-over-time probe: a generation counter keyed on the
+canonical storage, bumped in `ReplaceHandle`, read at the writer's bind and at the blit's
+bind within each frame. Full power - 11,384 of 11,399 frames covered:
+
+    handle gen swap between write and read    flat 0/2,453    normal 0/8,931
+
+The underlying MTLTexture is never replaced between the write and the read, on any frame of
+either outcome. The handle-swap mechanism - the last Ryujinx-side mechanism proposed in two
+days - is dead by direct measurement.
+
+## Conclusion this investigation supports
+
+Seventeen dimensions and five mechanism families measured. Every path by which this
+backend's commands can write the presented surface is instrumented and silent on white
+frames. Every input, state, and identity - including object identity over time - is correct
+on exactly the frames that fail. The rate responds to one lever only, synchronisation volume
+(45% unsplit, 24% split, 17% fully serialised or fenced at MoltenVK's volume), and MoltenVK
+reaches 0% through the same driver on the same machine.
+
+The reading consistent with the entire ledger: **a GPU-side read-visibility failure in the
+execution of correctly-encoded frames** - inter-encoder dependencies that Metal's automatic
+hazard tracking fails to honour under this backend's argument-buffer usage pattern, partially
+masked by any added synchronisation, never manifesting under MoltenVK's usage pattern.
+Proving the final step is beyond this toolset: it requires either Apple, or a GPU capture of
+a caught white frame showing the blit's sampled texels differing from the texture's memory.
+Everything short of that step is measured, and measured twice where it mattered.

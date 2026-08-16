@@ -85,6 +85,8 @@ namespace Ryujinx.Graphics.Metal
             public string ImgWriters;
             public long InSerial;
             public long WrSerial;
+            public long InGen;
+            public long WrGen;
             public float[] RowW;
             public bool[] RowSeen;
             public int OutOfOrder;
@@ -394,6 +396,33 @@ namespace Ryujinx.Graphics.Metal
         /// an object nobody painted.
         /// </summary>
         public static void NoteBlitInputSerial(long serial) { if (Enabled) { _inputSerial = serial; } }
+
+        private static readonly Dictionary<IntPtr, long> _handleGen = new();
+
+        public static void BumpHandleGen(IntPtr root)
+        {
+            if (Enabled && root != IntPtr.Zero)
+            {
+                lock (_handleGen)
+                {
+                    _handleGen.TryGetValue(root, out long g);
+                    _handleGen[root] = g + 1;
+                }
+            }
+        }
+
+        private static long GenOf(IntPtr root)
+        {
+            lock (_handleGen)
+            {
+                return _handleGen.TryGetValue(root, out long g) ? g : 0;
+            }
+        }
+
+        public static void NoteBlitInputGen(IntPtr root) { if (Enabled) { _inputGen = GenOf(root); } }
+
+        private static long _inputGen = -1, _writerGen = -1;
+        private static long _genSwapFlat, _genSwapNormal, _genSameFlat, _genSameNormal;
 
         private static long _inputSerial = -1, _writerSerial = -1;
         private static long _matchFlat, _matchNormal, _mismatchFlat, _mismatchNormal;
@@ -712,6 +741,7 @@ namespace Ryujinx.Graphics.Metal
             if (target.CanonicalPtr == _compositeInputRoot)
             {
                 _writerSerial = target.Serial;
+                _writerGen = GenOf(target.CanonicalPtr);
             }
 
             // Also a writer entry. NoteAttachmentDraw only fires per draw, so a pass that
@@ -944,6 +974,8 @@ namespace Ryujinx.Graphics.Metal
                 mine.ImgWriters = _frameImgWriters.Count == 0 ? "none" : string.Join(",", _frameImgWriters);
                 mine.InSerial = _inputSerial;
                 mine.WrSerial = _writerSerial;
+                mine.InGen = _inputGen;
+                mine.WrGen = _writerGen;
                 mine.RowW ??= new float[MaxCbSlots];
                 mine.RowSeen ??= new bool[MaxCbSlots];
                 Array.Copy(_frameRowW, mine.RowW, MaxCbSlots);
@@ -1005,6 +1037,8 @@ namespace Ryujinx.Graphics.Metal
             _frameImgWriters.Clear();
             _inputSerial = -1;
             _writerSerial = -1;
+            _inputGen = -1;
+            _writerGen = -1;
             // _compositeInputRoot deliberately NOT reset: the root is stable across frames
             // and resetting it at present starved the writer-serial trigger to 42 of 7,799.
             Array.Clear(_frameRowSeen);
@@ -1166,6 +1200,12 @@ namespace Ryujinx.Graphics.Metal
                         if (Math.Abs(w) < Math.Abs(_wNormalMin[c])) { _wNormalMin[c] = w; }
                     }
                 }
+            }
+
+            if (slot.InGen >= 0 && slot.WrGen >= 0)
+            {
+                if (slot.InGen != slot.WrGen) { if (flat) { _genSwapFlat++; } else { _genSwapNormal++; } }
+                else { if (flat) { _genSameFlat++; } else { _genSameNormal++; } }
             }
 
             if (slot.InSerial >= 0 && slot.WrSerial >= 0)
@@ -1483,6 +1523,7 @@ namespace Ryujinx.Graphics.Metal
                 sb.Append($"\n  blit w[slot{c}]: flat mean {(_wFlatN[c] > 0 ? _wFlatSum[c] / _wFlatN[c] : 0):G4} min {(_wFlatN[c] > 0 ? _wFlatMin[c] : 0):G4} n={_wFlatN[c]}  normal mean {(_wNormalN[c] > 0 ? _wNormalSum[c] / _wNormalN[c] : 0):G4} min {(_wNormalN[c] > 0 ? _wNormalMin[c] : 0):G4} n={_wNormalN[c]}");
             }
 
+            sb.Append($"\n  handle gen swap between write and read: flat {_genSwapFlat}/{_genSwapFlat + _genSameFlat}, normal {_genSwapNormal}/{_genSwapNormal + _genSameNormal}");
             sb.Append($"\n  blit serial: flat match {_matchFlat} mismatch {_mismatchFlat}, normal match {_matchNormal} mismatch {_mismatchNormal}");
 
             foreach (KeyValuePair<string, (long Flat, long Normal)> g2 in _imgStats)

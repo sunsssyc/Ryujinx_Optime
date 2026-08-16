@@ -80,6 +80,14 @@ namespace Ryujinx.Graphics.Metal
 
         protected void ReplaceHandle(MTLTexture texture, params IAutoPrivate[] referencedObjs)
         {
+            // The underlying MTLTexture changes while CanonicalPtr keeps its creation-time
+            // value, so every canonical-keyed identity measurement is blind to this exact
+            // operation. The generation counter is what makes a swap observable.
+            if (this is Texture swapped)
+            {
+                UploadCorrelator.BumpHandleGen(swapped.CanonicalPtr);
+            }
+
             Auto<DisposableTexture> oldTexture = MtlTextureAuto;
 
             MtlTextureAuto = texture != IntPtr.Zero
