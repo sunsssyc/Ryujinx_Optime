@@ -4714,3 +4714,42 @@ in the documentation. The second is worth taking seriously now that the first ha
 through this thoroughly, and it is the kind of claim a driver report can be built on: not "our
 frames go white" but "pass boundaries change the outcome and we can account for every
 documented effect of them."
+
+---
+
+## The precise cross-backend comparison, 2026-08-16
+
+Both backends watched with the same probe, both verified in gameplay, texture logging
+uncapped this time (the earlier attempt hit a 4,000-line cap at different points in each
+session and was worthless). Metal logged 15,819 descriptors, MoltenVK 12,998.
+
+    descriptors seen only on Metal    330
+    descriptors seen only on Vulkan     0
+    descriptors seen on both           57
+
+And at the scene's own size, which is what matters:
+
+    METAL    800x448  fmt 92  usage 0x17   x35      RG11B10Float colour target
+             800x448  fmt 70  usage 0x17   x28
+             800x448  fmt 115 usage 0x17   x2
+             800x448  fmt 250 usage 0x5    x9       depth
+    VULKAN   800x448  fmt 250 usage 0x5    x9       depth only
+             1600x896 fmt 252 usage 0x5    x1
+
+**MoltenVK never creates a colour scene target through `newTextureWithDescriptor` at all.**
+Only depth appears. Two things follow, and both are concrete differences that no measurement
+in this document had reached:
+
+- **MoltenVK almost certainly allocates its colour textures from an `MTLHeap`**, whose
+  `newTextureWithDescriptor:` is a different selector this probe does not hook. Ryujinx-Metal
+  was checked earlier and has no `MTLHeap` anywhere - that check established our side only,
+  and the other side was never looked at.
+- **The usage bits differ.** Ryujinx-Metal asks for `0x17` on scene targets -
+  ShaderRead | ShaderWrite | RenderTarget | PixelFormatView - where MoltenVK's are `0x5`,
+  ShaderRead | RenderTarget. On Apple GPUs both `ShaderWrite` and `PixelFormatView` disable
+  lossless colour compression and change the layout the driver chooses. This backend is
+  asking for a materially different texture than MoltenVK asks for, for the same surface.
+
+That second one is testable directly and cheaply: drop the bits that are not needed and see
+whether the flash rate moves. It is the first cross-backend difference found that is both
+measured and under our control.
