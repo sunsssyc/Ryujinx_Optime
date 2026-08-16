@@ -4753,3 +4753,31 @@ in this document had reached:
 That second one is testable directly and cheaply: drop the bits that are not needed and see
 whether the flash rate moves. It is the first cross-backend difference found that is both
 measured and under our control.
+
+### Matching MoltenVK's usage bits does not help
+
+`RYUJINX_METAL_LEAN_USAGE=2` drops `ShaderWrite` and `PixelFormatView` from scene-class
+textures, leaving `ShaderRead | RenderTarget` - byte for byte the `0x5` MoltenVK asks for.
+
+    scene textures at usage 0x5   luma 140, 11,399 frames, flat 23.44%
+    today's baselines             20.4% - 23.7%
+
+Top of the range, no improvement. So the usage difference is real and is not the fault, and
+the compression and layout consequences it carries are not what separates the two backends.
+
+**The other half of the finding survives and is the larger one.** MoltenVK created *no colour
+scene target at all* through `newTextureWithDescriptor` across 12,998 logged descriptors -
+only depth. A backend that renders the game must be creating colour targets somewhere, so it
+is creating them through a selector this probe does not hook, and the obvious candidate is
+`-[MTLHeap newTextureWithDescriptor:]`. The check done earlier in this document - "there is no
+MTLHeap in the backend" - was run against *our* source and says nothing about MoltenVK's.
+
+If MoltenVK places colour targets in a heap and this backend gives each one a standalone
+allocation, that is a difference in how the memory itself is obtained, not in the flags on
+it - and the one intervention that ever made the flash dramatically *worse* was changing an
+allocation strategy, by eleven points.
+
+**Next, and it is one probe:** hook `-[MTLHeap newTextureWithDescriptor:]` and
+`-[MTLDevice newHeapWithDescriptor:]` in `tools/mtlspy.m`, re-run the Vulkan arm, and see what
+appears. If MoltenVK's colour targets are heap-allocated, that is the first structural
+difference in memory management ever found between the two, and it is reachable from our side.
