@@ -2415,6 +2415,18 @@ namespace Ryujinx.Graphics.Metal
                                     index, cb.Contents, (int)(buffer.Range?.Offset ?? 0));
                             }
 
+                            // Row 5 of every uniform slot at the blit's draw: position.w is
+                            // dot(attr.xyz, c3[5].xyz) + c3[5].w and the guest data behind
+                            // it swings over thousands.
+                            if (UploadCorrelator.Enabled && buffer.Buffer != null &&
+                                program.DebugLabel is string bl &&
+                                bl.StartsWith("480117", StringComparison.Ordinal))
+                            {
+                                MTLBuffer wb = buffer.Buffer.GetUnsafe().Value;
+                                UploadCorrelator.NoteBlitRow(
+                                    index, wb.Contents, (int)(buffer.Range?.Offset ?? 0));
+                            }
+
                             if (HdrPassProbe.Enabled && buffer.Buffer != null && index == 20 &&
                                 program.DebugLabel == _inputWatchLabel)
                             {

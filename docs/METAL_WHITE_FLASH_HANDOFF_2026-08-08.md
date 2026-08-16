@@ -5116,3 +5116,47 @@ MTLRenderPipelineDescriptor at PSO creation (blend/writeMask per attachment), an
 that now looks most interesting given position.w comes from a full matrix transform out of
 vp_c3 whose values range over thousands - why the same wild guest transform is tolerated by
 one backend and not the other.
+
+### The vp_c3 transform is exonerated - w is exactly 1 on every white frame
+
+Computed on the CPU exactly as the vertex shader does - dot(attr.xyz, row5.xyz) + row5.w over
+all four vertices, for every uniform slot bound at the blit draw. Slot 4 is the transform:
+
+    blit w[slot4]   flat mean 1, min 1, n=2,610     normal mean 0.9999, min -6.1e-05, n=8,786
+
+On white frames w is exactly 1 with zero spread. It is the *normal* frames that occasionally
+graze zero and go negative - and they do not flash. The wild-transform theory is dead, and
+this is the third time the pattern has appeared: on the frames that fail, every guest value is
+*more* canonical than on the frames that succeed (cb20.y exactly 2.0, w exactly 1.0).
+
+### Four dimensions in one pass: samplers, views, PSOs, and the transform
+
+Run concurrently in one probe build and one run per backend (the emulator itself cannot be
+duplicated - shader-cache trampling - so the arms serialise but the dimensions do not).
+
+**vp_c3 / w**: exonerated above - flat frames have w exactly 1.
+
+**Samplers**: 77 of ~80 distinct configurations shared. Metal-only: three configs with
+`cmp7` (compareFunction=Always on non-compare samplers, where MoltenVK leaves Never) - the
+field is ignored for plain sample() and is cosmetic. Vulkan-only: two configs with repeat
+addressing (`s2 t2`) where ours are clamp. Small, real, unlikely mechanism - the blit's own
+sampler is in the shared set.
+
+**Texture views**: mostly shared, but one Vulkan-only entry stands out: `VIEW 70->92` - an
+RGBA8Unorm texture viewed as RG11B10Float, a format-reinterpreting alias of the scene
+format. Our backend never creates that view. Where the guest reinterprets between those two
+formats, the backends take different paths - worth one probe: find what our backend does at
+that reinterpretation (copy? separate texture?) and whether those sites correlate with
+outcome.
+
+**PSOs**: 184 distinct on Metal, **zero visible on Vulkan** - MoltenVK creates pipeline
+states through the async `newRenderPipelineStateWithDescriptor:options:completionHandler:`
+selector, which the probe does not hook. Blind spot recorded; hook the async variant next.
+
+The session ends with fifteen dimensions measured equal or exonerated, two small measured
+differences (sampler compare/address cosmetics, the 70->92 reinterpreting view), one blind
+spot (async PSO creation), and the root cause still unidentified. The standing pattern is
+itself a finding: on white frames every guest-side value measured is *more* canonical than
+on normal frames - cb20.y exactly 2.0, w exactly 1.0, indices exactly 0,2,1,1,2,3 - which
+reads less like corrupted input and more like a correct frame whose output is replaced by
+something else between the last write and present.

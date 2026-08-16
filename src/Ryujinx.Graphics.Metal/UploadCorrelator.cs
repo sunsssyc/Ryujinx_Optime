@@ -82,6 +82,8 @@ namespace Ryujinx.Graphics.Metal
             public string Indices;
             public string Attrib;
             public string Raster;
+            public float[] RowW;
+            public bool[] RowSeen;
             public int OutOfOrder;
             public IntPtr ArgPtr;
             public ulong[] ArgExpected;
@@ -255,6 +257,11 @@ namespace Ryujinx.Graphics.Metal
 
             for (int i = 0; i < 4; i++)
             {
+                float* v = (float*)((byte*)contents + offset + i * stride);
+                _frameVerts[i * 3 + 0] = v[0];
+                _frameVerts[i * 3 + 1] = v[1];
+                _frameVerts[i * 3 + 2] = v[2];
+
                 ulong a = *(ulong*)((byte*)contents + offset + i * stride);
                 bool seen = false;
 
@@ -357,6 +364,52 @@ namespace Ryujinx.Graphics.Metal
         }
 
         private static string _frameRaster;
+
+        /// <summary>
+        /// The blit's position.w is a full projection row: dot(attr.xyz, c3[5].xyz) +
+        /// c3[5].w, from guest data whose observed range spans thousands. Both backends run
+        /// the same arithmetic, so this computes w on the CPU exactly as the vertex shader
+        /// does, for all four vertices, against row 5 of every uniform slot bound at that
+        /// draw - the real c3 identifies itself by sitting near 1 on normal frames, and the
+        /// question is whether it collapses toward zero on exactly the flat ones. A w near
+        /// zero at a vertex makes perspective interpolation of the UV explode across the
+        /// primitive while every input value stays "correct".
+        /// </summary>
+        private static readonly float[] _frameVerts = new float[12];
+        private static readonly float[] _frameRowW = new float[MaxCbSlots];
+        private static readonly bool[] _frameRowSeen = new bool[MaxCbSlots];
+        private static readonly double[] _wFlatSum = new double[MaxCbSlots];
+        private static readonly double[] _wNormalSum = new double[MaxCbSlots];
+        private static readonly float[] _wFlatMin = new float[MaxCbSlots];
+        private static readonly float[] _wNormalMin = new float[MaxCbSlots];
+        private static readonly long[] _wFlatN = new long[MaxCbSlots];
+        private static readonly long[] _wNormalN = new long[MaxCbSlots];
+        private static bool _wInit;
+
+        public static unsafe void NoteBlitRow(int slot, IntPtr contents, int offset)
+        {
+            if (!Enabled || contents == IntPtr.Zero || (uint)slot >= MaxCbSlots)
+            {
+                return;
+            }
+
+            float* r = (float*)((byte*)contents + offset + 80);   // c3->data[5]
+            float wmin = float.MaxValue;
+
+            for (int i = 0; i < 4; i++)
+            {
+                float w = _frameVerts[i * 3] * r[0] + _frameVerts[i * 3 + 1] * r[1] +
+                          _frameVerts[i * 3 + 2] * r[2] + r[3];
+
+                if (Math.Abs(w) < Math.Abs(wmin))
+                {
+                    wmin = w;
+                }
+            }
+
+            _frameRowW[slot] = wmin;
+            _frameRowSeen[slot] = true;
+        }
         private static readonly Dictionary<string, (long Flat, long Normal)> _rasterStats = new();
         private static string _frameAttrib;
         private static readonly Dictionary<string, (long Flat, long Normal)> _attribStats = new();
@@ -848,6 +901,10 @@ namespace Ryujinx.Graphics.Metal
                 mine.Indices = _frameIndices;
                 mine.Attrib = _frameAttrib;
                 mine.Raster = _frameRaster;
+                mine.RowW ??= new float[MaxCbSlots];
+                mine.RowSeen ??= new bool[MaxCbSlots];
+                Array.Copy(_frameRowW, mine.RowW, MaxCbSlots);
+                Array.Copy(_frameRowSeen, mine.RowSeen, MaxCbSlots);
                 mine.OutOfOrder = _frameOutOfOrder;
                 mine.ArgPtr = _frameArgPtr;
                 mine.ArgCount = _frameArgCount;
@@ -902,6 +959,7 @@ namespace Ryujinx.Graphics.Metal
             _frameIndices = null;
             _frameAttrib = null;
             _frameRaster = null;
+            Array.Clear(_frameRowSeen);
             _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;
             _frameArgCount = 0;
@@ -1036,6 +1094,31 @@ namespace Ryujinx.Graphics.Metal
 
             if (flat) { _flatOooSum += slot.OutOfOrder; _flatOooN++; }
             else { _normalOooSum += slot.OutOfOrder; _normalOooN++; }
+
+            if (slot.RowSeen != null)
+            {
+                if (!_wInit)
+                {
+                    _wInit = true;
+                    for (int c = 0; c < MaxCbSlots; c++) { _wFlatMin[c] = _wNormalMin[c] = float.MaxValue; }
+                }
+
+                for (int c = 0; c < MaxCbSlots; c++)
+                {
+                    if (!slot.RowSeen[c]) { continue; }
+                    float w = slot.RowW[c];
+                    if (flat)
+                    {
+                        _wFlatSum[c] += w; _wFlatN[c]++;
+                        if (Math.Abs(w) < Math.Abs(_wFlatMin[c])) { _wFlatMin[c] = w; }
+                    }
+                    else
+                    {
+                        _wNormalSum[c] += w; _wNormalN[c]++;
+                        if (Math.Abs(w) < Math.Abs(_wNormalMin[c])) { _wNormalMin[c] = w; }
+                    }
+                }
+            }
 
             if (slot.Raster != null && _rasterStats.Count < 32)
             {
@@ -1332,6 +1415,12 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($", normal min {(_normalFrames > 0 ? _normalMinSum / _normalFrames : 0):F0} max {(_normalFrames > 0 ? _normalMaxSum / _normalFrames : 0):F0} sd {(_normalFrames > 0 ? _normalSdSum / _normalFrames : 0):F1}");
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
+
+            for (int c = 0; c < MaxCbSlots; c++)
+            {
+                if (_wFlatN[c] == 0 && _wNormalN[c] == 0) { continue; }
+                sb.Append($"\n  blit w[slot{c}]: flat mean {(_wFlatN[c] > 0 ? _wFlatSum[c] / _wFlatN[c] : 0):G4} min {(_wFlatN[c] > 0 ? _wFlatMin[c] : 0):G4} n={_wFlatN[c]}  normal mean {(_wNormalN[c] > 0 ? _wNormalSum[c] / _wNormalN[c] : 0):G4} min {(_wNormalN[c] > 0 ? _wNormalMin[c] : 0):G4} n={_wNormalN[c]}");
+            }
 
             foreach (KeyValuePair<string, (long Flat, long Normal)> r2 in _rasterStats)
             {
