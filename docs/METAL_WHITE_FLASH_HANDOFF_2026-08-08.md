@@ -4901,3 +4901,34 @@ refcount that already waits for the GPU.
 If scene-class textures allocated from one tracked placement heap take the flash to zero, the
 root cause is hazard-tracking granularity and the fix is either that, or finding the
 dependencies `SamplesEarlierWrite()` misses and fencing them properly.
+
+### Heap placement does not fix it - the hazard-granularity hypothesis is refuted
+
+Implemented the allocator MoltenVK's behaviour pointed at: a `MTLHeapTypePlacement` heap with
+`MTLHazardTrackingModeTracked` set explicitly, textures placed with
+`newTextureWithDescriptor:offset:`, freed through `MakeAliasable` off the existing `Auto`
+refcount. `RYUJINX_METAL_TEXTURE_HEAP=2` places every private colour texture at least 64x64.
+
+    heap-placed textures   8,600   (logged, engagement proven)
+    result                 luma 140, 11,399 frames, flat 21.77%
+    baselines              20.4% - 23.7%
+
+Inside the range. Replicating MoltenVK's allocation strategy, on the textures that matter,
+with tracking explicitly enabled, changes nothing.
+
+**Two false negatives had to be cleared first, and both were caught by checking engagement
+rather than reading the number.** The first arm gated the heap on `IsSceneClass`, which
+demands `Width >= 1000` while the repro runs at 800x448 - it placed nothing. The second
+passed `=2` to an `Enabled` that compared against `"1"`, so the branch was dead. Both returned
+a clean-looking 22%. Only the third arm logged placements, and only its number means anything.
+
+So the difference that the precise comparison found - identical descriptors, different
+allocation - is real and is not the cause. That closes the last measured difference between
+the two backends.
+
+What is left after it: MoltenVK and this backend now agree on texture size, format, usage
+bits, storage mode, hazard tracking mode and allocation strategy, and one flashes while the
+other does not. The remaining differences are in the command stream's shape - 610 encoders
+per frame against 329, and store actions committed up front rather than deferred - and the
+deferred-store arm broke the picture outright when tried. Nothing in the descriptor or the
+memory accounts for it.

@@ -92,7 +92,33 @@ namespace Ryujinx.Graphics.Metal
 
             MTLTextureSwizzleChannels swizzle = GetSwizzle(info, descriptor.PixelFormat);
 
-            _identitySwizzleHandle = new Auto<DisposableTexture>(new DisposableTexture(Device.NewTexture(descriptor)));
+            // The scene class can be moved into a tracked placement heap, so that the whole
+            // class is one hazard-tracked resource instead of one per texture. That is the
+            // only difference the experiment introduces: same descriptor, same storage
+            // mode, same usage. TryAllocate declines rather than throwing whenever the
+            // descriptor cannot legally live in the heap, so this always ends up with a
+            // texture. RYUJINX_METAL_TEXTURE_HEAP=1, off by default.
+            DisposableTexture storage;
+
+            // IsSceneClass demands Width >= 1000 and the repro runs at 800x448 under
+            // dynamic resolution, so gating the heap on it placed none of the textures that
+            // matter - the first arm came back inside the baseline having never engaged.
+            // Level 2 places every private colour texture instead.
+            bool heapCandidate = TextureHeapAllocator.Level >= 2
+                ? !info.Format.IsDepthOrStencil && info.Width >= 64 && info.Height >= 64
+                : IsSceneClass(info);
+
+            if (TextureHeapAllocator.Enabled && heapCandidate &&
+                TextureHeapAllocator.TryAllocate(Device, descriptor, out MTLTexture heapTexture, out TextureHeapAllocation heapAllocation))
+            {
+                storage = new DisposableTexture(heapTexture, heapAllocation);
+            }
+            else
+            {
+                storage = new DisposableTexture(Device.NewTexture(descriptor));
+            }
+
+            _identitySwizzleHandle = new Auto<DisposableTexture>(storage);
 
             // A freshly created texture holds undefined content, and the elision
             // experiment proved the flash IS undefined content crystallised by the first
