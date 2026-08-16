@@ -5629,3 +5629,16 @@ staleness reading is NOT the cause; it was consistent with the census but the RT
 white on those frames (matching the earlier 97% "both white" result). The white is made
 inside the game's render chain before its final RGBA8 sRGB target is complete. Next: the
 writer census of THAT target (the sRGB one), by outcome.
+
+### Three GPU-layer textures on the present range: A (sRGB parent), V (its Unorm view), B (Unorm top-level)
+
+At present in gameplay the same guest range holds: A = 1920x1080 R8G8B8A8Srgb top-level
+(`isView=False, hasViews=True, viewsCount=1`), V = its single view, 1920x1080 R8G8B8A8Unorm
+(Metal `canon=0xB32541E00`), and B = a separate top-level R8G8B8A8Unorm (`tex#28C4BB9`) that the
+present lookup selects as a Perfect exact match. Metal-side roots: A `0xB40CF6080`, V
+`0xB32541E00`; B is what present reads. The census keyed on A's root is empty; the census on
+V's root shows only present's own draw. Presenting A directly (FindRenderedSibling) does not
+remove the white - A itself samples white on 95% of white frames.
+
+Open: which of A/V/B the GAME actually renders into, and how content reaches whichever one
+present reads. Next arm censuses all three roots side by side.

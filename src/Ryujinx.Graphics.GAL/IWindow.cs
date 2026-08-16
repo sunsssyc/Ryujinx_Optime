@@ -7,6 +7,12 @@ namespace Ryujinx.Graphics.GAL
     {
         void Present(ITexture texture, ImageCrop crop, Action swapBuffersCallback);
 
+        /// <summary>Diagnostic: the game's true final render target for this frame.</summary>
+        void NoteGameFinalTarget(ITexture texture) { }
+
+        /// <summary>Diagnostic: a view of the game's final render target.</summary>
+        void NoteGameFinalTargetView(ITexture texture) { }
+
         void SetSize(int width, int height);
 
         void ChangeVSyncMode(VSyncMode vSyncMode);

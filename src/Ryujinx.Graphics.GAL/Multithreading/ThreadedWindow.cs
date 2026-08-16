@@ -27,6 +27,18 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             _renderer.QueueCommand();
         }
 
+        public void NoteGameFinalTargetView(ITexture texture)
+        {
+            _impl.Window.NoteGameFinalTargetView(texture is ThreadedTexture tt ? tt.Base : texture);
+        }
+
+        public void NoteGameFinalTarget(ITexture texture)
+        {
+            // Diagnostic pass-through. The GPU thread hands over its own ITexture, which is
+            // a ThreadedTexture; unwrap to the backend's texture the way Present does.
+            _impl.Window.NoteGameFinalTarget(texture is ThreadedTexture tt ? tt.Base : texture);
+        }
+
         public void SetSize(int width, int height)
         {
             _impl.Window.SetSize(width, height);

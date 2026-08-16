@@ -21,6 +21,7 @@ namespace Ryujinx.Graphics.Gpu
         private static readonly bool _presentKeepShadow =
             System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_KEEP_SHADOW") == "1";
         private static int _siblingLogs;
+        private static int _gameRtShapeLogs;
 
         private static readonly bool _presentNoSync =
             System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_NOSYNC") == "1";
@@ -224,6 +225,33 @@ namespace Ryujinx.Graphics.Gpu
                 // If the chosen texture was never rendered to and a same-range texture with
                 // the sRGB/linear sibling format WAS, present the rendered one - a view of
                 // the same bytes, decoded linearly by the present shader either way.
+                // Tell the backend which host texture is the game's true final render target
+                // (the sRGB sibling), independent of which one present ends up reading.
+                {
+                    Image.Texture gameRt = pt.Cache.FindRenderedSibling(pt.Range, texture) ?? texture;
+                    if (gameRt.HostTexture is GAL.ITexture hostRt)
+                    {
+                        _context.Renderer.Window.NoteGameFinalTarget(hostRt);
+                    }
+
+                    // Also hand the backend the game RT's views, so their roots join the census.
+                    foreach (GAL.ITexture vh in gameRt.ViewHostTextures)
+                    {
+                        _context.Renderer.Window.NoteGameFinalTargetView(vh);
+                    }
+
+                    // What feeds this texture. If it is a view, its storage owns the bytes and
+                    // the writers we should census belong to the storage; if it has views,
+                    // writes through them land here. Log both once every ~10 s.
+                    if (_presentTrace && ++_gameRtShapeLogs % 300 == 1)
+                    {
+                        Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu,
+                            $"game RT shape: isView={gameRt.IsView} hasViews={gameRt.HasViews} viewsCount={gameRt.ViewsCount} " +
+                            $"groupCopyDeps={gameRt.Group?.HasCopyDependencies} storageHost#{(gameRt.IsView ? gameRt.StorageHostHash : 0):X} " +
+                            $"modSeq={gameRt.Group?.ModifiedSequence} everModified={gameRt.EverModified} views={gameRt.ViewsSummary} selfHost#{(gameRt.HostTexture?.GetHashCode() ?? 0):X}");
+                    }
+                }
+
                 if (!_presentKeepShadow)
                 {
                     Image.Texture rendered = pt.Cache.FindRenderedSibling(pt.Range, texture);

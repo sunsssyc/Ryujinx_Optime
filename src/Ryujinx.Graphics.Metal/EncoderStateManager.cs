@@ -540,7 +540,7 @@ namespace Ryujinx.Graphics.Metal
                     // _currentState.RenderTargets instead counted targets bound for an
                     // earlier pass, which is what buried the feedback signal twice.
                     FeedbackProbe.NoteAttachment(i, tex);
-                    UploadCorrelator.NoteAttachment(tex);
+                    UploadCorrelator.NoteAttachment(tex, _currentState.ClearLoadAction);
                     NoteAttachmentWritten(tex.CanonicalPtr);
                     NotePassSize((ulong)tex.Width, (ulong)tex.Height);
                 }

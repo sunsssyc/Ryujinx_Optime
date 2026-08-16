@@ -191,6 +191,50 @@ namespace Ryujinx.Graphics.Metal
             if (Enabled && t != null) { _frameSceneSourceRoot = t.CanonicalPtr; }
         }
 
+        private static IntPtr _frameGameRtRoot;
+        private static IntPtr _prevGameRtRoot;
+        private static bool _gameRtPassOpen, _gameRtPassClear;
+        private static long _gameRtPassDrawStart, _drawsSeen;
+        private static int _gameRtPassLogs, _gameRtEndLogs;
+        private static string _prevFrameGameRtWriters = "(unknown)";
+        private static Texture _frameGameRtTex;
+
+        private static int _gameRtLogs;
+
+        private static int _viewLogs;
+
+        public static void NoteGameFinalTargetView(Texture t)
+        {
+            if (!Enabled || t == null) { return; }
+            if (++_viewLogs % 300 == 1)
+            {
+                bool inCensus = _pendingWriterCount.TryGetValue(t.CanonicalPtr, out int c) && c > 0;
+                string w = inCensus ? string.Join(",", _pendingWriters[t.CanonicalPtr], 0, Math.Min(c, MaxWriters)) : "(none)";
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"game RT VIEW: {t.Width}x{t.Height} {t.Info.Format} canon=0x{t.CanonicalPtr:X} native=0x{t.GetHandle().NativePtr:X} sameRootAsRT={(t.CanonicalPtr == _frameGameRtRoot)} writers={w}");
+            }
+        }
+
+        public static void NoteGameFinalTarget(Texture t)
+        {
+            if (Enabled && t != null)
+            {
+                _prevGameRtRoot = _frameGameRtRoot;
+                _frameGameRtRoot = t.CanonicalPtr;
+                _frameGameRtTex = t;
+
+                if (++_gameRtLogs % 600 == 1)
+                {
+                    // Is this object's root among this frame's attachment roots at all?
+                    bool everAttached = _lastAttachmentFrame.TryGetValue(t.CanonicalPtr, out long lf);
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"game RT: {t.Width}x{t.Height} {t.Info.Format} canon=0x{t.CanonicalPtr:X} native=0x{t.GetHandle().NativePtr:X} " +
+                        $"isView={(t.CanonicalPtr != t.GetHandle().NativePtr)} everAttached={everAttached} lastAttachFrame={(everAttached ? lf : -1)} nowFrame={_frame} " +
+                        $"attachedRootsThisFrame={_attachedThisFrame.Count}");
+                }
+            }
+        }
+
         public static void NoteFullResAttachment(Texture t)
         {
             if (Enabled && t != null && t.Width >= 1900 && t.Height >= 1000 && !t.Info.Format.IsDepthOrStencil)
@@ -921,7 +965,7 @@ namespace Ryujinx.Graphics.Metal
             _frameBinding.Count++;
         }
 
-        public static void NoteAttachment(Texture target)
+        public static void NoteAttachment(Texture target, bool clearLoad = false)
         {
             if (!Enabled || target == null)
             {
@@ -930,6 +974,19 @@ namespace Ryujinx.Graphics.Metal
 
             _attachedThisFrame.Add(target.CanonicalPtr);
             _lastAttachmentFrame[target.CanonicalPtr] = _frame;
+
+            // How the game's final RT gets its content: log the pass that binds it - was
+            // it cleared, how many draws followed (filled in at pass end), which program.
+            if (target.CanonicalPtr == _frameGameRtRoot || target.CanonicalPtr == _prevGameRtRoot)
+            {
+                _gameRtPassOpen = true;
+                _gameRtPassDrawStart = _drawsSeen;
+                _gameRtPassClear = clearLoad;
+                if (++_gameRtPassLogs % 300 == 1)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"game RT pass BEGIN frame={_frame} clearLoad={clearLoad}");
+                }
+            }
 
             if (target.CanonicalPtr == _compositeInputRoot)
             {
@@ -1012,6 +1069,7 @@ namespace Ryujinx.Graphics.Metal
 
         public static void NoteAttachmentDraw(IntPtr root, string program)
         {
+            _drawsSeen++;
             _lastAttachmentRoot = root;
             NoteWriteOrdering(root, program);
 
@@ -1260,9 +1318,18 @@ namespace Ryujinx.Graphics.Metal
                 mine.SrcWasRecentDst = _frameSrcWasRecentDst;
                 // Census the game's final RGBA8(sRGB) render target - the texture that is
                 // white when the frame is white - not present's shadow of it.
-                mine.SceneWriters = _frameLastRgba8Rt != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameLastRgba8Rt, out int swc) && swc > 0
-                    ? string.Join(",", _pendingWriters[_frameLastRgba8Rt], 0, Math.Min(swc, MaxWriters))
-                    : "(none)";
+                // The game's final RT was drawn LAST frame (lastAttachFrame == nowFrame - 1,
+                // measured), so this frame's writer table never holds its writers. Use the
+                // list snapshotted at the previous present.
+                mine.SceneWriters = _prevFrameGameRtWriters;
+                if (_gameRtPassOpen && ++_gameRtEndLogs % 300 == 1)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"game RT pass: clear={_gameRtPassClear} drawsSince={_drawsSeen - _gameRtPassDrawStart}");
+                }
+                _gameRtPassOpen = false;
+                _prevFrameGameRtWriters = _frameGameRtRoot != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameGameRtRoot, out int swc) && swc > 0
+                    ? string.Join(",", _pendingWriters[_frameGameRtRoot], 0, Math.Min(swc, MaxWriters))
+                    : "(none-this-frame)";
                 mine.RtWriters = _frameLastFullResRt != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameLastFullResRt, out int rwc) && rwc > 0
                     ? string.Join(",", _pendingWriters[_frameLastFullResRt], 0, Math.Min(rwc, MaxWriters))
                     : "(none)";
@@ -1285,7 +1352,7 @@ namespace Ryujinx.Graphics.Metal
                 // colour render target - the texture the capture showed holding the
                 // correct picture while present read white from another.
                 mine.RtSampled = false;
-                Texture rtTex = _frameLastFullResTex;
+                Texture rtTex = _frameGameRtTex ?? _frameLastFullResTex;
                 if (rtTex != null && rtTex.CanonicalPtr != src.CanonicalPtr)
                 {
                     MTLTexture rt = rtTex.GetHandle(cbs);

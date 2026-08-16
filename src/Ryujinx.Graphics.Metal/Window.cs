@@ -95,6 +95,22 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        public void NoteGameFinalTargetView(ITexture texture)
+        {
+            if (texture is Texture t)
+            {
+                UploadCorrelator.NoteGameFinalTargetView(t);
+            }
+        }
+
+        public void NoteGameFinalTarget(ITexture texture)
+        {
+            if (texture is Texture t)
+            {
+                UploadCorrelator.NoteGameFinalTarget(t);
+            }
+        }
+
         public void Present(ITexture texture, ImageCrop crop, Action swapBuffersCallback)
         {
             if (_renderer.Pipeline is Pipeline pipeline && texture is Texture tex)

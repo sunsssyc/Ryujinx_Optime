@@ -174,6 +174,36 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// </summary>
         public bool HasViews => _views.Count > 0;
 
+        /// <summary>Diagnostic.</summary>
+        public int ViewsCount => _views.Count;
+
+        /// <summary>Diagnostic.</summary>
+        public IEnumerable<ITexture> ViewHostTextures
+        {
+            get { foreach (Texture v in _views) { if (v.HostTexture != null) yield return v.HostTexture; } }
+        }
+
+        /// <summary>Diagnostic: format/size/host-hash of each view.</summary>
+        public string ViewsSummary
+        {
+            get
+            {
+                if (_views.Count == 0) return "-";
+                System.Text.StringBuilder sb = new();
+                foreach (Texture v in _views)
+                {
+                    sb.Append($"[{v.Info.Width}x{v.Info.Height} {v.Info.FormatInfo.Format} L{v.FirstLevel} host#{(v.HostTexture?.GetHashCode() ?? 0):X}]");
+                }
+                return sb.ToString();
+            }
+        }
+
+        /// <summary>Diagnostic.</summary>
+        public bool EverModified => Group != null && Group.ModifiedSequence != 0;
+
+        /// <summary>Diagnostic: hash of the storage's host texture, for identity logs.</summary>
+        public int StorageHostHash => _viewStorage?.HostTexture?.GetHashCode() ?? 0;
+
         private int _referenceCount;
         private List<TexturePoolOwner> _poolOwners;
 

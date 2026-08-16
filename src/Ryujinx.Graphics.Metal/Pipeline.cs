@@ -272,18 +272,26 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            if (_encoderStateManager.RenderTargets[0] is Texture target)
+            // All colour attachments, not only slot 0: the game's final render target can
+            // sit in a higher MRT slot, and a census keyed on slot 0 alone never sees it.
+            for (int rtIndex = 0; rtIndex < _encoderStateManager.RenderTargets.Length; rtIndex++)
             {
+                if (_encoderStateManager.RenderTargets[rtIndex] is not Texture target)
+                {
+                    continue;
+                }
+
                 UploadCorrelator.NoteFullResAttachment(target);
                 UploadCorrelator.NoteAttachmentDraw(
                     target.CanonicalPtr,
                     _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel);
 
-                // The writer's command buffer, keyed by what it writes; the correlator
-                // keeps only the one matching the blit's input.
-                UploadCorrelator.NoteWriterCb(
-                    target.CanonicalPtr, Cbs.CommandBufferIndex,
-                    _renderer.CommandBufferPool.RentSeqOf(Cbs.CommandBufferIndex));
+                if (rtIndex == 0)
+                {
+                    UploadCorrelator.NoteWriterCb(
+                        target.CanonicalPtr, Cbs.CommandBufferIndex,
+                        _renderer.CommandBufferPool.RentSeqOf(Cbs.CommandBufferIndex));
+                }
             }
         }
 
