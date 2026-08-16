@@ -5618,3 +5618,14 @@ Everything measured over three days is consistent with this and only this:
 Fix: make Srgb<->Unorm view-compatible on the Metal backend so present aliases the render
 target instead of shadowing it (Metal supports this natively via PixelFormatView / sRGB view
 pairs), or make the presentation lookup format-agnostic between the sRGB and linear variant.
+
+
+### Correction: the sibling swap engages and does not help - A is white too
+
+`FindRenderedSibling` swaps present's Unorm shadow for the game's Srgb render target (log:
+"swapping shadow R8G8B8A8Unorm for rendered sibling R8G8B8A8Srgb"), and the rate is 22.90%
+- unchanged. Presenting the real render target directly still shows white, so the shadow-
+staleness reading is NOT the cause; it was consistent with the census but the RT itself is
+white on those frames (matching the earlier 97% "both white" result). The white is made
+inside the game's render chain before its final RGBA8 sRGB target is complete. Next: the
+writer census of THAT target (the sRGB one), by outcome.

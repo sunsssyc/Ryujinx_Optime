@@ -322,6 +322,61 @@ namespace Ryujinx.Graphics.Gpu.Image
             }
         }
 
+        /// <summary>
+        /// For presentation: if <paramref name="chosen"/> has never been a render target and
+        /// another texture at exactly the same range with the sRGB/linear sibling format has,
+        /// return that one. See Window.Present for why.
+        /// </summary>
+        public Texture FindRenderedSibling(MultiRange range, Texture chosen)
+        {
+            if (chosen == null || chosen.Group?.HasCopyDependencies == true)
+            {
+                // Group with copy deps: leave alone.
+            }
+
+            Format want = chosen.Info.FormatInfo.Format;
+            Format sibling = want switch
+            {
+                Format.R8G8B8A8Unorm => Format.R8G8B8A8Srgb,
+                Format.R8G8B8A8Srgb => Format.R8G8B8A8Unorm,
+                Format.B8G8R8A8Unorm => Format.B8G8R8A8Srgb,
+                Format.B8G8R8A8Srgb => Format.B8G8R8A8Unorm,
+                _ => want,
+            };
+
+            if (sibling == want)
+            {
+                return null;
+            }
+
+            Texture[] overlaps = new Texture[64];
+            int count = _textures.FindOverlaps(range, ref overlaps);
+            Texture best = null;
+
+            for (int i = 0; i < count; i++)
+            {
+                Texture o = overlaps[i];
+                if (o == null || o == chosen) { continue; }
+                if (o.Info.FormatInfo.Format != sibling) { continue; }
+                if (!o.Range.Equals(range)) { continue; }
+                if (o.Info.Width != chosen.Info.Width || o.Info.Height != chosen.Info.Height) { continue; }
+                // Prefer the most recently modified.
+                if (best == null || o.Group.ModifiedSequence - best.Group.ModifiedSequence > 0)
+                {
+                    best = o;
+                }
+            }
+
+            // Only swap if the sibling is newer than the chosen one - i.e. it has been
+            // rendered since the shadow was last uploaded.
+            if (best != null && best.Group.ModifiedSequence - chosen.Group.ModifiedSequence >= 0)
+            {
+                return best;
+            }
+
+            return null;
+        }
+
         /// <summary>Diagnostic: how many cached textures overlap this range.</summary>
         public int CountForRange(MultiRange range)
         {

@@ -199,7 +199,8 @@ namespace Ryujinx.Graphics.Metal
                 _frameLastFullResTex = t;
 
                 // The present source is RGBA8, not RG11B10 - track the last RGBA8 one too.
-                if (t.Info.Format == Format.R8G8B8A8Unorm || t.Info.Format == Format.B8G8R8A8Unorm)
+                if (t.Info.Format == Format.R8G8B8A8Unorm || t.Info.Format == Format.B8G8R8A8Unorm ||
+                    t.Info.Format == Format.R8G8B8A8Srgb || t.Info.Format == Format.B8G8R8A8Srgb)
                 {
                     _frameLastRgba8Rt = t.CanonicalPtr;
                 }
@@ -1257,8 +1258,10 @@ namespace Ryujinx.Graphics.Metal
                 mine.Rgba8Match = _frameLastRgba8Rt == src.CanonicalPtr;
                 mine.BlitPrevKnown = _frameBlitPairKnown;
                 mine.SrcWasRecentDst = _frameSrcWasRecentDst;
-                mine.SceneWriters = _frameSceneSourceRoot != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameSceneSourceRoot, out int swc) && swc > 0
-                    ? string.Join(",", _pendingWriters[_frameSceneSourceRoot], 0, Math.Min(swc, MaxWriters))
+                // Census the game's final RGBA8(sRGB) render target - the texture that is
+                // white when the frame is white - not present's shadow of it.
+                mine.SceneWriters = _frameLastRgba8Rt != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameLastRgba8Rt, out int swc) && swc > 0
+                    ? string.Join(",", _pendingWriters[_frameLastRgba8Rt], 0, Math.Min(swc, MaxWriters))
                     : "(none)";
                 mine.RtWriters = _frameLastFullResRt != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameLastFullResRt, out int rwc) && rwc > 0
                     ? string.Join(",", _pendingWriters[_frameLastFullResRt], 0, Math.Min(rwc, MaxWriters))

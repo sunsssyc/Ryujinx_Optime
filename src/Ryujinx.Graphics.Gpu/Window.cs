@@ -18,6 +18,10 @@ namespace Ryujinx.Graphics.Gpu
             System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_TRACE") == "1";
         private static int _presentTraceCount;
 
+        private static readonly bool _presentKeepShadow =
+            System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_KEEP_SHADOW") == "1";
+        private static int _siblingLogs;
+
         private static readonly bool _presentNoSync =
             System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_NOSYNC") == "1";
 
@@ -211,6 +215,28 @@ namespace Ryujinx.Graphics.Gpu
                 pt.AcquireCallback(_context, pt.UserObj);
 
                 Image.Texture texture = pt.Cache.FindOrCreateTexture(null, TextureSearchFlags.WithUpscale, pt.Info, 0, range: pt.Range);
+
+                // The white flash: the game renders its final frame into an sRGB target and
+                // presentation asks for the linear (Unorm) sibling at the same address. That
+                // misses, so the cache keeps a second, never-rendered texture for present
+                // whose content is only as fresh as the last guest-memory flush of the real
+                // target. Frames presented before that flush lands show stale content.
+                // If the chosen texture was never rendered to and a same-range texture with
+                // the sRGB/linear sibling format WAS, present the rendered one - a view of
+                // the same bytes, decoded linearly by the present shader either way.
+                if (!_presentKeepShadow)
+                {
+                    Image.Texture rendered = pt.Cache.FindRenderedSibling(pt.Range, texture);
+                    if (rendered != null)
+                    {
+                        if (_presentTrace && ++_siblingLogs <= 5)
+                        {
+                            Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu,
+                                $"present: swapping shadow {texture.Info.FormatInfo.Format} for rendered sibling {rendered.Info.FormatInfo.Format}");
+                        }
+                        texture = rendered;
+                    }
+                }
 
                 // The Metal capture shows present sampling a texture object different from
                 // the frame's final render target; the correlator shows present's source is
