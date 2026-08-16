@@ -4814,3 +4814,30 @@ buffer-backed sibling `-[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:]
 the placement and read the descriptors MoltenVK actually uses. Then the question that matters:
 whether giving this backend heap-placed scene targets changes the flash. That is a real change
 rather than a flag flip, but it is now aimed at a measured difference rather than a guess.
+
+### Correction: the descriptors are identical. Only the allocation differs.
+
+Hooking `newTextureWithDescriptor:offset:` made MoltenVK's colour targets appear at once:
+**6,270 heap-placed textures**, none buffer-placed. And at scene size they are the same
+descriptors this backend uses, usage bits included:
+
+    MoltenVK (placed in a heap)      800x448 fmt 92  usage 0x17   x35
+                                     800x448 fmt 70  usage 0x17   x28
+                                     800x448 fmt 115 usage 0x17   x2
+    Ryujinx-Metal (standalone)       800x448 fmt 92  usage 0x17   x35
+                                     800x448 fmt 70  usage 0x17   x28
+                                     800x448 fmt 115 usage 0x17   x2
+
+**The usage-bit difference reported in the previous section does not exist.** That comparison
+put Metal's device textures against Vulkan's device textures, and Vulkan's device textures are
+only depth - every colour target was inside a heap where the probe could not see it. The
+`0x17` against `0x5` reading was an artifact of a blind spot, and the `LEAN_USAGE=2` arm that
+came back null was testing a difference that was never there.
+
+What survives is sharper for it. Same size, same format, same usage, same storage mode - and:
+
+- **MoltenVK**: 17,077 heaps, textures placed inside them at offsets.
+- **Ryujinx-Metal**: no heap anywhere, every texture its own `Device.NewTexture`.
+
+Identical descriptors, different memory. That is now the only measured difference left between
+a backend that flashes and one that does not.
