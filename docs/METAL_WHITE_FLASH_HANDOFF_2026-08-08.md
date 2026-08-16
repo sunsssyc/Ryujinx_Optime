@@ -4999,3 +4999,27 @@ fences where `SamplesEarlierWrite()` looks.
 enough to pass the gate, in the daylight scene. If it lands solidly below the 20-24% band the
 direction is confirmed and the remaining work is widening which dependencies get a fence; if
 it lands inside the band, fence volume is excluded and only the coverage question remains.
+
+### The correlator cannot measure a fenced arm
+
+A second fence arm with the sampling window stretched from 330s to 520s classified **exactly
+2,999 frames again** - the same number, not a larger one. That is not a short run; it is the
+correlator stopping.
+
+`UploadCorrelator` samples into an eight-slot ring and classifies a slot when its fence has
+signalled, dropping the slot if a whole revolution passes without that happening. Turning on
+`RYUJINX_METAL_RAW_FENCE` changes when fences signal, and the sampler's own fence is caught in
+it: classification stalls and the count freezes. Both fence arms froze at the same place,
+which is the signature of a limit in the instrument rather than of the run.
+
+**So the fence hypothesis cannot be measured with the current correlator, and neither fence
+arm's rate means anything** - not the 15.4%, not any number from them. The engagement figures
+are still sound, because those come from the independent Metal-level probe: 21,928 and 23,429
+fence pairs per 120 frames against MoltenVK's 20,094. Volume is matched; the effect is
+unmeasured.
+
+**What has to happen before this line can continue:** the correlator needs a classification
+path that does not depend on the sampler's fence signalling in step with the frame - either a
+longer ring, a timeout that classifies on the CPU after a fixed delay, or sampling through a
+separate command buffer whose fence the intervention does not touch. Until then any fenced arm
+will report a frozen 2,999 and look like a short run.
