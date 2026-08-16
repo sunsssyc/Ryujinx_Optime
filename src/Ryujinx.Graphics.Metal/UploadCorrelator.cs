@@ -106,6 +106,7 @@ namespace Ryujinx.Graphics.Metal
             public string Triple;
             public bool SrcWasRecentDst;
             public bool RtSampled;
+            public string RtWriters;
             public bool BlitPrevMatch;
             public ulong[] ArgExpected;
             public int ArgCount;
@@ -154,6 +155,7 @@ namespace Ryujinx.Graphics.Metal
         private static IntPtr _presentSrcRoot, _presentDstRoot;
         private static int _presentSrcW, _presentSrcH;
         private static readonly Dictionary<string, (long Flat, long Normal)> _tripleStats = new();
+        private static readonly Dictionary<string, (long Flat, long Normal)> _rtWriterStats = new();
 
         private static readonly Queue<IntPtr> _recentDstRoots = new();
         private static long _srcWasRecentDstFlat, _srcWasRecentDstNormal, _srcNotDstFlat, _srcNotDstNormal;
@@ -1234,6 +1236,9 @@ namespace Ryujinx.Graphics.Metal
                 mine.PresentMatchesLastRt = _frameLastFullResRt == src.CanonicalPtr;
                 mine.BlitPrevKnown = _frameBlitPairKnown;
                 mine.SrcWasRecentDst = _frameSrcWasRecentDst;
+                mine.RtWriters = _frameLastFullResRt != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameLastFullResRt, out int rwc) && rwc > 0
+                    ? string.Join(",", _pendingWriters[_frameLastFullResRt], 0, Math.Min(rwc, MaxWriters))
+                    : "(none)";
                 mine.Triple = $"src{(_presentSrcRoot == _frameLastFullResRt ? "==" : "!=")}lastRT src{(_presentSrcRoot == _presentDstRoot ? "==" : "!=")}dst {_presentSrcW}x{_presentSrcH} srcSerial{(_presentSrcSerial == _prevPresentSrcSerial ? "SAME" : "new")}";
                 mine.BlitPrevMatch = _frameBlitReadsPrevAttachment;
                 mine.ArgCount = _frameArgCount;
@@ -1503,6 +1508,12 @@ namespace Ryujinx.Graphics.Metal
             double mean = lumaSum / Pixels;
             double variance = (lumaSqSum / Pixels) - (mean * mean);
             double sd = variance > 0 ? Math.Sqrt(variance) : 0;
+
+            if (slot.RtWriters != null && (_rtWriterStats.Count < 40 || _rtWriterStats.ContainsKey(slot.RtWriters)))
+            {
+                (long rf, long rn) = _rtWriterStats.TryGetValue(slot.RtWriters, out (long Flat, long Normal) rv) ? (rv.Flat, rv.Normal) : (0L, 0L);
+                _rtWriterStats[slot.RtWriters] = flat ? (rf + 1, rn) : (rf, rn + 1);
+            }
 
             if (slot.RtSampled)
             {
@@ -2005,6 +2016,15 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | blit vertex spread (distinct of 4): flat {(_flatVertN > 0 ? _flatVertSum / _flatVertN : 0):F2} over {_flatVertN}, normal {(_normalVertN > 0 ? _normalVertSum / _normalVertN : 0):F2} over {_normalVertN}");
             sb.Append($" | composite draws/frame: flat {(_flatDrawN > 0 ? _flatDrawSum / _flatDrawN : 0):F2}, normal {(_normalDrawN > 0 ? _normalDrawSum / _normalDrawN : 0):F2}");
             sb.Append($" | sampler fence: asked {_fenceAsked}, signalled {_fenceReady}");
+            {
+                List<KeyValuePair<string, (long Flat, long Normal)>> rw = new(_rtWriterStats);
+                rw.Sort((x, y) => (y.Value.Flat + y.Value.Normal).CompareTo(x.Value.Flat + x.Value.Normal));
+                for (int i = 0; i < rw.Count && i < 8; i++)
+                {
+                    long tot = rw[i].Value.Flat + rw[i].Value.Normal;
+                    sb.Append($"\n  LAST-RT writers: flat {rw[i].Value.Flat,6} / {tot,6} = {(tot > 0 ? 100.0 * rw[i].Value.Flat / tot : 0),5:F1}%  {rw[i].Key}");
+                }
+            }
             sb.Append($"\n  RT-vs-SRC at present: [RT picture, SRC white] flat {_rtPicSrcWhiteFlat} normal {_rtPicSrcWhiteNormal} | [both picture] flat {_bothPicFlat} normal {_bothPicNormal} | [both white] flat {_bothWhiteFlat} normal {_bothWhiteNormal} | [RT white, SRC pic] flat {_rtWhiteSrcPicFlat} normal {_rtWhiteSrcPicNormal}");
             sb.Append($"\n  PRESENT src is a recent drawable: yes flat {_srcWasRecentDstFlat} normal {_srcWasRecentDstNormal} | no flat {_srcNotDstFlat} normal {_srcNotDstNormal}");
             foreach (KeyValuePair<string, (long Flat, long Normal)> t3 in _tripleStats)

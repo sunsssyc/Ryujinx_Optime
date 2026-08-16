@@ -2111,7 +2111,7 @@ namespace Ryujinx.Graphics.Metal
         /// pass-through blit that writes the presented surface.
         /// </summary>
         private static readonly string _watchLabel =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_LABEL") ?? "480117";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_LABEL") ?? "bd6e03";
 
         private static readonly int _redeclareEvery =
             int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_REDECLARE"), out int rd) ? rd : 0;
@@ -2581,6 +2581,17 @@ namespace Ryujinx.Graphics.Metal
                                     {
                                         Logger.Info?.PrintMsg(LogClass.Gpu, $"shadow-bind collected {_shadowCollected}");
                                     }
+                                }
+
+                                // The watched program's input is sampled regardless of
+                                // IsSceneClass - the upscaler's input is the 800x448 scene,
+                                // which the >=1000-wide predicate excludes.
+                                if (UploadCorrelator.Enabled && hasTexture &&
+                                    texture.Storage is Texture watchCandidate &&
+                                    _watchLabel.Length != 0 && program.DebugLabel != null &&
+                                    program.DebugLabel.StartsWith(_watchLabel, StringComparison.Ordinal))
+                                {
+                                    UploadCorrelator.NoteCompositeOutput(watchCandidate);
                                 }
 
                                 if (UploadCorrelator.Enabled && hasTexture &&

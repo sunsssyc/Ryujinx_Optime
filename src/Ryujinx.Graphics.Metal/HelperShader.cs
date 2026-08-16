@@ -417,6 +417,9 @@ namespace Ryujinx.Graphics.Metal
 
             const int RegionBufferSize = 32;
 
+            // The upscaler's input, photographed at the one place it is certainly in hand.
+            UploadCorrelator.NoteCompositeOutput(src as Texture);
+
             _pipeline.SetTextureAndSampler(ShaderStage.Fragment, 0, src, _samplerLinear);
 
             Span<float> region = stackalloc float[RegionBufferSize / sizeof(float)];

@@ -102,6 +102,19 @@ fragment FORMAT4 fragmentMain(CopyVertexOut in [[stage_in]],
     float3 west = float3(textures.texture.sample(textures.sampler, in.uv + float2(-texel.x, 0.0f)).rgb);
 
     float3 e = float3(center.rgb);
+
+    // NaN guard. A NaN anywhere in the 5-tap neighbourhood propagates through
+    // min/max/clamp differently per implementation and ends up in the RG11B10Float
+    // output as the maximum representable value - which is a uniform ~250 white once
+    // tonemapped to BGRA8. If the source scene texture carries NaN texels, this is
+    // where they become the flash. Replace NaN with the centre tap; if the centre
+    // itself is NaN, black.
+    if (any(isnan(e))) { e = float3(0.0f); center = float4(e, 1.0f); }
+    north = select(north, e, isnan(north));
+    south = select(south, e, isnan(south));
+    east = select(east, e, isnan(east));
+    west = select(west, e, isnan(west));
+
     float3 mn4 = min(min(north, south), min(east, west));
     float3 mx4 = max(max(north, south), max(east, west));
 

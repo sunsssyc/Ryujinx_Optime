@@ -5551,3 +5551,20 @@ So the white is upstream of the HUD pass: Render Encoder 0 LOADS an already-whit
 0x904c49900 and draws HUD on it. The writer BEFORE the HUD pass into that texture - the last
 full-res colour pass of the frame proper (composite/upscale) - is where the white is made,
 and it is in the same 26 GB capture.
+
+### FIRST INPUT-SIDE SPLIT: the game's final 800x448 scene texture is flat on white frames
+
+Sampled at the one place it is certainly in hand - `HelperShader.PresentColor`'s `src`, the
+800x448 scene texture the game hands to present. Gated arm (luma 140, 11,399 frames, flat
+21.04%):
+
+    upscaler input distinct-of-25    flat 4.67    normal 21.87
+
+**On white frames the scene texture the game delivers is already almost uniform.** Every
+earlier "the input holds a picture" measurement photographed something else - present's own
+output side, or a texture selected through the guest binding path that this HelperShader
+program never uses. The present chain (Catmull-Rom + RCAS) is faithful; it upscales white
+because it is given white.
+
+So the white is made inside the game's render chain, in whatever writes the final 800x448
+scene texture. Its writer census, split by outcome, is the next and probably last step.
