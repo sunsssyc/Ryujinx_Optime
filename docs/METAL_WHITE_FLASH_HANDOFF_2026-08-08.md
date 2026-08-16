@@ -5466,3 +5466,31 @@ frames and found correct. The synchronisation curve's residual (17% at total ser
 Two things remain that are not host-side probes: a Metal GPU capture that lands on a white
 frame (CaptureHunter exists and has never caught one in-pass with the texel-level check),
 and Apple. The ledger for the second is complete.
+
+### There is already a capture of a white frame on disk
+
+`/tmp/ryujinx-flat-002.gputrace` - 1.1 GB, dated Aug 15 09:54. `CaptureHunter` only KEEPS a
+capture whose verdict (taken one frame late, because the white is written at N-1 and shown at
+N) says the following frame was flat; discarded attempts are deleted. Its existence means it
+was kept: this is a GPU capture of the frame in which the white was written, and it has sat
+unopened for a day while the investigation went round the host side.
+
+There is no headless reader for .gputrace - it opens only in Xcode's GPU Debugger. What to
+do in it, given everything now known:
+
+1. Find the last render pass whose colour attachment is the presented surface (the pass
+   running program `480117a3b1123d65`, the pass-through blit; it is the last non-UI pass).
+2. Select its single draw. In the Bound Resources view, select the input texture
+   `fp_t_tcb_8`. **Look at the texture's contents in the debugger** - the debugger reads
+   the resource through its own path.
+3. Then look at the pass's colour attachment output.
+
+If the debugger shows the input as a picture and the output as white, the debugger has
+reproduced the in-stream witness inside a capture, and Apple can be pointed at a specific
+draw in a specific capture. If the debugger shows the input as white too, then in the
+capture the texture IS white at that point in the stream - and every in-stream witness
+adjacent to the pass was reading it after something restored it, which would reopen the
+"replaced between writer and blit" line the pair measurement closed.
+
+Either outcome moves the investigation; the capture has been available for both since
+yesterday morning.
