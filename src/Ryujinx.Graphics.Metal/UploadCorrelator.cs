@@ -85,6 +85,10 @@ namespace Ryujinx.Graphics.Metal
             public string Indices;
             public string Attrib;
             public string Raster;
+            public int WriterCb;
+            public long WriterRent;
+            public int BlitCb;
+            public long BlitRent;
             public bool PsoFresh;
             public string ImgWriters;
             public long InSerial;
@@ -744,6 +748,13 @@ namespace Ryujinx.Graphics.Metal
 
         private const int ReportInterval = 600;
 
+        private static CommandBufferPool _pool;
+
+        public static void AttachPool(CommandBufferPool pool)
+        {
+            _pool = pool;
+        }
+
         public static void Init(MTLDevice device)
         {
             if (!Enabled)
@@ -865,6 +876,57 @@ namespace Ryujinx.Graphics.Metal
         /// Accumulated per storage so the frame that writes the presented surface can be
         /// described by what actually drew into it.
         /// </summary>
+        /// <summary>
+        /// The pair that matters. Every out-of-pass witness runs after the writer of the
+        /// blit's input has completed; only the blit's own fragment stage sees white. The
+        /// global out-of-order counter (0.54/frame, uncorrelated) cannot resolve whether
+        /// THIS writer's command buffer and THIS blit's command buffer commit in the order
+        /// they were rented - so both identities are recorded here, per frame, and the
+        /// pair's rent-vs-commit order is split by outcome at classification.
+        /// </summary>
+        private static int _frameWriterCb = -1;
+        private static long _frameWriterRent = -1;
+        private static int _frameBlitCb = -1;
+        private static long _frameBlitRent = -1;
+        private static IntPtr _frameBlitInputRoot;
+
+        // Writers happen BEFORE the blit in the frame, so the writer cannot be matched
+        // against the blit's input at the time it draws - the first version keyed on a
+        // root that was not yet known and paired 19 frames of 11,399. Record every
+        // attachment root's most recent writer cb instead, and look it up at the blit.
+        private static readonly Dictionary<IntPtr, (int Cb, long Rent)> _lastWriterByRoot = new();
+
+        public static void NoteWriterCb(IntPtr root, int cbIndex, long rentSeq)
+        {
+            if (Enabled && root != IntPtr.Zero)
+            {
+                _lastWriterByRoot[root] = (cbIndex, rentSeq);
+            }
+        }
+
+        public static void NoteBlitCb(IntPtr inputRoot, int cbIndex, long rentSeq)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            _frameBlitInputRoot = inputRoot;
+            _frameBlitCb = cbIndex;
+            _frameBlitRent = rentSeq;
+
+            if (_lastWriterByRoot.TryGetValue(inputRoot, out (int Cb, long Rent) w))
+            {
+                _frameWriterCb = w.Cb;
+                _frameWriterRent = w.Rent;
+            }
+        }
+
+        private static long _pairSameCbFlat, _pairSameCbNormal;
+        private static long _pairOrderedFlat, _pairOrderedNormal;
+        private static long _pairInvertedFlat, _pairInvertedNormal;
+        private static long _pairUncommittedFlat, _pairUncommittedNormal;
+
         public static void NoteAttachmentDraw(IntPtr root, string program)
         {
             NoteWriteOrdering(root, program);
@@ -1079,6 +1141,10 @@ namespace Ryujinx.Graphics.Metal
                 mine.Indices = _frameIndices;
                 mine.Attrib = _frameAttrib;
                 mine.Raster = _frameRaster;
+                mine.WriterCb = _frameWriterCb;
+                mine.WriterRent = _frameWriterRent;
+                mine.BlitCb = _frameBlitCb;
+                mine.BlitRent = _frameBlitRent;
                 mine.PsoFresh = _framePsoFresh;
                 mine.ImgWriters = _frameImgWriters.Count == 0 ? "none" : string.Join(",", _frameImgWriters);
                 mine.InSerial = _inputSerial;
@@ -1146,6 +1212,11 @@ namespace Ryujinx.Graphics.Metal
             _frameIndices = null;
             _frameAttrib = null;
             _frameRaster = null;
+            _frameWriterCb = -1;
+            _frameWriterRent = -1;
+            _frameBlitCb = -1;
+            _frameBlitRent = -1;
+            _frameBlitInputRoot = IntPtr.Zero;
             _framePsoFresh = false;
             _frameImgWriters.Clear();
             _inputSerial = -1;
@@ -1422,6 +1493,36 @@ namespace Ryujinx.Graphics.Metal
             {
                 if (slot.PsoFresh) { if (flat) { _freshFlat++; } else { _freshNormal++; } }
                 else { if (flat) { _staleFlat++; } else { _staleNormal++; } }
+            }
+
+            if (slot.WriterCb >= 0 && slot.BlitCb >= 0)
+            {
+                if (slot.WriterCb == slot.BlitCb && slot.WriterRent == slot.BlitRent)
+                {
+                    if (flat) { _pairSameCbFlat++; } else { _pairSameCbNormal++; }
+                }
+                else
+                {
+                    // Commit order of the pair, read at classification time (several
+                    // frames later, both long committed). Rent order says which SHOULD
+                    // be first; commit order says which WAS.
+                    long wc = _pool.CommitSeqOf(slot.WriterCb);
+                    long bc = _pool.CommitSeqOf(slot.BlitCb);
+                    bool writerFirstByRent = slot.WriterRent < slot.BlitRent;
+
+                    if (wc == 0 || bc == 0)
+                    {
+                        if (flat) { _pairUncommittedFlat++; } else { _pairUncommittedNormal++; }
+                    }
+                    else if ((wc < bc) == writerFirstByRent)
+                    {
+                        if (flat) { _pairOrderedFlat++; } else { _pairOrderedNormal++; }
+                    }
+                    else
+                    {
+                        if (flat) { _pairInvertedFlat++; } else { _pairInvertedNormal++; }
+                    }
+                }
             }
 
             if (slot.Raster != null && _rasterStats.Count < 32)
@@ -1726,6 +1827,7 @@ namespace Ryujinx.Graphics.Metal
                 sb.Append($"\n  blit w[slot{c}]: flat mean {(_wFlatN[c] > 0 ? _wFlatSum[c] / _wFlatN[c] : 0):G4} min {(_wFlatN[c] > 0 ? _wFlatMin[c] : 0):G4} n={_wFlatN[c]}  normal mean {(_wNormalN[c] > 0 ? _wNormalSum[c] / _wNormalN[c] : 0):G4} min {(_wNormalN[c] > 0 ? _wNormalMin[c] : 0):G4} n={_wNormalN[c]}");
             }
 
+            sb.Append($"\n  WRITER/BLIT PAIR: same-cb flat {_pairSameCbFlat} normal {_pairSameCbNormal} | ordered flat {_pairOrderedFlat} normal {_pairOrderedNormal} | INVERTED flat {_pairInvertedFlat} normal {_pairInvertedNormal} | uncommitted flat {_pairUncommittedFlat} normal {_pairUncommittedNormal}");
             sb.Append($"\n  SAMPLER-UNIT vs read-path disagree: flat {_sampVsReadFlat}/{_sampVsReadFlat + _sampSameFlat}, normal {_sampVsReadNormal}/{_sampVsReadNormal + _sampSameNormal}");
             sb.Append($"\n  TWO-PATH sampler-vs-blit disagree: flat {_twoPathDisagreeFlat}/{_twoPathDisagreeFlat + _twoPathAgreeFlat}, normal {_twoPathDisagreeNormal}/{_twoPathDisagreeNormal + _twoPathAgreeNormal}");
             sb.Append($"\n  MAGENTA canary frames: {_magentaFrames}");

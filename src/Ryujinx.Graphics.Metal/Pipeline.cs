@@ -277,8 +277,16 @@ namespace Ryujinx.Graphics.Metal
                 UploadCorrelator.NoteAttachmentDraw(
                     target.CanonicalPtr,
                     _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel);
+
+                // The writer's command buffer, keyed by what it writes; the correlator
+                // keeps only the one matching the blit's input.
+                UploadCorrelator.NoteWriterCb(
+                    target.CanonicalPtr, Cbs.CommandBufferIndex,
+                    _renderer.CommandBufferPool.RentSeqOf(Cbs.CommandBufferIndex));
             }
         }
+
+        internal long PoolRentSeq(int cbIndex) => _renderer.CommandBufferPool.RentSeqOf(cbIndex);
 
         private bool SkipThisDraw()
         {

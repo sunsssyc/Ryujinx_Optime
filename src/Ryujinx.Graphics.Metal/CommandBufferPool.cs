@@ -73,6 +73,14 @@ namespace Ryujinx.Graphics.Metal
         private readonly long[] _rentSeq;
         private long _rentCounter;
         private long _lastCommittedRentSeq;
+        private long _commitCounter;
+        private readonly long[] _commitSeq = new long[64];
+
+        /// <summary>The rental sequence stamped on this command buffer when it was rented.</summary>
+        public long RentSeqOf(int cbIndex) => (uint)cbIndex < (uint)_rentSeq.Length ? _rentSeq[cbIndex] : -1;
+
+        /// <summary>The commit sequence, or 0 if not yet committed since its rental.</summary>
+        public long CommitSeqOf(int cbIndex) => (uint)cbIndex < (uint)_commitSeq.Length ? _commitSeq[cbIndex] : -1;
 
         public CommandBufferPool(MTLCommandQueue queue, bool isLight = false)
         {
@@ -227,6 +235,7 @@ namespace Ryujinx.Graphics.Metal
 
                         _inUseCount++;
                         _rentSeq[cursor] = ++_rentCounter;
+                        if ((uint)cursor < (uint)_commitSeq.Length) { _commitSeq[cursor] = 0; }
 
                         return new CommandBufferScoped(this, entry.CommandBuffer, entry.Encoders, cursor);
                     }
@@ -271,6 +280,11 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 _lastCommittedRentSeq = seq;
+
+                if ((uint)cbs.CommandBufferIndex < (uint)_commitSeq.Length)
+                {
+                    _commitSeq[cbs.CommandBufferIndex] = ++_commitCounter;
+                }
 
                 commandBuffer.Commit();
 

@@ -2600,6 +2600,13 @@ namespace Ryujinx.Graphics.Metal
                                         program.DebugLabel.StartsWith(_watchLabel, StringComparison.Ordinal))
                                     {
                                         UploadCorrelator.NoteCompositeOutput(sceneCandidate);
+
+                                        // The blit's own command buffer and its input - the
+                                        // other half of the writer/blit pair.
+                                        UploadCorrelator.NoteBlitCb(
+                                            sceneCandidate.CanonicalPtr,
+                                            _pipeline.Cbs.CommandBufferIndex,
+                                            _pipeline.PoolRentSeq(_pipeline.Cbs.CommandBufferIndex));
                                         UploadCorrelator.NoteBlitInputSerial(sceneCandidate.Serial);
                                         UploadCorrelator.NoteBlitInputGen(sceneCandidate.CanonicalPtr);
                                         UploadCorrelator.ArmAfterBlitSample();

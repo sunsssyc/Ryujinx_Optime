@@ -5430,3 +5430,39 @@ the blit's input and the blit itself sit in different command buffers, and the p
 commit/execution order OF EXACTLY THAT PAIR was never split by outcome - the global
 out-of-order counter (0.54/frame, uncorrelated) does not resolve the one pair that matters.
 That is the next measurement, and the one this matrix earns.
+
+### The writer/blit pair: same command buffer on 99% of white frames
+
+The one pair the global counter could not resolve, resolved. The last writer of the blit's
+input and the blit itself, per frame, split by outcome (gated arm, 11,399 frames, flat
+22.42%; the first attempt paired 19 frames because it keyed the writer on a root not yet
+known when the writer drew - fixed by a per-root last-writer table looked up at the blit):
+
+    same command buffer         flat 2,536 (99.2%)    normal 8,570 (97.0%)
+    different cb, order kept    flat     8            normal    33
+    different cb, INVERTED      flat     5 ( 0.2%)    normal   179 ( 2.0%)
+    different cb, uncommitted   flat     5            normal    55
+
+**On virtually every white frame the writer and the reader are in the same command
+buffer.** Cross-command-buffer commit order cannot be the mechanism - it does not even
+apply. Inversions exist and are ten times MORE common on frames that do not flash.
+
+This kills the last synchronisation-family hypothesis and it removes the reading the
+invocation matrix had left standing. Within one command buffer, encoder order is program
+order; the read-after-write split already ends the writer's encoder before the blit's; a
+forced split before the blit specifically was measured null; MTLFence between them null.
+Yet the blit's fragment stage returns white from a texture that, adjacent to that same pass,
+holds the picture through three decoders - with sane coordinates, through both fetch
+instructions, through both binding models.
+
+Where that leaves it, stated without a hypothesis attached: **the fault is inside the
+fragment invocation's texture access, in the same command buffer as a completed writer, and
+is not addressable by anything on the host side that has been tried.** Every axis this
+investigation can reach - data, descriptors, memory, synchronisation, ordering, binding,
+coordinates, shader arithmetic, allocation, tracking - has been measured on the failing
+frames and found correct. The synchronisation curve's residual (17% at total serialisation
++ 23k fences) is the ceiling of what host-side control achieves.
+
+Two things remain that are not host-side probes: a Metal GPU capture that lands on a white
+frame (CaptureHunter exists and has never caught one in-pass with the texel-level check),
+and Apple. The ledger for the second is complete.
