@@ -2222,6 +2222,13 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetImage(ShaderStage stage, int binding, ITexture image)
         {
+            // A storage-image binding is a potential writer of that texture (compute or
+            // fragment image store); register it for the writer census.
+            if (UploadCorrelator.Enabled && image is Texture imgTex)
+            {
+                UploadCorrelator.NoteAttachmentDraw(imgTex.CanonicalPtr, "image");
+            }
+
             if (image is TextureBase img)
             {
                 _encoderStateManager.UpdateImage(stage, binding, img);

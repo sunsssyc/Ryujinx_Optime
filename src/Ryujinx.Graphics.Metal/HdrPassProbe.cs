@@ -1543,6 +1543,15 @@ namespace Ryujinx.Graphics.Metal
 
         public static void NoteNonRenderWrite(Texture target, string kind)
         {
+            // Every non-render write funnels through here (copy, copyLayer, blitScaled,
+            // upload). Register each as a writer of the target's root for the correlator's
+            // census - the present scene texture's census came back empty, so its writes
+            // arrive by a route the attachment hook does not see.
+            if (UploadCorrelator.Enabled && target != null)
+            {
+                UploadCorrelator.NoteAttachmentDraw(target.CanonicalPtr, kind);
+            }
+
             if (!Enabled || target == null || _toneCount == 0)
             {
                 return;

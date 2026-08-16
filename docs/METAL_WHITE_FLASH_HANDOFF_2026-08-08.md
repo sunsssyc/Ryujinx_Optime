@@ -5568,3 +5568,22 @@ because it is given white.
 
 So the white is made inside the game's render chain, in whatever writes the final 800x448
 scene texture. Its writer census, split by outcome, is the next and probably last step.
+
+### The two-texture structure, nailed in-process (2026-08-17)
+
+Every frame draws into a 1080p RGBA8 render target (A) - `no-rgba8-rt = 0` - and present
+NEVER reads it: `PRESENT src == last 1080p RGBA8 RT` mismatches on 2,657/2,657 flat and
+8,742/8,742 normal frames. Present's source (B) is a distinct host texture on the same guest
+address range that, under a census covering render attachments, copies, blits, uploads and
+image binds, has **no Metal-side writer at all** in any frame.
+
+So B's content can only come from the GPU layer's own upload path (`SynchronizeMemory` from
+guest memory). On a normal frame the game's RT A has been flushed back to guest memory and B
+uploads a picture; on a white frame that flush has not happened yet and B uploads whatever the
+guest range holds - the previous/initial content, which is white.
+
+That is why: two textures even on good frames; the white is stale-not-corrupt; more
+synchronisation only shifts the rate (it changes when A's flush lands relative to present);
+and Vulkan never flashes - its cache lookup for the present resolves to A itself, Metal's
+resolves to a second entry B. The remaining question is only WHY the Metal-side lookup misses
+A (Info mismatch on the presentation descriptor is the obvious candidate).

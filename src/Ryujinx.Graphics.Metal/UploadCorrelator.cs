@@ -102,11 +102,14 @@ namespace Ryujinx.Graphics.Metal
             public IntPtr ArgPtr;
             public bool PresentMatchesLastRt;
             public bool PresentMatchKnown;
+            public bool Rgba8Known;
+            public bool Rgba8Match;
             public bool BlitPrevKnown;
             public string Triple;
             public bool SrcWasRecentDst;
             public bool RtSampled;
             public string RtWriters;
+            public string SceneWriters;
             public bool BlitPrevMatch;
             public ulong[] ArgExpected;
             public int ArgCount;
@@ -148,6 +151,8 @@ namespace Ryujinx.Graphics.Metal
         // each frame and compares it, at present, with the object present was handed.
         private static IntPtr _frameLastFullResRt;
         private static Texture _frameLastFullResTex;
+        private static IntPtr _frameLastRgba8Rt;
+        private static long _rgbaMatchFlat, _rgbaMatchNormal, _rgbaMismFlat, _rgbaMismNormal, _rgbaNoneFlat, _rgbaNoneNormal;
         private static long _rtPicSrcWhiteFlat, _rtPicSrcWhiteNormal, _bothPicFlat, _bothPicNormal, _bothWhiteFlat, _bothWhiteNormal, _rtWhiteSrcPicFlat, _rtWhiteSrcPicNormal;
         private static long _presentMatchFlat, _presentMatchNormal, _presentMismatchFlat, _presentMismatchNormal;
 
@@ -178,12 +183,26 @@ namespace Ryujinx.Graphics.Metal
             _presentSrcW = w; _presentSrcH = h;
         }
 
+        private static IntPtr _frameSceneSourceRoot;
+        private static readonly Dictionary<string, (long Flat, long Normal)> _sceneWriterStats = new();
+
+        public static void NoteSceneSourceForCensus(Texture t)
+        {
+            if (Enabled && t != null) { _frameSceneSourceRoot = t.CanonicalPtr; }
+        }
+
         public static void NoteFullResAttachment(Texture t)
         {
             if (Enabled && t != null && t.Width >= 1900 && t.Height >= 1000 && !t.Info.Format.IsDepthOrStencil)
             {
                 _frameLastFullResRt = t.CanonicalPtr;
                 _frameLastFullResTex = t;
+
+                // The present source is RGBA8, not RG11B10 - track the last RGBA8 one too.
+                if (t.Info.Format == Format.R8G8B8A8Unorm || t.Info.Format == Format.B8G8R8A8Unorm)
+                {
+                    _frameLastRgba8Rt = t.CanonicalPtr;
+                }
             }
         }
 
@@ -1234,8 +1253,13 @@ namespace Ryujinx.Graphics.Metal
                 mine.ArgPtr = _frameArgPtr;
                 mine.PresentMatchKnown = _frameLastFullResRt != IntPtr.Zero;
                 mine.PresentMatchesLastRt = _frameLastFullResRt == src.CanonicalPtr;
+                mine.Rgba8Known = _frameLastRgba8Rt != IntPtr.Zero;
+                mine.Rgba8Match = _frameLastRgba8Rt == src.CanonicalPtr;
                 mine.BlitPrevKnown = _frameBlitPairKnown;
                 mine.SrcWasRecentDst = _frameSrcWasRecentDst;
+                mine.SceneWriters = _frameSceneSourceRoot != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameSceneSourceRoot, out int swc) && swc > 0
+                    ? string.Join(",", _pendingWriters[_frameSceneSourceRoot], 0, Math.Min(swc, MaxWriters))
+                    : "(none)";
                 mine.RtWriters = _frameLastFullResRt != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameLastFullResRt, out int rwc) && rwc > 0
                     ? string.Join(",", _pendingWriters[_frameLastFullResRt], 0, Math.Min(rwc, MaxWriters))
                     : "(none)";
@@ -1334,6 +1358,8 @@ namespace Ryujinx.Graphics.Metal
             _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;
             _frameLastFullResRt = IntPtr.Zero;
+            _frameLastRgba8Rt = IntPtr.Zero;
+            _frameSceneSourceRoot = IntPtr.Zero;
             _frameBlitPairKnown = false;
             _frameArgCount = 0;
             _frameLateWriter = null;
@@ -1509,6 +1535,12 @@ namespace Ryujinx.Graphics.Metal
             double variance = (lumaSqSum / Pixels) - (mean * mean);
             double sd = variance > 0 ? Math.Sqrt(variance) : 0;
 
+            if (slot.SceneWriters != null && (_sceneWriterStats.Count < 40 || _sceneWriterStats.ContainsKey(slot.SceneWriters)))
+            {
+                (long sf2, long sn2) = _sceneWriterStats.TryGetValue(slot.SceneWriters, out (long Flat, long Normal) sv2) ? (sv2.Flat, sv2.Normal) : (0L, 0L);
+                _sceneWriterStats[slot.SceneWriters] = flat ? (sf2 + 1, sn2) : (sf2, sn2 + 1);
+            }
+
             if (slot.RtWriters != null && (_rtWriterStats.Count < 40 || _rtWriterStats.ContainsKey(slot.RtWriters)))
             {
                 (long rf, long rn) = _rtWriterStats.TryGetValue(slot.RtWriters, out (long Flat, long Normal) rv) ? (rv.Flat, rv.Normal) : (0L, 0L);
@@ -1549,6 +1581,10 @@ namespace Ryujinx.Graphics.Metal
                 if (slot.BlitPrevMatch) { if (flat) { _blitPrevMatchFlat++; } else { _blitPrevMatchNormal++; } }
                 else { if (flat) { _blitPrevMismatchFlat++; } else { _blitPrevMismatchNormal++; } }
             }
+
+            if (!slot.Rgba8Known) { if (flat) { _rgbaNoneFlat++; } else { _rgbaNoneNormal++; } }
+            else if (slot.Rgba8Match) { if (flat) { _rgbaMatchFlat++; } else { _rgbaMatchNormal++; } }
+            else { if (flat) { _rgbaMismFlat++; } else { _rgbaMismNormal++; } }
 
             if (slot.PresentMatchKnown)
             {
@@ -2017,6 +2053,15 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | composite draws/frame: flat {(_flatDrawN > 0 ? _flatDrawSum / _flatDrawN : 0):F2}, normal {(_normalDrawN > 0 ? _normalDrawSum / _normalDrawN : 0):F2}");
             sb.Append($" | sampler fence: asked {_fenceAsked}, signalled {_fenceReady}");
             {
+                List<KeyValuePair<string, (long Flat, long Normal)>> sw = new(_sceneWriterStats);
+                sw.Sort((x, y) => (y.Value.Flat + y.Value.Normal).CompareTo(x.Value.Flat + x.Value.Normal));
+                for (int i = 0; i < sw.Count && i < 10; i++)
+                {
+                    long tot = sw[i].Value.Flat + sw[i].Value.Normal;
+                    sb.Append($"\n  SCENE-800 writers: flat {sw[i].Value.Flat,6} / {tot,6} = {(tot > 0 ? 100.0 * sw[i].Value.Flat / tot : 0),5:F1}%  {sw[i].Key}");
+                }
+            }
+            {
                 List<KeyValuePair<string, (long Flat, long Normal)>> rw = new(_rtWriterStats);
                 rw.Sort((x, y) => (y.Value.Flat + y.Value.Normal).CompareTo(x.Value.Flat + x.Value.Normal));
                 for (int i = 0; i < rw.Count && i < 8; i++)
@@ -2032,6 +2077,7 @@ namespace Ryujinx.Graphics.Metal
                 sb.Append($"\n  PRESENT {t3.Key}: flat {t3.Value.Flat}, normal {t3.Value.Normal}");
             }
             sb.Append($" | BLIT reads the pass-before-it's attachment: match flat {_blitPrevMatchFlat} normal {_blitPrevMatchNormal} | MISMATCH flat {_blitPrevMismatchFlat} normal {_blitPrevMismatchNormal}");
+            sb.Append($" | PRESENT src == last 1080p RGBA8 RT: match flat {_rgbaMatchFlat} normal {_rgbaMatchNormal} | mismatch flat {_rgbaMismFlat} normal {_rgbaMismNormal} | no-rgba8-rt flat {_rgbaNoneFlat} normal {_rgbaNoneNormal}");
             sb.Append($" | PRESENT src == last full-res RT: match flat {_presentMatchFlat} normal {_presentMatchNormal} | MISMATCH flat {_presentMismatchFlat} normal {_presentMismatchNormal}");
             sb.Append($" | argbuf overwritten by frame end: flat {_flatArgMismatch}/{_flatArgChecked}, normal {_normalArgMismatch}/{_normalArgChecked}");
             sb.Append($" | out-of-order commits/frame: flat {(_flatOooN > 0 ? _flatOooSum / _flatOooN : 0):F2}, normal {(_normalOooN > 0 ? _normalOooSum / _normalOooN : 0):F2}");

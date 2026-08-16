@@ -13,6 +13,8 @@ namespace Ryujinx.Graphics.Metal
     [SupportedOSPlatform("macos")]
     class HelperShader : IDisposable
     {
+        private static int _sceneIdLogs;
+
         private const int ConvertElementsPerWorkgroup = 32 * 100; // Work group size of 32 times 100 elements.
         private const string ShadersSourcePath = "/Ryujinx.Graphics.Metal/Shaders";
         private readonly MetalRenderer _renderer;
@@ -419,6 +421,18 @@ namespace Ryujinx.Graphics.Metal
 
             // The upscaler's input, photographed at the one place it is certainly in hand.
             UploadCorrelator.NoteCompositeOutput(src as Texture);
+            UploadCorrelator.NoteSceneSourceForCensus(src as Texture);
+
+            // What IS this texture? Its writer census is empty, so it is not a draw target,
+            // a copy target or an upload target under its own root. Log its identity shape:
+            // format, size, whether it is a view of something else, its storage's dims.
+            if (src is Texture st && System.Threading.Interlocked.Increment(ref _sceneIdLogs) % 300 == 1)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"present scene src: {st.Width}x{st.Height} {st.Info.Format} mtl={st.MtlFormat} " +
+                    $"canon=0x{st.CanonicalPtr:X} native=0x{st.GetHandle().NativePtr:X} " +
+                    $"isView={(st.CanonicalPtr != st.GetHandle().NativePtr)} levels={st.Info.Levels} target={st.Info.Target}");
+            }
 
             _pipeline.SetTextureAndSampler(ShaderStage.Fragment, 0, src, _samplerLinear);
 
