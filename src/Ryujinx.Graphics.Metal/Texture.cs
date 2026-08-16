@@ -303,6 +303,15 @@ namespace Ryujinx.Graphics.Metal
             return usage;
         }
 
+        /// <summary>
+        /// Monotonic creation serial, never recycled. Every identity measurement so far
+        /// compared address values, and address recycling makes different objects across
+        /// time look identical - this is the identity that cannot alias.
+        /// </summary>
+        public long Serial { get; } = System.Threading.Interlocked.Increment(ref _nextSerial);
+
+        private static long _nextSerial;
+
         private static readonly bool _sharedTextures =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_SHARED_TEXTURES") == "1";
 

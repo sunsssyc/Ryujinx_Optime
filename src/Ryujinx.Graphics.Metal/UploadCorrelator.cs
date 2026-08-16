@@ -83,6 +83,8 @@ namespace Ryujinx.Graphics.Metal
             public string Attrib;
             public string Raster;
             public string ImgWriters;
+            public long InSerial;
+            public long WrSerial;
             public float[] RowW;
             public bool[] RowSeen;
             public int OutOfOrder;
@@ -383,6 +385,18 @@ namespace Ryujinx.Graphics.Metal
         }
 
         private static readonly List<string> _frameImgWriters = new();
+
+        /// <summary>
+        /// The creation serial of the texture object the blit samples, against the serial
+        /// of the object its writer painted this frame. Equal addresses said "same texture"
+        /// for two days; serials cannot be recycled, so a mismatch here means the cache
+        /// swapped the host texture between the write and the read, and the blit sampled
+        /// an object nobody painted.
+        /// </summary>
+        public static void NoteBlitInputSerial(long serial) { if (Enabled) { _inputSerial = serial; } }
+
+        private static long _inputSerial = -1, _writerSerial = -1;
+        private static long _matchFlat, _matchNormal, _mismatchFlat, _mismatchNormal;
         private static readonly Dictionary<string, (long Flat, long Normal)> _imgStats = new();
         private static string _frameRaster;
 
@@ -695,6 +709,11 @@ namespace Ryujinx.Graphics.Metal
             _attachedThisFrame.Add(target.CanonicalPtr);
             _lastAttachmentFrame[target.CanonicalPtr] = _frame;
 
+            if (target.CanonicalPtr == _compositeInputRoot)
+            {
+                _writerSerial = target.Serial;
+            }
+
             // Also a writer entry. NoteAttachmentDraw only fires per draw, so a pass that
             // binds this surface and clears it without drawing leaves no trace - and the
             // presented storage never appears as a draw target at all, while its age says
@@ -923,6 +942,8 @@ namespace Ryujinx.Graphics.Metal
                 mine.Attrib = _frameAttrib;
                 mine.Raster = _frameRaster;
                 mine.ImgWriters = _frameImgWriters.Count == 0 ? "none" : string.Join(",", _frameImgWriters);
+                mine.InSerial = _inputSerial;
+                mine.WrSerial = _writerSerial;
                 mine.RowW ??= new float[MaxCbSlots];
                 mine.RowSeen ??= new bool[MaxCbSlots];
                 Array.Copy(_frameRowW, mine.RowW, MaxCbSlots);
@@ -982,6 +1003,8 @@ namespace Ryujinx.Graphics.Metal
             _frameAttrib = null;
             _frameRaster = null;
             _frameImgWriters.Clear();
+            _inputSerial = -1;
+            _writerSerial = -1;
             Array.Clear(_frameRowSeen);
             _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;
@@ -1141,6 +1164,13 @@ namespace Ryujinx.Graphics.Metal
                         if (Math.Abs(w) < Math.Abs(_wNormalMin[c])) { _wNormalMin[c] = w; }
                     }
                 }
+            }
+
+            if (slot.InSerial >= 0 && slot.WrSerial >= 0)
+            {
+                bool match = slot.InSerial == slot.WrSerial;
+                if (flat) { if (match) { _matchFlat++; } else { _mismatchFlat++; } }
+                else { if (match) { _matchNormal++; } else { _mismatchNormal++; } }
             }
 
             if (slot.ImgWriters != null && _imgStats.Count < 32)
@@ -1450,6 +1480,8 @@ namespace Ryujinx.Graphics.Metal
                 if (_wFlatN[c] == 0 && _wNormalN[c] == 0) { continue; }
                 sb.Append($"\n  blit w[slot{c}]: flat mean {(_wFlatN[c] > 0 ? _wFlatSum[c] / _wFlatN[c] : 0):G4} min {(_wFlatN[c] > 0 ? _wFlatMin[c] : 0):G4} n={_wFlatN[c]}  normal mean {(_wNormalN[c] > 0 ? _wNormalSum[c] / _wNormalN[c] : 0):G4} min {(_wNormalN[c] > 0 ? _wNormalMin[c] : 0):G4} n={_wNormalN[c]}");
             }
+
+            sb.Append($"\n  blit serial: flat match {_matchFlat} mismatch {_mismatchFlat}, normal match {_matchNormal} mismatch {_mismatchNormal}");
 
             foreach (KeyValuePair<string, (long Flat, long Normal)> g2 in _imgStats)
             {

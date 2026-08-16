@@ -5263,3 +5263,26 @@ the same driver, never exhibits.
 That is the finding this investigation can support: the divergence lies in the execution of
 a correctly-encoded frame, not in its encoding - and the complete, measured exclusion ledger
 above is the driver report.
+
+### The identity-over-time probe: right question, underpowered instrument
+
+Every identity measurement in this document compared address values, and addresses recycle -
+so "identical binding over 7,183 frames" never proved the *object* was the same across time.
+Textures now carry a monotonic creation serial (`Texture.Serial`, never recycled), and the
+probe compares the serial of the object the blit's writer painted against the serial of the
+object the blit sampled.
+
+The arm is inconclusive by construction: both serials landed together on only 42 of 7,799
+frames, because `_compositeInputRoot` is set at the blit's own bind - late in the frame -
+while the input's writer binds earlier, so the writer-serial trigger almost never sees the
+root. Of the 42 biased frames that did land, all were mismatches on both outcomes, which is
+what the bias predicts and proves nothing.
+
+**To make it decisive next session:** persist `_compositeInputRoot` across frames instead of
+resetting it at present (the root is stable), and verify the writer's attachment bind
+canonicalises to the same root as the sampled view - if writer-vs-sampled serials then
+mismatch on white frames and match on normal ones, the cache is swapping the host texture
+between the write and the read, and the blit samples an object nobody painted: the recycled
+contents of a bright intermediate, uniform, ~250. That mechanism is the only one proposed in
+two days that survives every measurement in this ledger, including the stain arm (a swapped
+handle is not a fresh creation) - and it is Ryujinx-side and fixable.
