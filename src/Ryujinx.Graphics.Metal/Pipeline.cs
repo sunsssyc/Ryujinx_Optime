@@ -120,6 +120,11 @@ namespace Ryujinx.Graphics.Metal
 
         // Forces the split for the blit that writes the presented surface, whether or not
         // SamplesEarlierWrite() notices the dependency. RYUJINX_METAL_SPLIT_BLIT=1.
+        private static readonly int _canaryClear2 =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_CANARY_CLEAR2"), out int cc2) ? cc2 : 0;
+
+        private static readonly HashSet<string> _clearCensus = new();
+
         private static readonly bool _splitBlit =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_SPLIT_BLIT") == "1";
 
@@ -1314,6 +1319,11 @@ namespace Ryujinx.Graphics.Metal
         public void ClearRenderTargetColor(int index, int layer, int layerCount, uint componentMask, ColorF color)
         {
             float[] colors = [color.Red, color.Green, color.Blue, color.Alpha];
+
+            // Canary v2. The first canary sat on pass-descriptor clear colours and caught
+            // nothing - guest clears do not go through it; they are DRAW-based, through
+            // HelperShader, and this is their colour. If white frames turn magenta, the
+            // white is a guest clear the blit read before its overwriter ran.
             Texture dst = _encoderStateManager.RenderTargets[index];
 
             // TODO: Remove workaround for Wonder which has an invalid texture due to unsupported format
@@ -1328,6 +1338,32 @@ namespace Ryujinx.Graphics.Metal
             // p=1 d=0 entry the census reports for the texture the composite samples. If
             // that clear is white, a flat frame is the clear showing through.
             HdrPassProbe.NoteSceneClear(dst, color);
+
+            // Mode 1 overrides every guest clear with magenta - it proved the path
+            // exists (810 magenta frames reached presentation) and broke everything else.
+            // Mode 2 only takes a census: every distinct (colour, size) pair once.
+            if (_canaryClear2 == 2)
+            {
+                string key = $"{dst.Width}x{dst.Height} ({color.Red:F3} {color.Green:F3} {color.Blue:F3} {color.Alpha:F3})";
+
+                lock (_clearCensus)
+                {
+                    if (_clearCensus.Add(key) && _clearCensus.Count <= 48)
+                    {
+                        Logger.Info?.PrintMsg(LogClass.Gpu, $"CLEAR {key}");
+                    }
+                }
+            }
+            else if (_canaryClear2 == 1)
+            {
+                colors = [1f, 0f, 1f, 1f];
+            }
+            else if (_canaryClear2 == 3 && color.Red >= 0.9f && color.Green >= 0.9f && color.Blue >= 0.9f)
+            {
+                // Only the white clears become magenta. If the white frames turn magenta,
+                // the screen's white IS one of these clears reaching presentation.
+                colors = [1f, 0f, 1f, 1f];
+            }
 
             _renderer.HelperShader.ClearColor(index, colors, componentMask, dst.Width, dst.Height, dst.Info.Format);
         }

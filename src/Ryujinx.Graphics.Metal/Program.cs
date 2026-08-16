@@ -332,6 +332,188 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _guardRcp =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_GUARD_RCP") != "0";
 
+        /// <summary>
+        /// The last discriminator. Three decode paths agree the blit's input is a picture
+        /// the moment its pass ends, yet the output is white - so what remains unwitnessed
+        /// is the invocation itself. Replacing the pass-through's output with a pattern
+        /// computed from the fragment position alone - independent of every texture, UV
+        /// and buffer - splits the world in two: if white frames vanish, the fault is the
+        /// read during the invocation; if white persists, the white never came through
+        /// this shader's output path at all. RYUJINX_METAL_BLIT_PATTERN=1.
+        /// </summary>
+        private static readonly bool _blitPattern =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_BLIT_PATTERN") == "1";
+
+        /// <summary>
+        /// The candidate fix the pattern discriminator earned. The white leaves through
+        /// this shader's output and vanishes when the output stops depending on sample();
+        /// three independent decode paths prove the texture holds the picture; so the
+        /// sampler-unit read inside the invocation is what returns white. read() is the
+        /// path the compute witness proved clean - route the blit family through it.
+        /// RYUJINX_METAL_BLIT_READ=1.
+        /// </summary>
+        private static readonly bool _blitRead =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_BLIT_READ") == "1";
+
+        /// <summary>
+        /// The final cut. Pattern output (no reads) kills the white; sample() and read()
+        /// through the argument table both keep it; the compute witness reading the same
+        /// texels through a DIRECTLY BOUND slot is always clean. The one difference left is
+        /// the argument table's GPU-side dereference. This patches the blit family to read
+        /// from direct slot 0 - which RYUJINX_METAL_SHADOW_BIND=1 already populates with
+        /// the draw's first fragment texture - bypassing the table on the data path itself.
+        /// RYUJINX_METAL_BLIT_DIRECT=1 (requires SHADOW_BIND=1).
+        /// </summary>
+        private static readonly bool _blitDirect =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_BLIT_DIRECT") == "1";
+
+        /// <summary>
+        /// The coordinate, on trial at last. Every read path returns white inside the
+        /// invocation while every fixed-coordinate reader is clean, and every verified
+        /// quantity is an INPUT to interpolation - the interpolated UV itself was never
+        /// witnessed. This replaces the blit's output with |uv - position/screen| * 30:
+        /// black when the UV is what a fullscreen blit implies, blinding when it is not.
+        /// The flat rate is the verdict - staying ~21% convicts the UV, collapsing to zero
+        /// acquits it. RYUJINX_METAL_UV_VIZ=1.
+        /// </summary>
+        private static readonly bool _uvViz =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_UV_VIZ") == "1";
+
+        private static string UvVizBlit(string code)
+        {
+            if (Regex.Matches(code, @"\.sample\(").Count != 1 ||
+                !code.Contains("1.0f / temp_0") ||
+                !code.Contains("out.color0.w"))
+            {
+                return code;
+            }
+
+            Match sampleLine = Regex.Match(code,
+                @"\w+ = textures\.\w+\.sample\(textures\.\w+, float2\((\w+), (\w+)\)\)\.xyzw;");
+
+            if (!sampleLine.Success)
+            {
+                return code;
+            }
+
+            string u = sampleLine.Groups[1].Value;
+            string v = sampleLine.Groups[2].Value;
+            int patched = 0;
+
+            string result = Regex.Replace(code,
+                @"out\.color0\.x = temp_(\d+);(\s*)out\.color0\.y = temp_(\d+);(\s*)out\.color0\.z = temp_(\d+);(\s*)out\.color0\.w = temp_(\d+);",
+                m =>
+                {
+                    patched++;
+                    return $"float uvErr = (abs({u} - in.position.x / 1920.0f) + abs({v} - in.position.y / 1080.0f)) * 30.0f;" + m.Groups[2].Value +
+                           "out.color0.x = clamp(uvErr, 0.0f, 1.0f);" + m.Groups[4].Value +
+                           "out.color0.y = clamp(uvErr, 0.0f, 1.0f);" + m.Groups[6].Value +
+                           "out.color0.z = clamp(uvErr, 0.0f, 1.0f);\n    out.color0.w = 1.0f;";
+                });
+
+            if (patched != 0)
+            {
+                Logger.Info?.PrintMsg(LogClass.Gpu, $"uv-viz: {patched} output block(s) now show |uv - expected|");
+            }
+
+            return result;
+        }
+
+        private static string DirectBlit(string code)
+        {
+            if (Regex.Matches(code, @"\.sample\(").Count != 1 ||
+                !code.Contains("1.0f / temp_0") ||
+                !code.Contains("out.color0.w"))
+            {
+                return code;
+            }
+
+            int patched = 0;
+
+            string result = Regex.Replace(code,
+                @"(\w+) = textures\.(\w+)\.sample\(textures\.(\w+), float2\((\w+), (\w+)\)\)\.xyzw;",
+                m =>
+                {
+                    patched++;
+                    return $"constexpr sampler directSampler(coord::normalized, filter::linear, address::clamp_to_edge);\n" +
+                           $"    {m.Groups[1].Value} = directTex0.sample(directSampler, float2({m.Groups[4].Value}, {m.Groups[5].Value})).xyzw;";
+                });
+
+            if (patched == 0)
+            {
+                return code;
+            }
+
+            result = Regex.Replace(result,
+                @"fragment FragmentOut fragmentMain\(FragmentIn in \[\[stage_in\]\], ",
+                "fragment FragmentOut fragmentMain(FragmentIn in [[stage_in]], \n                                  texture2d<float> directTex0 [[texture(0)]], ");
+
+            Logger.Info?.PrintMsg(LogClass.Gpu, $"blit-direct: {patched} sample(s) rerouted to direct slot 0");
+            return result;
+        }
+
+        private static string ReadBlit(string code)
+        {
+            if (Regex.Matches(code, @"\.sample\(").Count != 1 ||
+                !code.Contains("1.0f / temp_0") ||
+                !code.Contains("out.color0.w"))
+            {
+                return code;
+            }
+
+            int patched = 0;
+
+            string result = Regex.Replace(code,
+                @"(\w+) = textures\.(\w+)\.sample\(textures\.(\w+), float2\((\w+), (\w+)\)\)\.xyzw;",
+                m =>
+                {
+                    patched++;
+                    string t = "textures." + m.Groups[2].Value;
+                    string u = m.Groups[4].Value;
+                    string v = m.Groups[5].Value;
+                    return $"{m.Groups[1].Value} = {t}.read(uint2(clamp(float2({u}, {v}) * float2({t}.get_width(), {t}.get_height()), float2(0.0f), float2({t}.get_width() - 1, {t}.get_height() - 1))), 0).xyzw;";
+                });
+
+            if (patched != 0)
+            {
+                Logger.Info?.PrintMsg(LogClass.Gpu, $"blit-read: rerouted {patched} sample(s) to read()");
+            }
+
+            return result;
+        }
+
+        private static string PatternBlit(string code)
+        {
+            // Only the pass-through family: one sample, the FragCoord.w identity, four
+            // straight component writes.
+            if (Regex.Matches(code, @"\.sample\(").Count != 1 ||
+                !code.Contains("1.0f / temp_0") ||
+                !code.Contains("out.color0.w"))
+            {
+                return code;
+            }
+
+            int patched = 0;
+
+            string result = Regex.Replace(code,
+                @"out\.color0\.x = temp_(\d+);(\s*)out\.color0\.y = temp_(\d+);(\s*)out\.color0\.z = temp_(\d+);(\s*)out\.color0\.w = temp_(\d+);",
+                m =>
+                {
+                    patched++;
+                    return "out.color0.x = fract(in.position.x * 0.0125f);" + m.Groups[2].Value +
+                           "out.color0.y = fract(in.position.y * 0.0125f);" + m.Groups[4].Value +
+                           "out.color0.z = 0.25f;" + m.Groups[6].Value +
+                           "out.color0.w = 1.0f;";
+                });
+
+            if (patched != 0)
+            {
+                Logger.Info?.PrintMsg(LogClass.Gpu, $"blit-pattern: replaced {patched} output block(s)");
+            }
+
+            return result;
+        }
+
         private static string GuardReciprocal(string code)
         {
             // Matched independently rather than as adjacent lines: the emitted MSL carries a
@@ -568,6 +750,26 @@ namespace Ryujinx.Graphics.Metal
             if (_guardRcp)
             {
                 code = GuardReciprocal(code);
+            }
+
+            if (_blitPattern)
+            {
+                code = PatternBlit(code);
+            }
+
+            if (_blitRead)
+            {
+                code = ReadBlit(code);
+            }
+
+            if (_blitDirect)
+            {
+                code = DirectBlit(code);
+            }
+
+            if (_uvViz)
+            {
+                code = UvVizBlit(code);
             }
 
             if (_clampFetch)

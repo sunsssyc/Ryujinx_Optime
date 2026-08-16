@@ -524,6 +524,15 @@ namespace Ryujinx.Graphics.Metal
                     MTLRenderPassColorAttachmentDescriptor passAttachment = renderPassDescriptor.ColorAttachments.Object((ulong)i);
                     tex.PopulateRenderPassAttachment(passAttachment, _pipeline.Cbs);
                     passAttachment.LoadAction = _currentState.ClearLoadAction ? MTLLoadAction.Clear : MTLLoadAction.Load;
+
+                    // Canary: a clear colour the game never uses, set even when the load
+                    // action is Load - the spec says it is ignored then. If white frames
+                    // turn magenta, the driver executed this Load as a Clear, a mechanism
+                    // nothing has tested. RYUJINX_METAL_CANARY_CLEAR=1.
+                    if (_canaryClear)
+                    {
+                        passAttachment.ClearColor = new MTLClearColor { red = 1.0, green = 0.0, blue = 1.0, alpha = 1.0 };
+                    }
                     passAttachment.StoreAction = _passStoreUnknown ? MTLStoreAction.Unknown : MTLStoreAction.Store;
                     _passColorMask |= 1ul << i;
 
@@ -2118,6 +2127,9 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private static readonly bool _shadowBind =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_SHADOW_BIND") == "1";
+
+        private static readonly bool _canaryClear =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_CANARY_CLEAR") == "1";
 
         private static long _shadowBinds;
         private static long _shadowCollected;

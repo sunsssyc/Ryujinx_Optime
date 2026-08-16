@@ -74,6 +74,8 @@ namespace Ryujinx.Graphics.Metal
             public string Writers;
             public bool InputSampled;
             public bool AfterSampled;
+            public bool SamplerSampled;
+            public MTLPixelFormat InputFmt;
             public bool InputWrittenAfter;
             public int Residency;
             public int CompositeDraws;
@@ -500,9 +502,27 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _frameAfterSampled = true;
+
+            // The same texels again, through the sampler hardware. Back to back with the
+            // blit-engine copies above, same stream position: the two decoders agree unless
+            // the compression metadata is wrong.
+            if (SamplerPathProbe.Ready)
+            {
+                SamplerPathProbe.Read(cbs, stex, (ulong)sceneTex.Width, (ulong)sceneTex.Height,
+                    _buf, 3 * Slots * Pixels * BytesPerPixel + idx * Pixels * 16);
+                _frameSamplerSampled = true;
+                _frameInputFmt = sceneTex.MtlFormat;
+
+                SamplerPathProbe.ReadSampled(cbs, stex, _buf,
+                    3 * Slots * Pixels * BytesPerPixel + (Slots + idx) * Pixels * 16);
+            }
         }
 
         private static bool _frameAfterSampled;
+        private static bool _frameSamplerSampled;
+        private static MTLPixelFormat _frameInputFmt;
+        private static long _sampVsReadFlat, _sampSameFlat, _sampVsReadNormal, _sampSameNormal;
+        private static long _twoPathDisagreeFlat, _twoPathAgreeFlat, _twoPathDisagreeNormal, _twoPathAgreeNormal;
         private static long _witFlatWhiteAfter, _witFlatPictureAfter, _witNormalWhiteAfter, _witNormalPictureAfter;
         private static double _witFlatEqSum; private static long _witFlatEqN;
 
@@ -629,6 +649,8 @@ namespace Ryujinx.Graphics.Metal
         // Mean luma of the sampled grid, split by outcome. Without it a run whose
         // picture went black reports zero flat frames and reads as a fix - which is
         // exactly how a "this build might suppress it" result was once produced.
+        private static long _magentaFrames;
+
         private static double _lumaFlatSum, _lumaNormalSum;
 
         // Shape of the sampled grid on flat frames: the per-frame darkest and brightest
@@ -729,7 +751,8 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            _buf = device.NewBuffer(3 * Slots * Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
+            _buf = device.NewBuffer((ulong)(3 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16), MTLResourceOptions.ResourceStorageModeShared);
+            SamplerPathProbe.Initialize(device);
 
             Logger.Warning?.PrintMsg(LogClass.Gpu,
                 $"uploadcorr armed: ring={Slots} grid={GridSide}x{GridSide} satLuma={SaturatedLuma} need={SaturatedNeeded} minPixels={MinPixels}");
@@ -1061,6 +1084,8 @@ namespace Ryujinx.Graphics.Metal
                 mine.InSerial = _inputSerial;
                 mine.WrSerial = _writerSerial;
                 mine.AfterSampled = _frameAfterSampled;
+                mine.SamplerSampled = _frameSamplerSampled;
+                mine.InputFmt = _frameInputFmt;
                 mine.InGen = _inputGen;
                 mine.WrGen = _writerGen;
                 mine.RowW ??= new float[MaxCbSlots];
@@ -1127,6 +1152,7 @@ namespace Ryujinx.Graphics.Metal
             _writerSerial = -1;
             _inputGen = -1;
             _frameAfterSampled = false;
+            _frameSamplerSampled = false;
             _afterBlitArmed = false;
             _writerGen = -1;
             // _compositeInputRoot deliberately NOT reset: the root is stable across frames
@@ -1159,6 +1185,7 @@ namespace Ryujinx.Graphics.Metal
         {
             byte* p = (byte*)_buf.Contents + index * Pixels * BytesPerPixel;
             int saturated = 0;
+            int magenta = 0;
             double lumaSum = 0;
             double lumaSqSum = 0;
             double lumaMin = 255;
@@ -1186,9 +1213,60 @@ namespace Ryujinx.Graphics.Metal
                 {
                     saturated++;
                 }
+
+                // Canary detection: magenta has luma ~128 and would classify as normal, so
+                // it is counted directly. px[1] is green in this layout.
+                if (px[0] > 200 && px[2] > 200 && px[1] < 60)
+                {
+                    magenta++;
+                }
+            }
+
+            if (magenta >= SaturatedNeeded)
+            {
+                _magentaFrames++;
             }
 
             bool flat = saturated >= SaturatedNeeded;
+
+            if (slot.AfterSampled && slot.SamplerSampled)
+            {
+                uint* rawC = (uint*)((byte*)_buf.Contents + (2 * Slots + index) * Pixels * BytesPerPixel);
+                float* fD = (float*)((byte*)_buf.Contents + 3 * Slots * Pixels * BytesPerPixel + index * Pixels * 16);
+                int disagree = 0;
+
+                for (int i = 0; i < Pixels; i++)
+                {
+                    (float r, float g, float b) = SamplerPathProbe.DecodeRaw(rawC[i], slot.InputFmt);
+
+                    if (!float.IsNaN(r) &&
+                        (Math.Abs(r - fD[i * 4]) > 0.02f || Math.Abs(g - fD[i * 4 + 1]) > 0.02f || Math.Abs(b - fD[i * 4 + 2]) > 0.02f))
+                    {
+                        disagree++;
+                    }
+                }
+
+                // Third path: the sampler unit against the read path, float against float.
+                float* fS = (float*)((byte*)_buf.Contents + 3 * Slots * Pixels * BytesPerPixel + (Slots + index) * Pixels * 16);
+                int sampDisagree = 0;
+
+                for (int i = 0; i < Pixels; i++)
+                {
+                    if (Math.Abs(fS[i * 4] - fD[i * 4]) > 0.02f ||
+                        Math.Abs(fS[i * 4 + 1] - fD[i * 4 + 1]) > 0.02f ||
+                        Math.Abs(fS[i * 4 + 2] - fD[i * 4 + 2]) > 0.02f)
+                    {
+                        sampDisagree++;
+                    }
+                }
+
+                if (sampDisagree >= 3) { if (flat) { _sampVsReadFlat++; } else { _sampVsReadNormal++; } }
+                else { if (flat) { _sampSameFlat++; } else { _sampSameNormal++; } }
+
+                bool paths = disagree >= 3;
+                if (flat) { if (paths) { _twoPathDisagreeFlat++; } else { _twoPathAgreeFlat++; } }
+                else { if (paths) { _twoPathDisagreeNormal++; } else { _twoPathAgreeNormal++; } }
+            }
 
             if (slot.AfterSampled && slot.InputSampled)
             {
@@ -1648,6 +1726,9 @@ namespace Ryujinx.Graphics.Metal
                 sb.Append($"\n  blit w[slot{c}]: flat mean {(_wFlatN[c] > 0 ? _wFlatSum[c] / _wFlatN[c] : 0):G4} min {(_wFlatN[c] > 0 ? _wFlatMin[c] : 0):G4} n={_wFlatN[c]}  normal mean {(_wNormalN[c] > 0 ? _wNormalSum[c] / _wNormalN[c] : 0):G4} min {(_wNormalN[c] > 0 ? _wNormalMin[c] : 0):G4} n={_wNormalN[c]}");
             }
 
+            sb.Append($"\n  SAMPLER-UNIT vs read-path disagree: flat {_sampVsReadFlat}/{_sampVsReadFlat + _sampSameFlat}, normal {_sampVsReadNormal}/{_sampVsReadNormal + _sampSameNormal}");
+            sb.Append($"\n  TWO-PATH sampler-vs-blit disagree: flat {_twoPathDisagreeFlat}/{_twoPathDisagreeFlat + _twoPathAgreeFlat}, normal {_twoPathDisagreeNormal}/{_twoPathDisagreeNormal + _twoPathAgreeNormal}");
+            sb.Append($"\n  MAGENTA canary frames: {_magentaFrames}");
             sb.Append($"\n  blit PSO fresh-this-frame: flat {_freshFlat}/{_freshFlat + _staleFlat}, normal {_freshNormal}/{_freshNormal + _staleNormal}");
             sb.Append($"\n  WITNESS input-after-blit: flat uniform {_witFlatWhiteAfter} picture {_witFlatPictureAfter} (eq-with-present {(_witFlatEqN > 0 ? _witFlatEqSum / _witFlatEqN : 0):F1}/25), normal uniform {_witNormalWhiteAfter} picture {_witNormalPictureAfter}");
             sb.Append($"\n  handle gen swap between write and read: flat {_genSwapFlat}/{_genSwapFlat + _genSameFlat}, normal {_genSwapNormal}/{_genSwapNormal + _genSameNormal}");

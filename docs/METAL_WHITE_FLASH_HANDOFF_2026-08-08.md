@@ -5394,3 +5394,39 @@ Three consequences:
   sampler (tiny compute dispatch) and through the blit engine (CopyFromTexture) in the same
   stream, and compare by outcome - the two paths decode through metadata differently only
   when the metadata is wrong.
+
+---
+
+## The invocation matrix, 2026-08-16 night
+
+Parallel elimination inside the presenting draw itself, every arm engagement-proven:
+
+    output = f(position only)                   flat 0        (pattern arm)
+    output = f(interpolated UV only)            flat 0        (uv-error arm: |uv-expected|*30,
+                                                               never bright - the UV is SANE)
+    output = sample() via argument buffer       flat ~21%
+    output = read()   via argument buffer       flat ~21%     (RYUJINX_METAL_BLIT_READ)
+    output = sample() via DIRECT slot           flat ~21%     (RYUJINX_METAL_BLIT_DIRECT,
+                                                               picture correct so slot right)
+    same texels, compute read/sample/blit-copy  always the picture, adjacent to the pass
+
+**Any output carrying texture data is white on the same ~21% of frames; any output not
+carrying it never is; the coordinates are proven sane; the texture provably holds the
+picture through three decode paths the moment the pass ends.** The fragment invocation reads
+content that is not what the texture contains adjacent to its own pass - through both fetch
+instructions and both binding models, at correct coordinates.
+
+Clears are excluded as the content: a census found the only non-black guest clears are
+white UI-sized ones (16x16 .. 950x176), and turning exactly those magenta
+(RYUJINX_METAL_CANARY_CLEAR2=3) produced zero magenta frames with flat unchanged. Turning
+ALL clears magenta (mode 1) leaked 810 magenta frames and quadrupled flat while destroying
+the scene - evidence the clear path can reach presentation, but not that it is this white.
+
+What the matrix leaves standing is one sentence: **the blit's fragment stage reads the
+texture before its writer has finished writing it, while every out-of-pass witness runs
+after the writer completed** - the only reading in which all of the above and the
+synchronisation curve (45/24/17, never 0) coexist. The unmeasured specific: the writer of
+the blit's input and the blit itself sit in different command buffers, and the pairwise
+commit/execution order OF EXACTLY THAT PAIR was never split by outcome - the global
+out-of-order counter (0.54/frame, uncorrelated) does not resolve the one pair that matters.
+That is the next measurement, and the one this matrix earns.
