@@ -5494,3 +5494,41 @@ adjacent to the pass was reading it after something restored it, which would reo
 
 Either outcome moves the investigation; the capture has been available for both since
 yesterday morning.
+
+---
+
+## THE CAPTURE, READ (2026-08-16 20:58)
+
+`/tmp/ryujinx-flat-001.gputrace` (26 GB, full frame, next frame 25/25 luma 254). Replayed in
+Xcode; the replay itself reproduces the white - the fault is deterministic in the command
+stream, not a race.
+
+Command Buffer 221 is the presenting one: Render Encoder 0 (10 HUD draws) -> Render Encoder
+1 (visibility draw + "Present Color RCAS Sharp" draw 24683) -> Blit -> presentDrawable.
+
+**Two different textures.**
+
+- Render Encoder 0's colour attachment is `Texture 0x904c49900`, 1920x1080 RG11B10Float.
+  Its content in the debugger: **grey Great Sky Island fog + HUD + "GREAT SKY ISLAND"** -
+  the CORRECT frame.
+- The RCAS present draw's input (Indirect / argument-buffer resident) is
+  `Texture 0x9060fa300`. Its content in the debugger: **uniform white** (pixel 458,779 =
+  0.996/0.992/0.984) + HUD.
+- RCAS output = white + HUD. RCAS is faithful. Encoder 0 is faithful.
+
+**The presenting draw samples a different texture than the one the frame rendered into.**
+`0x904c49900` holds the picture; `0x9060fa300` holds white; the argument table handed to
+the present shader names the second. Every in-process witness in this ledger sampled the
+texture the WRITER targeted (correct, by construction) and every one came back "a picture"
+- because they were photographing `0x904c49900` while the shader was reading `0x9060fa300`.
+The identity checks compared Ryujinx's own bookkeeping against itself.
+
+This is why: sample/read via argument buffer white, direct-slot sample white (shadow bind
+put the SAME wrong texture on the slot), pattern output not white, UV sane, texture "has a
+picture" through three decoders (of the wrong texture), zero late writes (to the wrong
+texture), heap/usage/hazard irrelevant, synchronisation only partially effective (it
+changes WHICH stale texture gets picked), Vulkan immune (its descriptor path never picks it).
+
+**Root cause, host side: the present path binds a stale/wrong texture handle for the frame's
+final colour target on ~21% of frames.** Where 0x9060fa300 comes from and why it is white
+is the last step, and it is answerable in this same capture (its writer is in the trace).
