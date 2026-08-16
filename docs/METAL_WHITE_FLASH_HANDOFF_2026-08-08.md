@@ -5024,3 +5024,11 @@ path that does not depend on the sampler's fence signalling in step with the fra
 longer ring, a timeout that classifies on the CPU after a fixed delay, or sampling through a
 separate command buffer whose fence the intervention does not touch. Until then any fenced arm
 will report a frozen 2,999 and look like a short run.
+
+The diagnosis narrows to one line. Classification happens only at
+`if (slot.Valid && slot.Fence.IsSignaled())`, and the drop path requires `mine.Valid` to be
+true when a slot is reused. `dropped=0` says slots are not valid at reuse, and the classified
+count is frozen - which together point at the sampler's own `FenceHolder` no longer reporting
+signalled once `RYUJINX_METAL_RAW_FENCE` is on. Confirming that needs a counter on the
+`IsSignaled()` branch: how many times it was consulted against how many times it returned
+true. That is the first thing to do next session, before any fenced arm is run again.
