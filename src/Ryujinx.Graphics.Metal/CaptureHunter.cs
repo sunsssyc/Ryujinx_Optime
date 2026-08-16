@@ -125,7 +125,7 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         public static void OnSceneSamplingPassBegin(ulong drawCount)
         {
-            if (!Enabled || _done || !_armedThisFrame || _capturing)
+            if (!Enabled || _done || !_armedThisFrame || _capturing || _drawsThisFrame < 1200)
             {
                 return;
             }
@@ -173,6 +173,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _capturing = true;
+            _presentSinceOpen = false;
             _closePending = true;
             _passEnded = false;
             _passesWithDraws = 0;
@@ -189,6 +190,7 @@ namespace Ryujinx.Graphics.Metal
 
         private static bool _passEnded;
         private static ulong _drawCountAtStart;
+        private static ulong _capturedDraws;
 
         /// <summary>
         /// Called when a render pass ends, with the running draw count. Closing on the
@@ -197,9 +199,17 @@ namespace Ryujinx.Graphics.Metal
         /// actually being encoded, something else ends a pass, and the window shut before
         /// any drawing reached it. Only a pass that carried draws counts.
         /// </summary>
+        private static ulong _lastDrawCount;
+        private static bool _presentSinceOpen;
+
         public static void OnPassEnd(ulong drawCount)
         {
-            if (_capturing && _closePending && drawCount > _drawCountAtStart && ++_passesWithDraws >= _passesToKeep)
+            _lastDrawCount = drawCount;
+            // Close only when the frame that opened the capture has presented, so the
+            // trace holds the whole frame including the presenting blit at its very end -
+            // twelve passes from the first scene sample was a slice from the middle of the
+            // frame and never contained it (19 draws of 2,500 in the kept trace).
+            if (_capturing && _closePending && _presentSinceOpen && drawCount > _drawCountAtStart)
             {
                 _passEnded = true;
             }
@@ -226,6 +236,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            _capturedDraws = _lastDrawCount - _drawCountAtStart;
             MTLCaptureManager.SharedCaptureManager().StopCapture();
             _closePending = false;
             _passEnded = false;
@@ -329,6 +340,21 @@ namespace Ryujinx.Graphics.Metal
         /// frame that was just captured was flat, keeps the trace if it was, and arms the
         /// next attempt if it was not.
         /// </summary>
+        private static ulong _lastDrawTotal;
+        private static ulong _drawsThisFrame;
+
+        /// <summary>
+        /// Draws issued in the frame that just ended. Two KEPT captures were menus and a
+        /// loading screen - the flat criterion cannot tell a white loading fade from the
+        /// fault, but the draw count can: gameplay issues ~2,500 draws a frame, loading
+        /// and menus a few dozen. Fed from the pipeline at present.
+        /// </summary>
+        public static void NoteFrameDraws(ulong cumulativeDraws)
+        {
+            _drawsThisFrame = cumulativeDraws - _lastDrawTotal;
+            _lastDrawTotal = cumulativeDraws;
+        }
+
         public static unsafe void Decide()
         {
             if (!Enabled || _done)
@@ -337,6 +363,14 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _frame++;
+
+            if (_capturing)
+            {
+                // The frame that opened the capture has now presented: the blit is in the
+                // trace. Close at this present rather than waiting for another pass end.
+                _presentSinceOpen = true;
+                _passEnded = true;
+            }
 
             // The verdict on a capture is taken one frame late, deliberately. The
             // presented surface was last a colour attachment one frame before it is
@@ -434,7 +468,19 @@ namespace Ryujinx.Graphics.Metal
 
             meanLuma = lumaSum / Pixels;
 
-            return saturated >= SaturatedNeeded;
+            // A KEPT capture on Aug 15 turned out to be a 28-draw black loading frame with a
+            // bright HUD: six saturated samples of twenty-five is not a white frame. The
+            // real fault is a uniform fill - the correlator measured min 246+ / sd ~2 on
+            // every one - so demand the grid be white almost everywhere, and demand the
+            // captured frame itself was full gameplay (draw count), which the black frame
+            // was not.
+            // The draw-count guard killed two genuine 25/25 luma-254 verdicts on its first
+            // run - the count is not plumbed reliably through this path. 22/25 saturated at
+            // mean 235+ already excludes the HUD-over-black false positive on its own.
+            // The draw gate belongs at ARMING, not here: by verdict time _drawsThisFrame
+            // describes a later frame, and it discarded twenty genuine 25/25 luma-254
+            // verdicts in one run. Arming already refuses non-gameplay frames.
+            return saturated >= 22 && meanLuma >= 235;
         }
 
         private static void Discard()

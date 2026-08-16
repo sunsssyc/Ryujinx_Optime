@@ -1095,6 +1095,7 @@ namespace Ryujinx.Graphics.Metal
                 decideFence.Put();
             }
 
+            CaptureHunter.NoteFrameDraws(DrawCount);
             CaptureHunter.Decide();
 
             // A scoped capture has to be told where a frame begins and ends, and nothing
