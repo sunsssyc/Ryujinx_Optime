@@ -990,7 +990,7 @@ namespace Ryujinx.Graphics.Metal
             _frameBinding = default;
             _frameBindingLast = default;
             _frameSceneTex = null;
-            _compositeInputRoot = IntPtr.Zero;
+            // kept across frames; see the note above - clearing here starved the serial probe
             _compositeSeq = -1;
             _frameSeq = 0;
             _frameInputWrittenAfter = false;
@@ -1005,6 +1005,8 @@ namespace Ryujinx.Graphics.Metal
             _frameImgWriters.Clear();
             _inputSerial = -1;
             _writerSerial = -1;
+            // _compositeInputRoot deliberately NOT reset: the root is stable across frames
+            // and resetting it at present starved the writer-serial trigger to 42 of 7,799.
             Array.Clear(_frameRowSeen);
             _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;

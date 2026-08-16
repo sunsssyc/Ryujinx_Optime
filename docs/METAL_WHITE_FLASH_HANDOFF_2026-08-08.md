@@ -5286,3 +5286,19 @@ between the write and the read, and the blit samples an object nobody painted: t
 contents of a bright intermediate, uniform, ~250. That mechanism is the only one proposed in
 two days that survives every measurement in this ledger, including the stain arm (a swapped
 handle is not a fresh creation) - and it is Ryujinx-side and fixable.
+
+**Full power, and the probe measures the wrong identity.** With the root persisted the
+serials land on 11,385 of 11,399 frames - and mismatch on *every* frame of *both* outcomes
+(flat 0/2,425 match, normal 0/8,960 match). A uniform mismatch that does not separate
+outcomes is the steady state, not the fault: the writer binds the storage's wrapper object
+while the blit samples a view's wrapper object - different C# objects, different serials,
+same underlying memory, every frame. Wrapper serials cannot see a handle swap.
+
+**The instrument that would be decisive:** a generation counter on the *canonical storage*,
+bumped in `TextureBase.SetHandle`/`ReplaceHandle` (the exact operations a swap goes
+through), recorded at the writer's attachment bind and at the blit's sample bind *within the
+same frame*, compared per outcome. Same generation on both binds on normal frames and a
+bumped generation between them on white frames would close the case: the cache replaces the
+underlying MTLTexture between the write and the read, and the blit samples memory nobody
+painted this frame. That is one field, two recording sites, and one gated arm - and it is
+the sharpest still-untested mechanism in this ledger.
