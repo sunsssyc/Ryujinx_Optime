@@ -215,7 +215,15 @@ namespace Ryujinx.Graphics.Gpu
                 // The Metal capture shows present sampling a texture object different from
                 // the frame's final render target; the correlator shows present's source is
                 // a NEW host texture every frame. Log whether this lookup created or reused.
-                if (_presentTrace && ++_presentTraceCount <= 40)
+                // Why does this lookup return a texture that no draw ever wrote? For each
+                // same-range overlap, report its match quality against pt.Info and how it
+                // differs - the frame's RGBA8 render target must be among them.
+                if (_presentTrace && _presentTraceCount > 3000 && _presentTraceCount < 3006)
+                {
+                    pt.Cache.DumpOverlapMatches(pt.Range, pt.Info, texture);
+                }
+
+                if (_presentTrace && ++_presentTraceCount > 3000 && _presentTraceCount <= 3006)
                 {
                     Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu,
                         $"present lookup: tex#{texture.GetHashCode():X} host#{(texture.HostTexture?.GetHashCode() ?? 0):X} " +

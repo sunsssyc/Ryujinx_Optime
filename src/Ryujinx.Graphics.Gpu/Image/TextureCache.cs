@@ -293,6 +293,35 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <param name="preferScaling">Indicates if the texture should be scaled from the start</param>
         /// <param name="sizeHint">A hint indicating the minimum used size for the texture</param>
         /// <returns>The texture</returns>
+        /// <summary>Diagnostic: for each texture overlapping the range, its match quality
+        /// against the presentation info and the fields that differ.</summary>
+        public void DumpOverlapMatches(MultiRange range, TextureInfo info, Texture chosen)
+        {
+            Texture[] overlaps = new Texture[64];
+            int count = _textures.FindOverlaps(range, ref overlaps);
+            for (int i = 0; i < count; i++)
+            {
+                Texture o = overlaps[i];
+                if (o == null) { continue; }
+                TextureMatchQuality q = o.IsExactMatch(info, TextureSearchFlags.WithUpscale);
+                TextureInfo oi = o.Info;
+                string diff = "";
+                if (oi.Width != info.Width || oi.Height != info.Height) diff += $" size {oi.Width}x{oi.Height}vs{info.Width}x{info.Height}";
+                if (oi.FormatInfo.Format != info.FormatInfo.Format) diff += $" fmt {oi.FormatInfo.Format}vs{info.FormatInfo.Format}";
+                if (oi.Target != info.Target) diff += $" target {oi.Target}vs{info.Target}";
+                if (oi.Levels != info.Levels) diff += $" levels {oi.Levels}vs{info.Levels}";
+                if (oi.Stride != info.Stride) diff += $" stride {oi.Stride}vs{info.Stride}";
+                if (oi.IsLinear != info.IsLinear) diff += $" linear {oi.IsLinear}vs{info.IsLinear}";
+                if (oi.GobBlocksInY != info.GobBlocksInY) diff += $" gobY {oi.GobBlocksInY}vs{info.GobBlocksInY}";
+                if (oi.SwizzleR != info.SwizzleR || oi.SwizzleG != info.SwizzleG || oi.SwizzleB != info.SwizzleB || oi.SwizzleA != info.SwizzleA) diff += " swizzle";
+                if (oi.DepthOrLayers != info.DepthOrLayers) diff += $" layers {oi.DepthOrLayers}vs{info.DepthOrLayers}";
+                if (oi.SamplesInX != info.SamplesInX || oi.SamplesInY != info.SamplesInY) diff += " samples";
+                bool rangeEq = o.Range.Equals(range);
+                Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu,
+                    $"  overlap#{i} tex#{o.GetHashCode():X}{(o == chosen ? " <CHOSEN>" : "")} match={q} rangeEq={rangeEq} modSeq={o.Group.ModifiedSequence} scale={o.ScaleFactor}{diff}");
+            }
+        }
+
         /// <summary>Diagnostic: how many cached textures overlap this range.</summary>
         public int CountForRange(MultiRange range)
         {

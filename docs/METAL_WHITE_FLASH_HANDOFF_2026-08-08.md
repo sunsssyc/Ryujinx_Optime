@@ -5587,3 +5587,34 @@ synchronisation only shifts the rate (it changes when A's flush lands relative t
 and Vulkan never flashes - its cache lookup for the present resolves to A itself, Metal's
 resolves to a second entry B. The remaining question is only WHY the Metal-side lookup misses
 A (Info mismatch on the presentation descriptor is the obvious candidate).
+
+---
+
+## ROOT CAUSE (2026-08-17 00:xx)
+
+`DumpOverlapMatches` at every present, in gameplay:
+
+    overlap#0  tex#2C1173F           match=NoMatch  rangeEq=True  fmt R8G8B8A8Srgb vs R8G8B8A8Unorm
+    overlap#1  tex#28C4BB9 <CHOSEN>  match=Perfect  rangeEq=True  R8G8B8A8Unorm
+
+**The game renders its final frame into an R8G8B8A8Srgb render target. Presentation asks
+the texture cache for an R8G8B8A8Unorm texture at the same guest range. On this backend the
+two do not match, so the cache keeps a SECOND host texture (Unorm) for present that no draw
+ever writes; its content comes only from the GPU layer's guest-memory upload, which is only
+current once the sRGB render target has been flushed back to guest memory. On frames where
+present runs before that flush lands, the Unorm shadow uploads the previous contents - white.**
+
+Everything measured over three days is consistent with this and only this:
+- present's source is a distinct texture with no Metal-side writer (census: none);
+- it is a "picture" on good frames (flush landed) and uniform on white frames (stale);
+- more synchronisation reduces the rate (changes when the flush lands relative to present)
+  but never reaches zero (present timing is not tied to the flush);
+- the argument-buffer allocation strategy moved it by 11 points (allocation churn changes
+  the flush schedule);
+- Vulkan never flashes: its capabilities treat Srgb/Unorm as view-compatible, so present
+  gets a Unorm VIEW of the very render target and always sees the current frame;
+- the GPU capture's two textures (0x904c49900 correct, 0x9060fa300 white) are A and B.
+
+Fix: make Srgb<->Unorm view-compatible on the Metal backend so present aliases the render
+target instead of shadowing it (Metal supports this natively via PixelFormatView / sRGB view
+pairs), or make the presentation lookup format-agnostic between the sRGB and linear variant.
