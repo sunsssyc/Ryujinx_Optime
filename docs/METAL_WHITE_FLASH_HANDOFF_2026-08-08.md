@@ -5055,3 +5055,25 @@ So fences are on the same curve as splitting, not a way off it. Matching MoltenV
 between seventeen percent and MoltenVK's zero is not made of synchronisation at all. Something
 else separates them, and every measured property of the textures, descriptors, memory,
 constants, indices, coordinates and command stream is now equal between the two.
+
+### The premise re-checked: Vulkan is still zero
+
+The whole comparison rests on "Vulkan does not flash", and that came from a 120-frame sample
+taken before any of today's discipline existed - before the admissibility gate, before the
+drive-in verified it had reached gameplay, in the same period when five arms turned out to be
+measuring menus. It was worth re-checking.
+
+    Vulkan, re-measured   white 0 / 102 compositor samples = 0.0%
+
+Zero again, with the window identified and the emulator presenting (the Metal-level probe
+counted 1,560 frames during the run). At 102 samples a true rate of 3% would have shown up
+about as often as not, so this bounds Vulkan below roughly 3% against Metal's 17-24%. The
+asymmetry is real and it is large.
+
+One weakness to record rather than gloss: the drive-in's gameplay check is weaker on Vulkan
+than on Metal. On Metal it verifies ~2,500 draws per frame against a menu's ~340; on Vulkan
+that line does not exist and it falls back to "the probe saw frames present", which proves
+rendering but not that the save was loaded. A Vulkan arm sitting on a menu would also report
+zero white. Closing that needs a Vulkan-side gameplay signal - the simplest being the same
+compositor sampler reporting a mean luma near the repro scene's 138, which it already computes
+per shot and currently discards.
