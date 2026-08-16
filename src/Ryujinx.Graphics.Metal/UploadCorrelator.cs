@@ -1,4 +1,5 @@
 using Ryujinx.Common.Logging;
+using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using SharpMetal.Metal;
 using System;
@@ -99,6 +100,13 @@ namespace Ryujinx.Graphics.Metal
             public bool[] RowSeen;
             public int OutOfOrder;
             public IntPtr ArgPtr;
+            public bool PresentMatchesLastRt;
+            public bool PresentMatchKnown;
+            public bool BlitPrevKnown;
+            public string Triple;
+            public bool SrcWasRecentDst;
+            public bool RtSampled;
+            public bool BlitPrevMatch;
             public ulong[] ArgExpected;
             public int ArgCount;
             public string LateWriter;
@@ -132,6 +140,50 @@ namespace Ryujinx.Graphics.Metal
         // and the question is what makes THIS flat on a fifth of frames. Identity was
         // already shown identical across outcomes, so only contents can differ.
         private static Texture _frameSceneTex;
+
+        // The capture showed the present draw sampling a texture object DIFFERENT from the
+        // one the frame's last full-resolution pass rendered into (0x9060fa300 white vs
+        // 0x904c49900 correct). This records the last 1920x1080 colour attachment root
+        // each frame and compares it, at present, with the object present was handed.
+        private static IntPtr _frameLastFullResRt;
+        private static Texture _frameLastFullResTex;
+        private static long _rtPicSrcWhiteFlat, _rtPicSrcWhiteNormal, _bothPicFlat, _bothPicNormal, _bothWhiteFlat, _bothWhiteNormal, _rtWhiteSrcPicFlat, _rtWhiteSrcPicNormal;
+        private static long _presentMatchFlat, _presentMatchNormal, _presentMismatchFlat, _presentMismatchNormal;
+
+        private static long _presentSrcSerial, _prevPresentSrcSerial;
+        private static IntPtr _presentSrcRoot, _presentDstRoot;
+        private static int _presentSrcW, _presentSrcH;
+        private static readonly Dictionary<string, (long Flat, long Normal)> _tripleStats = new();
+
+        private static readonly Queue<IntPtr> _recentDstRoots = new();
+        private static long _srcWasRecentDstFlat, _srcWasRecentDstNormal, _srcNotDstFlat, _srcNotDstNormal;
+        private static bool _frameSrcWasRecentDst;
+
+        public static void NotePresentTriple(IntPtr srcRoot, IntPtr dstRoot, int w, int h, long srcSerial)
+        {
+            if (!Enabled) { return; }
+
+            // Is what present READS one of the drawables present recently WROTE? The
+            // writer census on src reports only the present program itself as a writer,
+            // which is impossible unless src is a former dst.
+            _frameSrcWasRecentDst = _recentDstRoots.Contains(srcRoot);
+            _recentDstRoots.Enqueue(dstRoot);
+            while (_recentDstRoots.Count > 8) { _recentDstRoots.Dequeue(); }
+            _prevPresentSrcSerial = _presentSrcSerial;
+            _presentSrcSerial = srcSerial;
+            _presentSrcRoot = srcRoot;
+            _presentDstRoot = dstRoot;
+            _presentSrcW = w; _presentSrcH = h;
+        }
+
+        public static void NoteFullResAttachment(Texture t)
+        {
+            if (Enabled && t != null && t.Width >= 1900 && t.Height >= 1000 && !t.Info.Format.IsDepthOrStencil)
+            {
+                _frameLastFullResRt = t.CanonicalPtr;
+                _frameLastFullResTex = t;
+            }
+        }
 
         // Does anything write the composite's input AFTER the composite has read it?
         // Every "the input is not flat" result here sampled that texture at present, which
@@ -762,7 +814,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            _buf = device.NewBuffer((ulong)(3 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16), MTLResourceOptions.ResourceStorageModeShared);
+            _buf = device.NewBuffer((ulong)(4 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16), MTLResourceOptions.ResourceStorageModeShared);
             SamplerPathProbe.Initialize(device);
 
             Logger.Warning?.PrintMsg(LogClass.Gpu,
@@ -915,6 +967,11 @@ namespace Ryujinx.Graphics.Metal
             _frameBlitCb = cbIndex;
             _frameBlitRent = rentSeq;
 
+            // The capture's shape: Render Encoder 0 (HUD, attachment X) then the RCAS blit
+            // reading Y, and X != Y on the white frame. _lastAttachmentRoot is X here.
+            _frameBlitReadsPrevAttachment = inputRoot == _lastAttachmentRoot;
+            _frameBlitPairKnown = _lastAttachmentRoot != IntPtr.Zero;
+
             if (_lastWriterByRoot.TryGetValue(inputRoot, out (int Cb, long Rent) w))
             {
                 _frameWriterCb = w.Cb;
@@ -927,8 +984,13 @@ namespace Ryujinx.Graphics.Metal
         private static long _pairInvertedFlat, _pairInvertedNormal;
         private static long _pairUncommittedFlat, _pairUncommittedNormal;
 
+        private static IntPtr _lastAttachmentRoot;
+        private static bool _frameBlitReadsPrevAttachment, _frameBlitPairKnown;
+        private static long _blitPrevMatchFlat, _blitPrevMatchNormal, _blitPrevMismatchFlat, _blitPrevMismatchNormal;
+
         public static void NoteAttachmentDraw(IntPtr root, string program)
         {
+            _lastAttachmentRoot = root;
             NoteWriteOrdering(root, program);
 
             if (!Enabled || root == IntPtr.Zero)
@@ -964,6 +1026,10 @@ namespace Ryujinx.Graphics.Metal
 
         public static void NoteUpload(Texture target)
         {
+            // Copies and uploads are writers too; without them the present source's
+            // writer list held only draws, and the capture shows the frame's picture and
+            // the presented white living in two different textures.
+            if (Enabled && target != null) { NoteAttachmentDraw(target.CanonicalPtr, "upload"); }
             NoteWriteOrdering(target.CanonicalPtr, "upload");
 
             Note(target, isCopy: false);
@@ -971,6 +1037,10 @@ namespace Ryujinx.Graphics.Metal
 
         public static void NoteCopyIn(Texture target)
         {
+            // Copies and uploads are writers too; without them the present source's
+            // writer list held only draws, and the capture shows the frame's picture and
+            // the presented white living in two different textures.
+            if (Enabled && target != null) { NoteAttachmentDraw(target.CanonicalPtr, "copy"); }
             NoteWriteOrdering(target.CanonicalPtr, "copy");
 
             Note(target, isCopy: true);
@@ -1160,6 +1230,12 @@ namespace Ryujinx.Graphics.Metal
                 Array.Copy(_frameRowSeen, mine.RowSeen, MaxCbSlots);
                 mine.OutOfOrder = _frameOutOfOrder;
                 mine.ArgPtr = _frameArgPtr;
+                mine.PresentMatchKnown = _frameLastFullResRt != IntPtr.Zero;
+                mine.PresentMatchesLastRt = _frameLastFullResRt == src.CanonicalPtr;
+                mine.BlitPrevKnown = _frameBlitPairKnown;
+                mine.SrcWasRecentDst = _frameSrcWasRecentDst;
+                mine.Triple = $"src{(_presentSrcRoot == _frameLastFullResRt ? "==" : "!=")}lastRT src{(_presentSrcRoot == _presentDstRoot ? "==" : "!=")}dst {_presentSrcW}x{_presentSrcH} srcSerial{(_presentSrcSerial == _prevPresentSrcSerial ? "SAME" : "new")}";
+                mine.BlitPrevMatch = _frameBlitReadsPrevAttachment;
                 mine.ArgCount = _frameArgCount;
 
                 if (_frameArgCount > 0)
@@ -1172,6 +1248,27 @@ namespace Ryujinx.Graphics.Metal
                 mine.CbSeen ??= new bool[MaxCbSlots];
                 Array.Copy(_frameCb, mine.Cb, _frameCb.Length);
                 Array.Copy(_frameCbSeen, mine.CbSeen, _frameCbSeen.Length);
+
+                // Region E: the same 25-point grid from the frame's last full-resolution
+                // colour render target - the texture the capture showed holding the
+                // correct picture while present read white from another.
+                mine.RtSampled = false;
+                Texture rtTex = _frameLastFullResTex;
+                if (rtTex != null && rtTex.CanonicalPtr != src.CanonicalPtr)
+                {
+                    MTLTexture rt = rtTex.GetHandle(cbs);
+                    if (rt.NativePtr != IntPtr.Zero)
+                    {
+                        // Sample through a BGRA-normalising path? RG11B10 raw bytes are not
+                        // BGRA; decode with the sampler probe instead: use the compute read.
+                        if (SamplerPathProbe.Ready)
+                        {
+                            SamplerPathProbe.Read(cbs, rt, (ulong)rtTex.Width, (ulong)rtTex.Height, _buf,
+                                3 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16 - Slots * Pixels * 16 + idx * Pixels * 16);
+                            mine.RtSampled = true;
+                        }
+                    }
+                }
 
                 mine.Fence = cbs.GetFence();
                 mine.Fence.Get();
@@ -1231,6 +1328,8 @@ namespace Ryujinx.Graphics.Metal
             Array.Clear(_frameRowSeen);
             _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;
+            _frameLastFullResRt = IntPtr.Zero;
+            _frameBlitPairKnown = false;
             _frameArgCount = 0;
             _frameLateWriter = null;
             Array.Clear(_frameCbSeen);
@@ -1404,6 +1503,47 @@ namespace Ryujinx.Graphics.Metal
             double mean = lumaSum / Pixels;
             double variance = (lumaSqSum / Pixels) - (mean * mean);
             double sd = variance > 0 ? Math.Sqrt(variance) : 0;
+
+            if (slot.RtSampled)
+            {
+                float* fE = (float*)((byte*)_buf.Contents + 3 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16 - Slots * Pixels * 16 + index * Pixels * 16);
+                double rtLumaSum = 0; int rtSat = 0;
+                for (int i = 0; i < Pixels; i++)
+                {
+                    // RG11B10 decoded floats are linear HDR; treat > 0.9 in all channels as white
+                    float r = fE[i * 4], g = fE[i * 4 + 1], b = fE[i * 4 + 2];
+                    double lum = (r + g + g + b) * 0.25;
+                    rtLumaSum += lum;
+                    if (r > 0.9f && g > 0.9f && b > 0.9f) { rtSat++; }
+                }
+                bool rtWhite = rtSat >= SaturatedNeeded;
+                bool srcWhite = flat;
+                if (srcWhite && !rtWhite) { if (flat) { _rtPicSrcWhiteFlat++; } else { _rtPicSrcWhiteNormal++; } }
+                else if (!srcWhite && !rtWhite) { if (flat) { _bothPicFlat++; } else { _bothPicNormal++; } }
+                else if (srcWhite && rtWhite) { if (flat) { _bothWhiteFlat++; } else { _bothWhiteNormal++; } }
+                else { if (flat) { _rtWhiteSrcPicFlat++; } else { _rtWhiteSrcPicNormal++; } }
+            }
+
+            if (slot.SrcWasRecentDst) { if (flat) { _srcWasRecentDstFlat++; } else { _srcWasRecentDstNormal++; } }
+            else { if (flat) { _srcNotDstFlat++; } else { _srcNotDstNormal++; } }
+
+            if (slot.Triple != null && _tripleStats.Count < 32)
+            {
+                (long tf, long tn) = _tripleStats.TryGetValue(slot.Triple, out (long Flat, long Normal) tv) ? (tv.Flat, tv.Normal) : (0L, 0L);
+                _tripleStats[slot.Triple] = flat ? (tf + 1, tn) : (tf, tn + 1);
+            }
+
+            if (slot.BlitPrevKnown)
+            {
+                if (slot.BlitPrevMatch) { if (flat) { _blitPrevMatchFlat++; } else { _blitPrevMatchNormal++; } }
+                else { if (flat) { _blitPrevMismatchFlat++; } else { _blitPrevMismatchNormal++; } }
+            }
+
+            if (slot.PresentMatchKnown)
+            {
+                if (slot.PresentMatchesLastRt) { if (flat) { _presentMatchFlat++; } else { _presentMatchNormal++; } }
+                else { if (flat) { _presentMismatchFlat++; } else { _presentMismatchNormal++; } }
+            }
 
             if (slot.ArgCount > 0 && slot.ArgPtr != IntPtr.Zero)
             {
@@ -1865,6 +2005,14 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | blit vertex spread (distinct of 4): flat {(_flatVertN > 0 ? _flatVertSum / _flatVertN : 0):F2} over {_flatVertN}, normal {(_normalVertN > 0 ? _normalVertSum / _normalVertN : 0):F2} over {_normalVertN}");
             sb.Append($" | composite draws/frame: flat {(_flatDrawN > 0 ? _flatDrawSum / _flatDrawN : 0):F2}, normal {(_normalDrawN > 0 ? _normalDrawSum / _normalDrawN : 0):F2}");
             sb.Append($" | sampler fence: asked {_fenceAsked}, signalled {_fenceReady}");
+            sb.Append($"\n  RT-vs-SRC at present: [RT picture, SRC white] flat {_rtPicSrcWhiteFlat} normal {_rtPicSrcWhiteNormal} | [both picture] flat {_bothPicFlat} normal {_bothPicNormal} | [both white] flat {_bothWhiteFlat} normal {_bothWhiteNormal} | [RT white, SRC pic] flat {_rtWhiteSrcPicFlat} normal {_rtWhiteSrcPicNormal}");
+            sb.Append($"\n  PRESENT src is a recent drawable: yes flat {_srcWasRecentDstFlat} normal {_srcWasRecentDstNormal} | no flat {_srcNotDstFlat} normal {_srcNotDstNormal}");
+            foreach (KeyValuePair<string, (long Flat, long Normal)> t3 in _tripleStats)
+            {
+                sb.Append($"\n  PRESENT {t3.Key}: flat {t3.Value.Flat}, normal {t3.Value.Normal}");
+            }
+            sb.Append($" | BLIT reads the pass-before-it's attachment: match flat {_blitPrevMatchFlat} normal {_blitPrevMatchNormal} | MISMATCH flat {_blitPrevMismatchFlat} normal {_blitPrevMismatchNormal}");
+            sb.Append($" | PRESENT src == last full-res RT: match flat {_presentMatchFlat} normal {_presentMatchNormal} | MISMATCH flat {_presentMismatchFlat} normal {_presentMismatchNormal}");
             sb.Append($" | argbuf overwritten by frame end: flat {_flatArgMismatch}/{_flatArgChecked}, normal {_normalArgMismatch}/{_normalArgChecked}");
             sb.Append($" | out-of-order commits/frame: flat {(_flatOooN > 0 ? _flatOooSum / _flatOooN : 0):F2}, normal {(_normalOooN > 0 ? _normalOooSum / _normalOooN : 0):F2}");
             sb.Append($" | composite residency decls: flat {(_flatResidencyN > 0 ? _flatResidencySum / _flatResidencyN : 0):F2} over {_flatResidencyN}, normal {(_normalResidencyN > 0 ? _normalResidencySum / _normalResidencyN : 0):F2} over {_normalResidencyN}");

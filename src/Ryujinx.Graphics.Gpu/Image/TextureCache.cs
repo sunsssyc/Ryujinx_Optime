@@ -293,6 +293,16 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <param name="preferScaling">Indicates if the texture should be scaled from the start</param>
         /// <param name="sizeHint">A hint indicating the minimum used size for the texture</param>
         /// <returns>The texture</returns>
+        /// <summary>Diagnostic: how many cached textures overlap this range.</summary>
+        public int CountForRange(MultiRange range)
+        {
+            int n = 0;
+            Texture[] overlaps = new Texture[64];
+            int count = _textures.FindOverlaps(range, ref overlaps);
+            for (int i = 0; i < count; i++) { if (overlaps[i] != null) { n++; } }
+            return n;
+        }
+
         public Texture FindOrCreateTexture(
             MemoryManager memoryManager,
             TwodTexture copyTexture,

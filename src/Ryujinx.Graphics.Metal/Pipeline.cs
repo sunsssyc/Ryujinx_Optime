@@ -274,6 +274,7 @@ namespace Ryujinx.Graphics.Metal
 
             if (_encoderStateManager.RenderTargets[0] is Texture target)
             {
+                UploadCorrelator.NoteFullResAttachment(target);
                 UploadCorrelator.NoteAttachmentDraw(
                     target.CanonicalPtr,
                     _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel);
@@ -1017,6 +1018,10 @@ namespace Ryujinx.Graphics.Metal
             }
             else if (useFsrSharpener)
             {
+                // Three identities at the moment of present, for the correlator: what
+                // the present shader READS (src), what it WRITES (dst, the drawable), and
+                // what the frame's last full-resolution pass rendered into.
+                UploadCorrelator.NotePresentTriple(src.CanonicalPtr, dst.CanonicalPtr, src.Width, src.Height, src.Serial);
                 _renderer.HelperShader.PresentColor(Cbs, src, dst, srcRegion, dstRegion, scalingFilterLevel / 100f, true);
             }
             else

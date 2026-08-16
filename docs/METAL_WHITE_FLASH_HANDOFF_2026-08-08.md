@@ -5532,3 +5532,22 @@ changes WHICH stale texture gets picked), Vulkan immune (its descriptor path nev
 **Root cause, host side: the present path binds a stale/wrong texture handle for the frame's
 final colour target on ~21% of frames.** Where 0x9060fa300 comes from and why it is white
 is the last step, and it is answerable in this same capture (its writer is in the trace).
+
+### In-process reproduction of the capture: the last RT is ALSO white
+
+Gated arm (luma 139, 11,399 frames, flat 21.73%). At present, both the present source and the
+frame's last 1920x1080 colour render target were sampled (25 points, sampler-path decode):
+
+    [RT white,   SRC white]   flat 2,403   normal     0     97% of white frames
+    [RT picture, SRC white]   flat    74   normal     0      3%
+    [both picture]            flat     0   normal 8,887
+    [RT white,   SRC pic]     flat     0   normal    35
+
+**On 97% of white frames the frame's final render target is white too.** The capture's grey
+"correct" preview of 0x904c49900 was the debugger's own resource snapshot at replay, not what
+the GPU held at present - the "two textures, one right one wrong" reading is withdrawn.
+
+So the white is upstream of the HUD pass: Render Encoder 0 LOADS an already-white
+0x904c49900 and draws HUD on it. The writer BEFORE the HUD pass into that texture - the last
+full-res colour pass of the frame proper (composite/upscale) - is where the white is made,
+and it is in the same 26 GB capture.

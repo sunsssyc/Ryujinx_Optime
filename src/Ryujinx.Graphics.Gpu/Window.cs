@@ -14,6 +14,13 @@ namespace Ryujinx.Graphics.Gpu
     /// </summary>
     public class Window
     {
+        private static readonly bool _presentTrace =
+            System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_TRACE") == "1";
+        private static int _presentTraceCount;
+
+        private static readonly bool _presentNoSync =
+            System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_NOSYNC") == "1";
+
         private readonly GpuContext _context;
 
         /// <summary>
@@ -205,9 +212,28 @@ namespace Ryujinx.Graphics.Gpu
 
                 Image.Texture texture = pt.Cache.FindOrCreateTexture(null, TextureSearchFlags.WithUpscale, pt.Info, 0, range: pt.Range);
 
+                // The Metal capture shows present sampling a texture object different from
+                // the frame's final render target; the correlator shows present's source is
+                // a NEW host texture every frame. Log whether this lookup created or reused.
+                if (_presentTrace && ++_presentTraceCount <= 40)
+                {
+                    Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu,
+                        $"present lookup: tex#{texture.GetHashCode():X} host#{(texture.HostTexture?.GetHashCode() ?? 0):X} " +
+                        $"{pt.Info.Width}x{pt.Info.Height} {pt.Info.FormatInfo.Format} range=0x{pt.Range.GetSubRange(0).Address:X}+{pt.Range.GetSubRange(0).Size} " +
+                        $"cacheCount={pt.Cache.CountForRange(pt.Range)}");
+                }
+
                 pt.Cache.Tick();
 
-                texture.SynchronizeMemory();
+                // The white frame, read from a GPU capture: the present draw samples a
+                // texture that is uniform white while the frame's final render target -
+                // a DIFFERENT texture object holding the correct picture - sits unread.
+                // This lookup+sync is what selects the present source; RYUJINX_GPU_PRESENT_NOSYNC=1
+                // skips the sync to test whether it is what overwrites or mis-selects.
+                if (!_presentNoSync)
+                {
+                    texture.SynchronizeMemory();
+                }
 
                 ImageCrop crop = new(
                     (int)(pt.Crop.Left * texture.ScaleFactor),
