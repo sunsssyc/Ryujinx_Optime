@@ -5228,3 +5228,19 @@ arm settles it. This is the first candidate in two days that simultaneously expl
 uniformity, the near-but-not-255 value, the intermittency, the canonical guest values, the
 insensitivity to every data-side intervention, and Vulkan's immunity (MoltenVK serialises
 CBs against VkDeviceMemory binding).
+
+### StainOnCreate: the white is not fresh-allocation contents
+
+Gated arm (luma 139, 10,799 frames, flat 22.59%) with `RYUJINX_METAL_STAIN_SCENE=1`: flat
+frames remain white at 252, min 249 max 254 - not stain-coloured. And the power argument
+kills the family outright: fresh allocations happen only at resolution changes, which cannot
+supply a 22% steady-state rate. The read-before-first-write reading dies with it, and plain
+cross-CB read-before-write would show the previous frame's picture, not a uniform fill.
+
+Sixteen dimensions and four mechanism families now measured dead. What has never wavered:
+the blit executes with correct inputs and correct state, and its attachment holds uniform
+~250 white at present on a fifth of frames. Every mechanism that writes white via THIS
+backend's commands is excluded; every input that could make the blit produce white is
+excluded. What remains is between the encoded commands and the executed result - the
+driver's execution of a correctly-encoded frame - or a mechanism no instrument here reaches.
+The evidence for a driver report is as complete as this toolset can make it.
