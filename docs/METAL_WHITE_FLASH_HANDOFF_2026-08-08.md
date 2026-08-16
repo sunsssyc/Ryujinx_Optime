@@ -5359,3 +5359,38 @@ membership, object identity over time - is correct on exactly the frames that fa
 draw outputs a uniform ~250 fill. The in-stream witness is the strongest single artifact for
 a driver report: the GPU reads a picture from the texture in the same command stream where
 the draw that sampled it produced white.
+
+### The bypass hypothesis, decided by shadow binding: dead
+
+`RYUJINX_METAL_SHADOW_BIND=1` binds every fragment texture to a spare direct slot alongside
+the argument buffer - the driver is told about every read exactly the way direct binding
+would tell it, with none of the codegen rewrite. Engagement proven at both ends (6.5M direct
+binds applied, 22M collected; the first two arms were void - the collection block had
+silently failed to land, caught by the engagement counters, the tenth and eleventh false
+negatives of this investigation). The verified arm:
+
+    shadow-bound everything    luma 139, 11,399 frames, flat 22.47%
+    baselines                  20.4% - 23.7%
+
+No effect. **The white is not caused by automatic hazard tracking missing argument-buffer
+reads.** The write side was never in question (attachment writes are in pass descriptors,
+which the driver always sees); the read side is now forced visible; ordering between them is
+what automatic tracking does - and nothing changed.
+
+Three consequences:
+
+- The full codegen bypass (the week-scale MSL rewrite) is pointless and cancelled - this
+  was its exact mechanism, tested at one twentieth the cost.
+- The Vulkan-style explicit-sync port loses most of its motivation too: fence volume at
+  MoltenVK's level gave 17%, full serialisation gave 17%, and full read visibility gave
+  nothing. The synchronisation-and-visibility axis, in total, cannot close the gap to 0%.
+- Combined with the in-stream witness (the GPU reads the correct picture from the texture in
+  the same stream where the draw sampled white), the remaining space is no longer "the
+  driver didn't know" but "the sample path returned something other than the texture's
+  content while knowing everything" - which on this hardware points at one specific
+  mechanism family never yet tested: **lossless-compression metadata**. A corrupted or
+  stale compression meta-plane makes a texture sample as a solid colour while its memory
+  holds the picture. The test is cheap: read the same texel of the blit's input through a
+  sampler (tiny compute dispatch) and through the blit engine (CopyFromTexture) in the same
+  stream, and compare by outcome - the two paths decode through metadata differently only
+  when the metadata is wrong.

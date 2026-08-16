@@ -11,6 +11,12 @@ namespace Ryujinx.Graphics.Metal
         public List<Resource> Resources = [];
         public List<BufferResource> VertexBuffers = [];
         public List<BufferResource> FragmentBuffers = [];
+
+        // Shadow direct binds: textures also bound to spare fragment slots so the driver's
+        // automatic hazard tracking covers them fully, independent of useResource. The
+        // shader never reads these slots; they exist to make the driver see the reads it
+        // is otherwise asked to infer through the argument buffer.
+        public List<IntPtr> ShadowTextures = [];
         internal List<ScopedTemporaryBuffer> TemporaryBuffers = [];
         private MTLResource[] _resourceScratch = [];
 
@@ -20,6 +26,7 @@ namespace Ryujinx.Graphics.Metal
         {
             DisposeTemporaryBuffers();
             Resources.Clear();
+            ShadowTextures.Clear();
             VertexBuffers.Clear();
             FragmentBuffers.Clear();
         }

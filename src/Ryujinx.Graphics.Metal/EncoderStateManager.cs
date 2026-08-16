@@ -911,6 +911,19 @@ namespace Ryujinx.Graphics.Metal
                 _applied.ForgetResidency();
             }
 
+            if (_shadowBind)
+            {
+                for (int i = 0; i < bindings.ShadowTextures.Count; i++)
+                {
+                    renderCommandEncoder.SetFragmentTexture(new MTLTexture(bindings.ShadowTextures[i]), (ulong)i);
+                }
+
+                if (bindings.ShadowTextures.Count > 0 && ++_shadowBinds % 500000 == 1)
+                {
+                    Logger.Info?.PrintMsg(LogClass.Gpu, $"shadow-bind engaged: applies={_shadowBinds} collected={_shadowCollected}");
+                }
+            }
+
             UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read, MTLRenderStages.RenderStageVertex);
             UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read, MTLRenderStages.RenderStageFragment);
             UseRenderResources(renderCommandEncoder, bindings.Resources, resources, MTLResourceUsage.Read, MTLRenderStages.RenderStageVertex | MTLRenderStages.RenderStageFragment);
@@ -2097,6 +2110,18 @@ namespace Ryujinx.Graphics.Metal
         // The bound PSO's identity - the one observable at the blit draw never split by
         // outcome. A bad cached variant selected on a fifth of frames would leave every
         // other measurement correct.
+        /// <summary>
+        /// RYUJINX_METAL_SHADOW_BIND=1: bind every fragment texture to a spare direct slot
+        /// as well. The bypass hypothesis at one twentieth of the cost - if the white comes
+        /// from automatic tracking missing argument-buffer reads, forcing the tracker to
+        /// see them ends it; if the white survives, the full codegen bypass is pointless.
+        /// </summary>
+        private static readonly bool _shadowBind =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_SHADOW_BIND") == "1";
+
+        private static long _shadowBinds;
+        private static long _shadowCollected;
+
         private static IntPtr _lastPsoPtr;
 
         private static bool _passStoreUnknown;
@@ -2535,6 +2560,17 @@ namespace Ryujinx.Graphics.Metal
                                 // which is either the driver misreading it or the shader
                                 // being pointed somewhere else entirely; this is the only
                                 // number that separates the two.
+                                if (_shadowBind && hasTexture && nativePtr != IntPtr.Zero &&
+                                    bindings.ShadowTextures.Count < 28)
+                                {
+                                    bindings.ShadowTextures.Add(nativePtr);
+
+                                    if (++_shadowCollected % 500000 == 1)
+                                    {
+                                        Logger.Info?.PrintMsg(LogClass.Gpu, $"shadow-bind collected {_shadowCollected}");
+                                    }
+                                }
+
                                 if (UploadCorrelator.Enabled && hasTexture &&
                                     texture.Storage is Texture sceneCandidate &&
                                     Texture.IsSceneClass(sceneCandidate.Info))
