@@ -761,6 +761,9 @@ namespace Ryujinx.Graphics.Metal
 
             CaptureHunter.OnPassEnd(DrawCount);
 
+            // The in-stream witness: photograph the blit's input the moment its pass ends.
+            UploadCorrelator.SampleInputAfterBlit(Cbs);
+
             // Sample the watched target right after a pass on it ends. Sampling only on
             // encoder transitions left every chart entry between transitions holding the
             // previous frame's pixels - the fault Phase 1's first run exposed.

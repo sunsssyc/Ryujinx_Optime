@@ -989,6 +989,7 @@ namespace Ryujinx.Graphics.Metal
             // state as unusable, so the caller skips the draw instead of letting the
             // Metal driver dereference a null pipeline inside drawPrimitives.
             _applied.PipelineValid = pipelineState.NativePtr != IntPtr.Zero;
+            _lastPsoPtr = pipelineState.NativePtr;
 
             if (!_applied.PipelineValid)
             {
@@ -2093,6 +2094,11 @@ namespace Ryujinx.Graphics.Metal
         private static readonly int _redeclareEvery =
             int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_REDECLARE"), out int rd) ? rd : 0;
 
+        // The bound PSO's identity - the one observable at the blit draw never split by
+        // outcome. A bad cached variant selected on a fifth of frames would leave every
+        // other measurement correct.
+        private static IntPtr _lastPsoPtr;
+
         private static bool _passStoreUnknown;
         private static ulong _passColorMask;
         private static bool _passHasDepth;
@@ -2548,11 +2554,13 @@ namespace Ryujinx.Graphics.Metal
                                         UploadCorrelator.NoteCompositeOutput(sceneCandidate);
                                         UploadCorrelator.NoteBlitInputSerial(sceneCandidate.Serial);
                                         UploadCorrelator.NoteBlitInputGen(sceneCandidate.CanonicalPtr);
+                                        UploadCorrelator.ArmAfterBlitSample();
 
                                         MTLViewport vp = _currentState.Viewports[0];
                                         MTLScissorRect sc = _currentState.Scissors[0];
                                         UploadCorrelator.NoteBlitRaster(
                                             $"vp={vp.width:F0}x{vp.height:F0} sc={sc.width}x{sc.height} cull={_currentState.CullMode}");
+                                        UploadCorrelator.NoteBlitPso(_lastPsoPtr);
                                     }
                                 }
 

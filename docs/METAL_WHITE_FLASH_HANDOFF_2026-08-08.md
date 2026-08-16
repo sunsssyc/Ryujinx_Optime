@@ -5331,3 +5331,31 @@ masked by any added synchronisation, never manifesting under MoltenVK's usage pa
 Proving the final step is beyond this toolset: it requires either Apple, or a GPU capture of
 a caught white frame showing the blit's sampled texels differing from the texture's memory.
 Everything short of that step is measured, and measured twice where it mattered.
+
+### The witness, and the last observable
+
+The automated in-stream witness replaces the Xcode capture: the blit's input, photographed by
+the GPU the moment the blit's pass ends, against the same texels at present. Gated arm:
+
+    after-blit == present, texel for texel      25.0/25 on every measured frame
+    input is a picture on white frames          2,067 of 2,473 (the rest are flat sky,
+                                                at the same rate as normal frames)
+
+**The GPU itself testifies that the blit's input was a picture immediately after the pass
+that output uniform white from it**, and that nothing changed the texture afterwards.
+
+And the last observable never split by outcome - the bound PSO - is now split:
+
+    blit PSO fresh-this-frame    flat 0/2,452    normal 16/8,332
+
+White frames never bind a freshly created pipeline; the async-compile theory is dead, and the
+earlier appearance of "white frames' PSO pointers arriving late" was an artifact of the
+32-entry stats cap. The canonical-values pattern holds for the fourth time.
+
+**Final state of the ledger.** Eighteen dimensions and six mechanism families measured.
+Every observable at the presenting draw - inputs GPU-witnessed adjacent to execution,
+vertices, indices, raster state, PSO identity and freshness, argument table bytes, sampler
+membership, object identity over time - is correct on exactly the frames that fail, and the
+draw outputs a uniform ~250 fill. The in-stream witness is the strongest single artifact for
+a driver report: the GPU reads a picture from the texture in the same command stream where
+the draw that sampled it produced white.

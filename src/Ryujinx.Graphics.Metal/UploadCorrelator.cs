@@ -73,6 +73,7 @@ namespace Ryujinx.Graphics.Metal
             public long PresentAge;
             public string Writers;
             public bool InputSampled;
+            public bool AfterSampled;
             public bool InputWrittenAfter;
             public int Residency;
             public int CompositeDraws;
@@ -82,6 +83,7 @@ namespace Ryujinx.Graphics.Metal
             public string Indices;
             public string Attrib;
             public string Raster;
+            public bool PsoFresh;
             public string ImgWriters;
             public long InSerial;
             public long WrSerial;
@@ -369,6 +371,26 @@ namespace Ryujinx.Graphics.Metal
         }
 
         /// <summary>
+        /// Whether the PSO bound at the blit was first seen this frame. The capped
+        /// per-pointer stats showed white frames' pointers arriving after the cap filled -
+        /// every visible signature had flat ~0 - which reads as white frames binding
+        /// freshly created pipeline objects. Asked directly.
+        /// </summary>
+        public static void NoteBlitPso(IntPtr pso)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            _framePsoFresh = _seenPsos.Add(pso);
+        }
+
+        private static readonly HashSet<IntPtr> _seenPsos = new();
+        private static bool _framePsoFresh;
+        private static long _freshFlat, _freshNormal, _staleFlat, _staleNormal;
+
+        /// <summary>
         /// Storage-image bindings whose storage IS the presented surface. The writer census
         /// covers render attachments; CopyTo and SetData have their own hooks - but a
         /// compute or fragment shader writing through an image (usage 0x17 carries
@@ -420,6 +442,69 @@ namespace Ryujinx.Graphics.Metal
         }
 
         public static void NoteBlitInputGen(IntPtr root) { if (Enabled) { _inputGen = GenOf(root); } }
+
+        /// <summary>
+        /// The in-stream witness. A .gputrace of a caught white frame needs Xcode and an
+        /// operator; this encodes the same evidence automatically: the blit's input,
+        /// photographed by the GPU immediately after the blit's pass ends, against the same
+        /// texels photographed at present. Memory that nothing writes in between (measured:
+        /// 1/2,496) cannot differ between the two - so "white just after the blit, a
+        /// picture at present" is a read-visibility failure witnessed in the act, and "a
+        /// picture just after the blit" convicts the draw's execution instead.
+        /// </summary>
+        public static void ArmAfterBlitSample() { if (Enabled) { _afterBlitArmed = true; } }
+
+        private static bool _afterBlitArmed;
+
+        public static void SampleInputAfterBlit(CommandBufferScoped cbs)
+        {
+            if (!Enabled || !_afterBlitArmed)
+            {
+                return;
+            }
+
+            _afterBlitArmed = false;
+
+            Texture sceneTex = _frameSceneTex;
+
+            if (sceneTex == null || _buf.NativePtr == IntPtr.Zero ||
+                sceneTex.Width <= GridSide || sceneTex.Height <= GridSide)
+            {
+                return;
+            }
+
+            MTLTexture stex = sceneTex.GetHandle(cbs);
+
+            if (stex.NativePtr == IntPtr.Zero)
+            {
+                return;
+            }
+
+            int idx = (int)(_frame % Slots);
+            MTLBlitCommandEncoder blit = cbs.Encoders.EnsureBlitEncoder();
+
+            for (int i = 0; i < Pixels; i++)
+            {
+                blit.CopyFromTexture(
+                    stex, 0, 0,
+                    new MTLOrigin
+                    {
+                        // Same texels as the present-time sample, so the two snapshots
+                        // compare texel for texel.
+                        x = (ulong)(sceneTex.Width / 2 + i % GridSide),
+                        y = (ulong)(sceneTex.Height / 2 + i / GridSide),
+                        z = 0,
+                    },
+                    new MTLSize { width = 1, height = 1, depth = 1 },
+                    _buf, (ulong)(((2 * Slots + idx) * Pixels + i) * BytesPerPixel), BytesPerPixel, BytesPerPixel);
+            }
+
+            _frameAfterSampled = true;
+        }
+
+        private static bool _frameAfterSampled;
+        private static long _witFlatWhiteAfter, _witFlatPictureAfter, _witNormalWhiteAfter, _witNormalPictureAfter;
+        private static double _witFlatEqSum; private static long _witFlatEqN;
 
         private static long _inputGen = -1, _writerGen = -1;
         private static long _genSwapFlat, _genSwapNormal, _genSameFlat, _genSameNormal;
@@ -644,7 +729,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            _buf = device.NewBuffer(2 * Slots * Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
+            _buf = device.NewBuffer(3 * Slots * Pixels * BytesPerPixel, MTLResourceOptions.ResourceStorageModeShared);
 
             Logger.Warning?.PrintMsg(LogClass.Gpu,
                 $"uploadcorr armed: ring={Slots} grid={GridSide}x{GridSide} satLuma={SaturatedLuma} need={SaturatedNeeded} minPixels={MinPixels}");
@@ -971,9 +1056,11 @@ namespace Ryujinx.Graphics.Metal
                 mine.Indices = _frameIndices;
                 mine.Attrib = _frameAttrib;
                 mine.Raster = _frameRaster;
+                mine.PsoFresh = _framePsoFresh;
                 mine.ImgWriters = _frameImgWriters.Count == 0 ? "none" : string.Join(",", _frameImgWriters);
                 mine.InSerial = _inputSerial;
                 mine.WrSerial = _writerSerial;
+                mine.AfterSampled = _frameAfterSampled;
                 mine.InGen = _inputGen;
                 mine.WrGen = _writerGen;
                 mine.RowW ??= new float[MaxCbSlots];
@@ -1034,10 +1121,13 @@ namespace Ryujinx.Graphics.Metal
             _frameIndices = null;
             _frameAttrib = null;
             _frameRaster = null;
+            _framePsoFresh = false;
             _frameImgWriters.Clear();
             _inputSerial = -1;
             _writerSerial = -1;
             _inputGen = -1;
+            _frameAfterSampled = false;
+            _afterBlitArmed = false;
             _writerGen = -1;
             // _compositeInputRoot deliberately NOT reset: the root is stable across frames
             // and resetting it at present starved the writer-serial trigger to 42 of 7,799.
@@ -1099,6 +1189,35 @@ namespace Ryujinx.Graphics.Metal
             }
 
             bool flat = saturated >= SaturatedNeeded;
+
+            if (slot.AfterSampled && slot.InputSampled)
+            {
+                uint* qa = (uint*)((byte*)_buf.Contents + (2 * Slots + index) * Pixels * BytesPerPixel);
+                uint* qp = (uint*)((byte*)_buf.Contents + (Slots + index) * Pixels * BytesPerPixel);
+                int distinctAfter = 0;
+                int eq = 0;
+
+                for (int i = 0; i < Pixels; i++)
+                {
+                    bool seen = false;
+                    for (int j = 0; j < i; j++) { if (qa[j] == qa[i]) { seen = true; break; } }
+                    if (!seen) { distinctAfter++; }
+                    if (qa[i] == qp[i]) { eq++; }
+                }
+
+                // Uniform after the blit = the GPU saw a flat input when the blit ran.
+                bool afterUniform = distinctAfter <= 3;
+
+                if (flat)
+                {
+                    if (afterUniform) { _witFlatWhiteAfter++; } else { _witFlatPictureAfter++; }
+                    _witFlatEqSum += eq; _witFlatEqN++;
+                }
+                else
+                {
+                    if (afterUniform) { _witNormalWhiteAfter++; } else { _witNormalPictureAfter++; }
+                }
+            }
 
             int inputDistinct = 0;
 
@@ -1219,6 +1338,12 @@ namespace Ryujinx.Graphics.Metal
             {
                 (long gf, long gn) = _imgStats.TryGetValue(slot.ImgWriters, out (long Flat, long Normal) gv) ? (gv.Flat, gv.Normal) : (0L, 0L);
                 _imgStats[slot.ImgWriters] = flat ? (gf + 1, gn) : (gf, gn + 1);
+            }
+
+            if (slot.Raster != null)
+            {
+                if (slot.PsoFresh) { if (flat) { _freshFlat++; } else { _freshNormal++; } }
+                else { if (flat) { _staleFlat++; } else { _staleNormal++; } }
             }
 
             if (slot.Raster != null && _rasterStats.Count < 32)
@@ -1523,6 +1648,8 @@ namespace Ryujinx.Graphics.Metal
                 sb.Append($"\n  blit w[slot{c}]: flat mean {(_wFlatN[c] > 0 ? _wFlatSum[c] / _wFlatN[c] : 0):G4} min {(_wFlatN[c] > 0 ? _wFlatMin[c] : 0):G4} n={_wFlatN[c]}  normal mean {(_wNormalN[c] > 0 ? _wNormalSum[c] / _wNormalN[c] : 0):G4} min {(_wNormalN[c] > 0 ? _wNormalMin[c] : 0):G4} n={_wNormalN[c]}");
             }
 
+            sb.Append($"\n  blit PSO fresh-this-frame: flat {_freshFlat}/{_freshFlat + _staleFlat}, normal {_freshNormal}/{_freshNormal + _staleNormal}");
+            sb.Append($"\n  WITNESS input-after-blit: flat uniform {_witFlatWhiteAfter} picture {_witFlatPictureAfter} (eq-with-present {(_witFlatEqN > 0 ? _witFlatEqSum / _witFlatEqN : 0):F1}/25), normal uniform {_witNormalWhiteAfter} picture {_witNormalPictureAfter}");
             sb.Append($"\n  handle gen swap between write and read: flat {_genSwapFlat}/{_genSwapFlat + _genSameFlat}, normal {_genSwapNormal}/{_genSwapNormal + _genSameNormal}");
             sb.Append($"\n  blit serial: flat match {_matchFlat} mismatch {_mismatchFlat}, normal match {_matchNormal} mismatch {_mismatchNormal}");
 
