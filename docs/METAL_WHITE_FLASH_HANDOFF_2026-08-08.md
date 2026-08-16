@@ -5077,3 +5077,42 @@ rendering but not that the save was loaded. A Vulkan arm sitting on a menu would
 zero white. Closing that needs a Vulkan-side gameplay signal - the simplest being the same
 compositor sampler reporting a mean luma near the repro scene's 138, which it already computes
 per shot and currently discards.
+
+### Raster state at the blit is equal by outcome
+
+Answering "what has never been split by outcome": fixed-function state. Gated arm (luma 139,
+11,399 frames, flat 22.45%):
+
+    vp=1920x1080 sc=1920x1080 cull=Back    flat 2,557   normal 8,631
+    vp=1920x1080 sc=2560x1406 cull=Back    flat     0   normal   204
+
+Identical on every flat frame; the odd scissor variant occurs only on normal frames. The
+0x0-scissor precedent does not recur here, and the fixed-function axis joins the excluded
+list.
+
+### Two more dimensions measured, both equal: raster state and the translator's output
+
+Answering "what has never been compared". First, fixed-function state at the blit draw, split
+by outcome (gated arm, luma 139, 11,399 frames): `vp=1920x1080 sc=1920x1080 cull=Back` on
+every flat frame and on 8,631 normal ones; a `sc=2560x1406` variant occurs only on normal
+frames. The 0x0-scissor precedent does not recur. Equal.
+
+Second, the other translator's output. `MVK_CONFIG_SHADER_DUMP_DIR` makes MoltenVK write the
+MSL it generates (1,411 .metal files dumped). The presenting blit's counterpart is
+`shader-fs-6719cfc905edd4f0`/`a8449c0a1fb831a5`: input `float4 m_23 [[user(locn0)]]` with no
+interpolation qualifier, arithmetic `attr.xy * FragCoord.w * (1/FragCoord.w)` - byte-for-byte
+the same semantics as our `480117a3b1123d65`. The w-multiply/divide is the guest's own code
+(it carries guest instruction addresses in our dump), not a translator emulation, and it is
+an identity on both backends. Equal.
+
+A trap recorded: the first "counterpart" matched by size (`3d770b263c4aed96`) had
+`center_no_perspective` on its input and no FragCoord math - a genuinely different guest
+shader whose pair is a w=1 quad. Twenty minutes were nearly spent on a translation-divergence
+theory built on a mismatched pair. Match blits by their arithmetic signature, not by size.
+
+Still uncompared, for whoever continues: sampler-state descriptors (`newSamplerStateWithDescriptor`
+was never hooked), texture views (exempted from the descriptor diff), the full
+MTLRenderPipelineDescriptor at PSO creation (blend/writeMask per attachment), and - the one
+that now looks most interesting given position.w comes from a full matrix transform out of
+vp_c3 whose values range over thousands - why the same wild guest transform is tolerated by
+one backend and not the other.

@@ -81,6 +81,7 @@ namespace Ryujinx.Graphics.Metal
             public (int Count, int Inst, int First, int Indexed) Draw;
             public string Indices;
             public string Attrib;
+            public string Raster;
             public int OutOfOrder;
             public IntPtr ArgPtr;
             public ulong[] ArgExpected;
@@ -339,6 +340,24 @@ namespace Ryujinx.Graphics.Metal
         private static int _frameOutOfOrder;
         private static double _flatOooSum, _normalOooSum;
         private static long _flatOooN, _normalOooN;
+        /// <summary>
+        /// Fixed-function state at the blit's draw. Every measurement so far compared data
+        /// - buffers, textures, constants, indices - and none compared the raster state,
+        /// which is the one axis that changes frame to frame and can null a draw outright.
+        /// This backend has prior form: CullBoth once ignored the enable flag and produced
+        /// a 0x0 scissor. A blit rasterised away leaves the pass's load contents on screen,
+        /// and everything else measures correct because everything else IS correct.
+        /// </summary>
+        public static void NoteBlitRaster(string state)
+        {
+            if (Enabled)
+            {
+                _frameRaster = state;
+            }
+        }
+
+        private static string _frameRaster;
+        private static readonly Dictionary<string, (long Flat, long Normal)> _rasterStats = new();
         private static string _frameAttrib;
         private static readonly Dictionary<string, (long Flat, long Normal)> _attribStats = new();
         private static string _frameIndices;
@@ -828,6 +847,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.Draw = _frameDraw;
                 mine.Indices = _frameIndices;
                 mine.Attrib = _frameAttrib;
+                mine.Raster = _frameRaster;
                 mine.OutOfOrder = _frameOutOfOrder;
                 mine.ArgPtr = _frameArgPtr;
                 mine.ArgCount = _frameArgCount;
@@ -881,6 +901,7 @@ namespace Ryujinx.Graphics.Metal
             _frameDraw = (-1, -1, -1, -1);
             _frameIndices = null;
             _frameAttrib = null;
+            _frameRaster = null;
             _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;
             _frameArgCount = 0;
@@ -1015,6 +1036,12 @@ namespace Ryujinx.Graphics.Metal
 
             if (flat) { _flatOooSum += slot.OutOfOrder; _flatOooN++; }
             else { _normalOooSum += slot.OutOfOrder; _normalOooN++; }
+
+            if (slot.Raster != null && _rasterStats.Count < 32)
+            {
+                (long rf, long rn) = _rasterStats.TryGetValue(slot.Raster, out (long Flat, long Normal) rv) ? (rv.Flat, rv.Normal) : (0L, 0L);
+                _rasterStats[slot.Raster] = flat ? (rf + 1, rn) : (rf, rn + 1);
+            }
 
             if (slot.Attrib != null && _attribStats.Count < 32)
             {
@@ -1305,6 +1332,11 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($", normal min {(_normalFrames > 0 ? _normalMinSum / _normalFrames : 0):F0} max {(_normalFrames > 0 ? _normalMaxSum / _normalFrames : 0):F0} sd {(_normalFrames > 0 ? _normalSdSum / _normalFrames : 0):F1}");
             sb.Append($" | input distinct flat {(_flatInputFrames > 0 ? _flatInputDistinctSum / _flatInputFrames : 0):F2}/{Pixels} over {_flatInputFrames}");
             sb.Append($", normal {(_normalInputFrames > 0 ? _normalInputDistinctSum / _normalInputFrames : 0):F2}/{Pixels} over {_normalInputFrames}");
+
+            foreach (KeyValuePair<string, (long Flat, long Normal)> r2 in _rasterStats)
+            {
+                sb.Append($"\n  blit raster {r2.Key}: flat {r2.Value.Flat}, normal {r2.Value.Normal}");
+            }
 
             foreach (KeyValuePair<string, (long Flat, long Normal)> a2 in _attribStats)
             {

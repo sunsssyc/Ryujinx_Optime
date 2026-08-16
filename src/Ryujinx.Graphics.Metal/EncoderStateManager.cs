@@ -2534,6 +2534,11 @@ namespace Ryujinx.Graphics.Metal
                                         program.DebugLabel.StartsWith(_watchLabel, StringComparison.Ordinal))
                                     {
                                         UploadCorrelator.NoteCompositeOutput(sceneCandidate);
+
+                                        MTLViewport vp = _currentState.Viewports[0];
+                                        MTLScissorRect sc = _currentState.Scissors[0];
+                                        UploadCorrelator.NoteBlitRaster(
+                                            $"vp={vp.width:F0}x{vp.height:F0} sc={sc.width}x{sc.height} cull={_currentState.CullMode}");
                                     }
                                 }
 
