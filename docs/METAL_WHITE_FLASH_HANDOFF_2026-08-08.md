@@ -4972,3 +4972,30 @@ instead of only ending the pass, and widen what counts as a dependency until the
 approaches MoltenVK's. `RYUJINX_METAL_RAW_FENCE=1` already exists and already pairs
 `updateFence` on the writing encoder with `waitForFence` on the reading one - it was measured
 once, before the admissibility gate existed, and that measurement should not be trusted.
+
+### Matching MoltenVK's fence volume does not reach zero
+
+`RYUJINX_METAL_RAW_FENCE=1`, with engagement proven by the same probe that counted MoltenVK's:
+
+    fence pairs per 120 frames   this backend 21,928    MoltenVK 20,094
+
+More than MoltenVK's, from the same instrument. And the flash does not go away:
+
+    flat 461 / 2,999 = 15.4%   luma 107   flat frames min 250 max 254 sd 1.1
+
+**The arm is VOID** - 2,999 frames is below the gate's floor, because fencing is slow enough
+that the window covered far less time, and luma 107 is darker than the repro's 138, which
+depresses the rate on its own. The number must not be quoted as 15.4%. What can be said is
+that white frames still occur and still look identical: a uniform fill at min 250, max 254,
+spread of four.
+
+Read against the rest of the curve, 15.4% sits where full serialisation's 17% sits - both are
+"much more synchronisation", both land in the mid teens, and neither reaches zero. So fence
+volume alone is not what separates the backends either. Matching MoltenVK's count of barriers
+is not the same as matching *which* dependencies they cover, and this backend still only
+fences where `SamplesEarlierWrite()` looks.
+
+**Next, and it needs a proper arm before anything is concluded:** re-run the fence arm long
+enough to pass the gate, in the daylight scene. If it lands solidly below the 20-24% band the
+direction is confirmed and the remaining work is widening which dependencies get a fence; if
+it lands inside the band, fence volume is excluded and only the coverage question remains.
