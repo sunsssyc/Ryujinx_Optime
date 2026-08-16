@@ -5186,3 +5186,14 @@ the fault is in who else can touch the presented storage, not in the values feed
 **Method (non-negotiable):** every arm through tools/arm_valid.py; drive_in.sh verifies
 gameplay by draws-per-frame; every probe must prove it fired before its number is read. These
 three rules caught nine false negatives across two days.
+
+**Lead 1 sharpened, statically.** `TextureCompatibility.PropagateViewCompatibility` returns
+`TextureViewCompatibility.CopyOnly` for same-size formats that cannot share a view - and
+CopyOnly means the GPU cache keeps *separate storages bridged by copy dependencies*, which is
+exactly the "shared layer resurrecting stale content" mechanism UploadCorrelator was
+originally built to catch. The Vulkan run creates a 70->92 view (Full compatibility); if the
+same guest aliasing degrades to CopyOnly on Metal - via a capability check or a view-creation
+fallback - then Metal bridges the scene surface with copies that Vulkan never performs, and a
+bridge copy landing after the blit is a correct frame's output being replaced. Next session:
+trace 70<->92 through PropagateViewCompatibility on both backends, and instrument
+TextureGroup's copy-dependency flushes keyed on the presented storage, split by outcome.
