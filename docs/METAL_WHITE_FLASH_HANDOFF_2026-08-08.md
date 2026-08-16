@@ -4841,3 +4841,63 @@ What survives is sharper for it. Same size, same format, same usage, same storag
 
 Identical descriptors, different memory. That is now the only measured difference left between
 a backend that flashes and one that does not.
+
+---
+
+## The root cause hypothesis: hazard-tracking granularity
+
+Three pieces, two measured here and one quoted from Apple's headers, and they fit.
+
+**Measured.** MoltenVK's heaps are `type 1` (`MTLHeapTypePlacement`) and `hazard 2`
+(`MTLHazardTrackingModeTracked`) - 8,548 with `storageMode 0`, 5,123 with `storageMode 2`.
+It does not accept the heap default; the default for a heap is *untracked*, and MoltenVK
+explicitly opts in.
+
+**Documented**, `MTLHeap.h:150-160`:
+
+> When a resource on a hazard tracked heap is modified, reads and writes from any other
+> resource on that heap will be delayed until the modification is complete. Similarly,
+> modifying heap resources will be delayed until all in-flight reads and writes from
+> resources suballocated on that heap have completed.
+
+and `MTLResource.h:287-293`:
+
+> Resources created from heaps are by default untracked, whereas resources created from the
+> device are by default tracked.
+
+**So the two backends track hazards at different granularities.** MoltenVK's textures sit in
+tracked placement heaps, where touching any one of them stalls reads and writes of *every
+other resource in that heap*. This backend's textures are standalone device allocations,
+tracked individually and precisely.
+
+Per-resource tracking is the more correct of the two and it is what exposes the fault. Whole-
+heap tracking is massively conservative - MoltenVK does not need to detect a dependency for
+it to be honoured, because the heap serialises against everything else it holds. That is a
+large amount of accidental synchronisation that this backend does not get.
+
+**It accounts for the evidence that nothing else has.**
+
+- The monotonic curve. More splitting means more synchronisation, and the rate falls 45% ->
+  24% -> 17%. MoltenVK gets far more synchronisation than any of those for free, and sits at
+  0%. The curve is the same axis, seen from the other end.
+- Why `MTLFence` did nothing. The fence was placed on the read-after-write dependencies
+  `SamplesEarlierWrite()` detects. A dependency it fails to detect gets no fence - and those
+  are exactly the ones a whole-heap barrier would catch and a precise tracker would miss.
+- Why every value measured correct. Nothing is wrong with the bytes, the descriptors, the
+  indices or the coordinates. The GPU reads a texture before another encoder's write to it
+  has landed, and every CPU-side value is correct at the moment it is read.
+- Why full serialisation still leaves 17%. It orders passes within a command buffer; heap
+  tracking also covers dependencies across them.
+
+**The test.** SharpMetal preview21 already binds `MTLHeap`, `MTLHeapDescriptor`,
+`MTLHeapType.Placement`, `HazardTrackingMode`, `NewTexture(descriptor, offset)`,
+`HeapTextureSizeAndAlign`, `MakeAliasable` and `MTLTexture.Heap`/`HeapOffset` - no new
+bindings are needed. The change is one allocation site (`Texture.cs:95`, the only standalone
+`Device.NewTexture` in the backend; the other four sites are views) plus a placement
+suballocator and a lifetime change: heap memory is not reclaimed by releasing the texture, so
+`DisposableTexture.Dispose` must call `MakeAliasable` first, driven off the existing `Auto`
+refcount that already waits for the GPU.
+
+If scene-class textures allocated from one tracked placement heap take the flash to zero, the
+root cause is hazard-tracking granularity and the fix is either that, or finding the
+dependencies `SamplesEarlierWrite()` misses and fencing them properly.
