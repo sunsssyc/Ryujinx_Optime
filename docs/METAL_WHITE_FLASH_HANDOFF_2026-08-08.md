@@ -5006,11 +5006,12 @@ A second fence arm with the sampling window stretched from 330s to 520s classifi
 2,999 frames again** - the same number, not a larger one. That is not a short run; it is the
 correlator stopping.
 
-`UploadCorrelator` samples into an eight-slot ring and classifies a slot when its fence has
-signalled, dropping the slot if a whole revolution passes without that happening. Turning on
-`RYUJINX_METAL_RAW_FENCE` changes when fences signal, and the sampler's own fence is caught in
-it: classification stalls and the count freezes. Both fence arms froze at the same place,
-which is the signature of a limit in the instrument rather than of the run.
+The stale-slot drop was the obvious explanation and **the data in the same command refutes
+it**: `dropped=0`. Nothing was discarded. The independent Metal-level probe shows the game
+presented **6,000 frames** on that arm while the correlator classified 2,999 and stopped
+reporting after its fifth interval - so the emulator kept running and the correlator simply
+stopped classifying, for a reason not yet identified. It is not the drop path, and the
+explanation first written here was wrong.
 
 **So the fence hypothesis cannot be measured with the current correlator, and neither fence
 arm's rate means anything** - not the 15.4%, not any number from them. The engagement figures
