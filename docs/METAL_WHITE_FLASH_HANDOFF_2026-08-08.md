@@ -5206,3 +5206,25 @@ presented surface on the frames that fail, it would have to travel a path neithe
 instrumenting TextureGroup, check which encoder path dependency flushes actually use - if it
 is CopyTo, lead 1 is already dead and the remaining suspect is the present-side pass reading
 src across command buffers. Do not chase the bridge-copy theory without settling this first.
+
+**Lead 1 is dead, statically.** `TextureGroupHandle.cs:622` shows dependency flushes travel
+`from.HostTexture.CopyTo(...)` - exactly the path the correlator hooks - and that path is
+silent on white frames (`copy: flat 0/2,496`). Bridge copies cannot be replacing the output.
+
+**What that elimination leaves as the sharpest residual:** the blit reads its input across
+command buffers, and `SamplesEarlierWrite` tracks writes per-encoder only - a writer in a
+*different* command buffer gets no split and no fence. If the blit's CB ever executes before
+its input-writer's CB, the blit reads the texture's prior contents. That alone would show the
+previous frame's picture, not white - *unless the input's storage was freshly allocated that
+frame* (dynamic resolution recreates scene textures), in which case the read returns the
+allocation's undefined contents: uniform, driver-dependent, plausibly the measured ~250.
+
+**The decisive experiment already exists in the codebase: `StainOnCreate`** (Texture.cs) -
+stain every new texture's contents at creation. If white frames turn stain-coloured, the
+mechanism is fresh-allocation-read-before-first-write and the fix is ordering the first
+write against the first read across command buffers (or eagerly clearing scene-class
+allocations). If they stay white at 250, the read-before-write reading dies too. One gated
+arm settles it. This is the first candidate in two days that simultaneously explains the
+uniformity, the near-but-not-255 value, the intermittency, the canonical guest values, the
+insensitivity to every data-side intervention, and Vulkan's immunity (MoltenVK serialises
+CBs against VkDeviceMemory binding).
