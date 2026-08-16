@@ -82,6 +82,7 @@ namespace Ryujinx.Graphics.Metal
             public string Indices;
             public string Attrib;
             public string Raster;
+            public string ImgWriters;
             public float[] RowW;
             public bool[] RowSeen;
             public int OutOfOrder;
@@ -363,6 +364,26 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        /// <summary>
+        /// Storage-image bindings whose storage IS the presented surface. The writer census
+        /// covers render attachments; CopyTo and SetData have their own hooks - but a
+        /// compute or fragment shader writing through an image (usage 0x17 carries
+        /// ShaderWrite, and 15,809 read-write residency declarations go by per 120 frames)
+        /// is invisible to every instrument fielded so far. The last uninstrumented way to
+        /// put pixels in that texture.
+        /// </summary>
+        public static IntPtr LastPresentedRoot => _framePresentRoot;
+
+        public static void NoteImageOnPresented(string program)
+        {
+            if (Enabled && _frameImgWriters.Count < 8)
+            {
+                _frameImgWriters.Add(program ?? "?");
+            }
+        }
+
+        private static readonly List<string> _frameImgWriters = new();
+        private static readonly Dictionary<string, (long Flat, long Normal)> _imgStats = new();
         private static string _frameRaster;
 
         /// <summary>
@@ -901,6 +922,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.Indices = _frameIndices;
                 mine.Attrib = _frameAttrib;
                 mine.Raster = _frameRaster;
+                mine.ImgWriters = _frameImgWriters.Count == 0 ? "none" : string.Join(",", _frameImgWriters);
                 mine.RowW ??= new float[MaxCbSlots];
                 mine.RowSeen ??= new bool[MaxCbSlots];
                 Array.Copy(_frameRowW, mine.RowW, MaxCbSlots);
@@ -959,6 +981,7 @@ namespace Ryujinx.Graphics.Metal
             _frameIndices = null;
             _frameAttrib = null;
             _frameRaster = null;
+            _frameImgWriters.Clear();
             Array.Clear(_frameRowSeen);
             _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;
@@ -1118,6 +1141,12 @@ namespace Ryujinx.Graphics.Metal
                         if (Math.Abs(w) < Math.Abs(_wNormalMin[c])) { _wNormalMin[c] = w; }
                     }
                 }
+            }
+
+            if (slot.ImgWriters != null && _imgStats.Count < 32)
+            {
+                (long gf, long gn) = _imgStats.TryGetValue(slot.ImgWriters, out (long Flat, long Normal) gv) ? (gv.Flat, gv.Normal) : (0L, 0L);
+                _imgStats[slot.ImgWriters] = flat ? (gf + 1, gn) : (gf, gn + 1);
             }
 
             if (slot.Raster != null && _rasterStats.Count < 32)
@@ -1420,6 +1449,11 @@ namespace Ryujinx.Graphics.Metal
             {
                 if (_wFlatN[c] == 0 && _wNormalN[c] == 0) { continue; }
                 sb.Append($"\n  blit w[slot{c}]: flat mean {(_wFlatN[c] > 0 ? _wFlatSum[c] / _wFlatN[c] : 0):G4} min {(_wFlatN[c] > 0 ? _wFlatMin[c] : 0):G4} n={_wFlatN[c]}  normal mean {(_wNormalN[c] > 0 ? _wNormalSum[c] / _wNormalN[c] : 0):G4} min {(_wNormalN[c] > 0 ? _wNormalMin[c] : 0):G4} n={_wNormalN[c]}");
+            }
+
+            foreach (KeyValuePair<string, (long Flat, long Normal)> g2 in _imgStats)
+            {
+                sb.Append($"\n  image-on-presented [{g2.Key}]: flat {g2.Value.Flat}, normal {g2.Value.Normal}");
             }
 
             foreach (KeyValuePair<string, (long Flat, long Normal)> r2 in _rasterStats)

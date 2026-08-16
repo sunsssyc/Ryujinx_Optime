@@ -5244,3 +5244,22 @@ backend's commands is excluded; every input that could make the blit produce whi
 excluded. What remains is between the encoded commands and the executed result - the
 driver's execution of a correctly-encoded frame - or a mechanism no instrument here reaches.
 The evidence for a driver report is as complete as this toolset can make it.
+
+### The last writer path is instrumented, and it is empty
+
+Storage-image bindings of the presented surface - the one way to write it that no instrument
+covered - measured across a gated arm: `image-on-presented [none]` on every frame of both
+outcomes. Nothing ever binds the presented storage as a writable image.
+
+That closes the writer question completely. Render attachments: one writer, the blit.
+Copies: zero on white frames. Uploads: ~zero. Image writes: zero, ever. **Every path by
+which this backend's encoded commands can put pixels into that surface is now instrumented,
+and on the frames that go white, none of them carries the white.** Together with sixteen
+input dimensions measured correct, the encoded frame is correct in every respect this
+toolset can observe, and the executed result is a uniform ~250 fill on a fifth of frames -
+at a rate that responds only to synchronisation volume (45/24/17) and that MoltenVK, through
+the same driver, never exhibits.
+
+That is the finding this investigation can support: the divergence lies in the execution of
+a correctly-encoded frame, not in its encoding - and the complete, measured exclusion ledger
+above is the driver report.

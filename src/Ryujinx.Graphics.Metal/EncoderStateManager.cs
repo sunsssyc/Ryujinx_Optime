@@ -2763,6 +2763,14 @@ namespace Ryujinx.Graphics.Metal
                                 ref ImageRef image = ref _currentState.ImageRefs[index];
                                 (ulong gpuAddress, IntPtr nativePtr) = AddressForImage(ref image);
 
+                                // A storage-image binding of the presented surface: the one
+                                // writer path no other instrument sees.
+                                if (UploadCorrelator.Enabled && image.Storage != null &&
+                                    image.Storage.CanonicalPtr == UploadCorrelator.LastPresentedRoot)
+                                {
+                                    UploadCorrelator.NoteImageOnPresented(program.DebugLabel);
+                                }
+
                                 MTLRenderStages renderStages = 0;
 
                                 if ((segment.Stages & ResourceStages.Vertex) != 0)
@@ -3033,6 +3041,14 @@ namespace Ryujinx.Graphics.Metal
 
                                 ref ImageRef image = ref _currentState.ImageRefs[index];
                                 (ulong gpuAddress, IntPtr nativePtr) = AddressForImage(ref image);
+
+                                // A storage-image binding of the presented surface: the one
+                                // writer path no other instrument sees.
+                                if (UploadCorrelator.Enabled && image.Storage != null &&
+                                    image.Storage.CanonicalPtr == UploadCorrelator.LastPresentedRoot)
+                                {
+                                    UploadCorrelator.NoteImageOnPresented(program.DebugLabel);
+                                }
 
                                 if ((segment.Stages & ResourceStages.Compute) != 0)
                                 {
