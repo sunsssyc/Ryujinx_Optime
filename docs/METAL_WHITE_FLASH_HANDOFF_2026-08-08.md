@@ -4781,3 +4781,36 @@ allocation strategy, by eleven points.
 `-[MTLDevice newHeapWithDescriptor:]` in `tools/mtlspy.m`, re-run the Vulkan arm, and see what
 appears. If MoltenVK's colour targets are heap-allocated, that is the first structural
 difference in memory management ever found between the two, and it is reachable from our side.
+
+### MoltenVK allocates heaps - 17,077 of them - and places its textures inside
+
+Hooked `-[MTLDevice newHeapWithDescriptor:]` and the returned heap class's
+`newTextureWithDescriptor:`. The Vulkan arm, in gameplay:
+
+    heap class hooked        AGXG13XFamilyHeap
+    heaps created            17,077
+    textures from heaps           0
+
+Seventeen thousand heaps and not one texture created through the selector this probe hooked.
+That combination names the mechanism precisely: MoltenVK is placing its textures with
+**`newTextureWithDescriptor:offset:`**, the variant that puts a texture at an offset inside an
+existing allocation, which is how a `VkImage` is bound into a `VkDeviceMemory`. The hook was
+on the wrong selector - the right one takes the offset.
+
+The structural difference is nevertheless established, and it is the one this investigation
+has been looking for since the command-stream comparison:
+
+- **MoltenVK**: one heap per memory object, textures *placed* inside it at offsets.
+- **Ryujinx-Metal**: every texture a standalone `Device.NewTexture`, no heap anywhere.
+
+This is a difference in how the memory is obtained, not in the flags on it - and the usage-bit
+arm has already shown the flags are not the fault. Placed heap resources behave differently
+from standalone ones in exactly the areas this fault lives in: the driver's freedom to choose
+a layout, when a resource's contents are defined, and what aliasing is permitted within the
+allocation.
+
+**Next: re-hook with the offset selector** (`newTextureWithDescriptor:offset:`, and its
+buffer-backed sibling `-[MTLBuffer newTextureWithDescriptor:offset:bytesPerRow:]`) to confirm
+the placement and read the descriptors MoltenVK actually uses. Then the question that matters:
+whether giving this backend heap-placed scene targets changes the flash. That is a real change
+rather than a flag flip, but it is now aimed at a measured difference rather than a guess.
