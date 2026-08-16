@@ -5032,3 +5032,26 @@ count is frozen - which together point at the sampler's own `FenceHolder` no lon
 signalled once `RYUJINX_METAL_RAW_FENCE` is on. Confirming that needs a counter on the
 `IsSignaled()` branch: how many times it was consulted against how many times it returned
 true. That is the first thing to do next session, before any fenced arm is run again.
+
+### Fences at MoltenVK's volume: 17.5%, and it still visibly flashes
+
+The freeze was not the sampler's fence. With a counter on it the arm ran clean -
+`asked 13,801, signalled 13,799` - and classified 13,799 frames. Whatever froze the two
+earlier fenced arms at 2,999 was something else and is no longer reproducing.
+
+    RAW_FENCE=1     luma 139, 13,799 frames, flat 17.49%   (gate OK)
+    baselines       20.4% - 23.7%
+    full serialisation                            17%
+
+A real reduction, about twelve standard errors below the band - and **the same place full
+serialisation lands.** Two very different interventions, one fencing 23,000 times per 120
+frames and one ending a pass per draw, converge on the same seventeen percent.
+
+The user watched this build and reported it still flashes badly, which is what 17.5% at 30fps
+means: five white frames a second instead of six. The number and the eye agree.
+
+So fences are on the same curve as splitting, not a way off it. Matching MoltenVK's fence
+*volume* buys the same few points more synchronisation buys by any other route, and the gap
+between seventeen percent and MoltenVK's zero is not made of synchronisation at all. Something
+else separates them, and every measured property of the textures, descriptors, memory,
+constants, indices, coordinates and command stream is now equal between the two.

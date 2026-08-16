@@ -399,6 +399,12 @@ namespace Ryujinx.Graphics.Metal
         private static readonly Dictionary<string, (long Flat, long Normal)> _bindingStats = new();
         private static long _framesWithNoBinding;
 
+        // Classification happens only when the sampler's own fence reports signalled, and a
+        // fenced arm freezes at a fixed frame count with nothing dropped - which points here
+        // rather than at the ring. Counted so the next fenced arm says whether the fence
+        // stopped signalling or the slots stopped being valid.
+        private static long _fenceAsked, _fenceReady;
+
         // Mean luma of the sampled grid, split by outcome. Without it a run whose
         // picture went black reports zero flat frames and reads as a fix - which is
         // exactly how a "this build might suppress it" result was once produced.
@@ -734,8 +740,14 @@ namespace Ryujinx.Graphics.Metal
             {
                 ref Slot slot = ref _slots[i];
 
+                if (slot.Valid)
+                {
+                    _fenceAsked++;
+                }
+
                 if (slot.Valid && slot.Fence.IsSignaled())
                 {
+                    _fenceReady++;
                     Classify(ref slot, i);
                 }
             }
@@ -1312,6 +1324,7 @@ namespace Ryujinx.Graphics.Metal
             sb.Append($" | blit stride: flat {(_flatStrideN > 0 ? _flatStrideSum / _flatStrideN : 0):F1} [{(_flatStrideN > 0 ? _flatStrideMin : 0)},{(_flatStrideN > 0 ? _flatStrideMax : 0)}] over {_flatStrideN}, normal {(_normalStrideN > 0 ? _normalStrideSum / _normalStrideN : 0):F1} over {_normalStrideN}");
             sb.Append($" | blit vertex spread (distinct of 4): flat {(_flatVertN > 0 ? _flatVertSum / _flatVertN : 0):F2} over {_flatVertN}, normal {(_normalVertN > 0 ? _normalVertSum / _normalVertN : 0):F2} over {_normalVertN}");
             sb.Append($" | composite draws/frame: flat {(_flatDrawN > 0 ? _flatDrawSum / _flatDrawN : 0):F2}, normal {(_normalDrawN > 0 ? _normalDrawSum / _normalDrawN : 0):F2}");
+            sb.Append($" | sampler fence: asked {_fenceAsked}, signalled {_fenceReady}");
             sb.Append($" | argbuf overwritten by frame end: flat {_flatArgMismatch}/{_flatArgChecked}, normal {_normalArgMismatch}/{_normalArgChecked}");
             sb.Append($" | out-of-order commits/frame: flat {(_flatOooN > 0 ? _flatOooSum / _flatOooN : 0):F2}, normal {(_normalOooN > 0 ? _normalOooSum / _normalOooN : 0):F2}");
             sb.Append($" | composite residency decls: flat {(_flatResidencyN > 0 ? _flatResidencySum / _flatResidencyN : 0):F2} over {_flatResidencyN}, normal {(_normalResidencyN > 0 ? _normalResidencySum / _normalResidencyN : 0):F2} over {_normalResidencyN}");
