@@ -125,6 +125,9 @@ namespace Ryujinx.Graphics.Metal
 
         private static readonly HashSet<string> _clearCensus = new();
 
+        private static readonly bool _presentBarrier =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_PRESENT_BARRIER") == "1";
+
         private static readonly bool _splitBlit =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_SPLIT_BLIT") == "1";
 
@@ -897,6 +900,17 @@ namespace Ryujinx.Graphics.Metal
 
         public void Present(CAMetalDrawable drawable, Texture src, Extents2D srcRegion, Extents2D dstRegion, bool isLinear, bool useFsrSharpener, float scalingFilterLevel)
         {
+            // The GPU-layer modification trace shows the game's final sRGB target is BOUND as
+            // a render target across the present boundary (RT-bind:Srgb at frame end,
+            // RT-unbind:Srgb at next frame start). If the encoder writing it is still open
+            // when present samples it, the sample sees pre-store contents. End every open
+            // pass and commit before present so the write has landed. RYUJINX_METAL_PRESENT_BARRIER=1
+            if (_presentBarrier)
+            {
+                EndCurrentPass(PassEndReason.Flush);
+                FlushCommandsImpl();
+            }
+
             // Drain everything autoreleased on the render thread since the last
             // present (encoders, command buffers, drawables and their driver-side
             // shadows), then open the next frame's pool. Without this the thread

@@ -1489,8 +1489,21 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <summary>
         /// Signals that the texture has been modified.
         /// </summary>
+
+        private void TagPresentRangeModification(string via)
+        {
+            if (!_context.PresentTraceEnabled) { return; }
+            if (!(Info.Width >= 1900 && Info.Height >= 1000)) { return; }
+            string origin = System.Environment.StackTrace;
+            string who = origin.Contains("TwodClass") ? "2D" : origin.Contains("DmaClass") ? "DMA" :
+                         origin.Contains("TextureBindingsManager") ? "bind" : origin.Contains("ThreedClass") || origin.Contains("StateUpdater") ? "3D" : "other";
+            _context.Renderer.Window.NoteModifiedBy($"{via}:{who}:{Info.FormatInfo.Format}@{Range.GetSubRange(0).Address:X}");
+        }
+
         public void SignalModified()
         {
+            TagPresentRangeModification("SignalModified");
+
             _scaledSetScore = Math.Max(0, _scaledSetScore - 1);
 
             if (_modifiedStale || Group.HasCopyDependencies)
@@ -1509,6 +1522,7 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <param name="bound">True if the texture has been bound, false if it has been unbound</param>
         public void SignalModifying(bool bound)
         {
+            TagPresentRangeModification(bound ? "RT-bind" : "RT-unbind");
             if (bound)
             {
                 _scaledSetScore = Math.Max(0, _scaledSetScore - 1);

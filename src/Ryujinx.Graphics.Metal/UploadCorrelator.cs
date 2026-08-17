@@ -108,6 +108,9 @@ namespace Ryujinx.Graphics.Metal
             public string Triple;
             public bool SrcWasRecentDst;
             public bool RtSampled;
+            public int ReplaceViews;
+            public int NewTextures;
+            public string ModifiedBy;
             public string RtWriters;
             public string SceneWriters;
             public bool BlitPrevMatch;
@@ -213,6 +216,23 @@ namespace Ryujinx.Graphics.Metal
                 Logger.Warning?.PrintMsg(LogClass.Gpu,
                     $"game RT VIEW: {t.Width}x{t.Height} {t.Info.Format} canon=0x{t.CanonicalPtr:X} native=0x{t.GetHandle().NativePtr:X} sameRootAsRT={(t.CanonicalPtr == _frameGameRtRoot)} writers={w}");
             }
+        }
+
+        private static int _frameReplaceViews, _frameNewTextures;
+        private static double _rvFlat, _rvNormal, _ntFlat, _ntNormal; private static long _topoFlatN, _topoNormalN;
+
+        private static string _frameModifiedBy = "";
+        private static readonly Dictionary<string, (long Flat, long Normal)> _modByStats = new();
+
+        public static void NoteModifiedBy(string who)
+        {
+            if (Enabled && !_frameModifiedBy.Contains(who)) { _frameModifiedBy += who + ","; }
+        }
+
+        public static void NoteTopologyEvent(int kind)
+        {
+            if (!Enabled) { return; }
+            if (kind == 1) { _frameReplaceViews++; } else { _frameNewTextures++; }
         }
 
         public static void NoteGameFinalTarget(Texture t)
@@ -1352,6 +1372,9 @@ namespace Ryujinx.Graphics.Metal
                 // colour render target - the texture the capture showed holding the
                 // correct picture while present read white from another.
                 mine.RtSampled = false;
+                mine.ReplaceViews = _frameReplaceViews;
+                mine.NewTextures = _frameNewTextures;
+                mine.ModifiedBy = _frameModifiedBy.Length == 0 ? "(none)" : _frameModifiedBy;
                 Texture rtTex = _frameGameRtTex ?? _frameLastFullResTex;
                 if (rtTex != null && rtTex.CanonicalPtr != src.CanonicalPtr)
                 {
@@ -1428,6 +1451,9 @@ namespace Ryujinx.Graphics.Metal
             _frameOutOfOrder = 0;
             _frameArgPtr = IntPtr.Zero;
             _frameLastFullResRt = IntPtr.Zero;
+            _frameReplaceViews = 0;
+            _frameNewTextures = 0;
+            _frameModifiedBy = "";
             _frameLastRgba8Rt = IntPtr.Zero;
             _frameSceneSourceRoot = IntPtr.Zero;
             _frameBlitPairKnown = false;
@@ -1616,6 +1642,15 @@ namespace Ryujinx.Graphics.Metal
                 (long rf, long rn) = _rtWriterStats.TryGetValue(slot.RtWriters, out (long Flat, long Normal) rv) ? (rv.Flat, rv.Normal) : (0L, 0L);
                 _rtWriterStats[slot.RtWriters] = flat ? (rf + 1, rn) : (rf, rn + 1);
             }
+
+            if (slot.ModifiedBy != null && (_modByStats.Count < 16 || _modByStats.ContainsKey(slot.ModifiedBy)))
+            {
+                (long mf, long mn) = _modByStats.TryGetValue(slot.ModifiedBy, out (long Flat, long Normal) mv) ? (mv.Flat, mv.Normal) : (0L, 0L);
+                _modByStats[slot.ModifiedBy] = flat ? (mf + 1, mn) : (mf, mn + 1);
+            }
+
+            if (flat) { _rvFlat += slot.ReplaceViews; _ntFlat += slot.NewTextures; _topoFlatN++; }
+            else { _rvNormal += slot.ReplaceViews; _ntNormal += slot.NewTextures; _topoNormalN++; }
 
             if (slot.RtSampled)
             {
@@ -2140,6 +2175,11 @@ namespace Ryujinx.Graphics.Metal
                     sb.Append($"\n  LAST-RT writers: flat {rw[i].Value.Flat,6} / {tot,6} = {(tot > 0 ? 100.0 * rw[i].Value.Flat / tot : 0),5:F1}%  {rw[i].Key}");
                 }
             }
+            foreach (KeyValuePair<string, (long Flat, long Normal)> mb in _modByStats)
+            {
+                sb.Append($"\n  PRESENT-RANGE modified by [{mb.Key}]: flat {mb.Value.Flat} normal {mb.Value.Normal}");
+            }
+            sb.Append($"\n  TOPOLOGY/frame: replaceView flat {(_topoFlatN > 0 ? _rvFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _rvNormal / _topoNormalN : 0):F3} | newTexture flat {(_topoFlatN > 0 ? _ntFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _ntNormal / _topoNormalN : 0):F3}");
             sb.Append($"\n  RT-vs-SRC at present: [RT picture, SRC white] flat {_rtPicSrcWhiteFlat} normal {_rtPicSrcWhiteNormal} | [both picture] flat {_bothPicFlat} normal {_bothPicNormal} | [both white] flat {_bothWhiteFlat} normal {_bothWhiteNormal} | [RT white, SRC pic] flat {_rtWhiteSrcPicFlat} normal {_rtWhiteSrcPicNormal}");
             sb.Append($"\n  PRESENT src is a recent drawable: yes flat {_srcWasRecentDstFlat} normal {_srcWasRecentDstNormal} | no flat {_srcNotDstFlat} normal {_srcNotDstNormal}");
             foreach (KeyValuePair<string, (long Flat, long Normal)> t3 in _tripleStats)

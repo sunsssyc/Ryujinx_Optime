@@ -23,6 +23,10 @@ namespace Ryujinx.Graphics.Gpu
         private static int _siblingLogs;
         private static int _gameRtShapeLogs;
 
+        private static readonly bool _presentFlush =
+            System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_FLUSH") == "1";
+        private static int _flushLogs;
+
         private static readonly bool _presentNoSync =
             System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_NOSYNC") == "1";
 
@@ -214,6 +218,21 @@ namespace Ryujinx.Graphics.Gpu
             if (_frameQueue.TryDequeue(out PresentationTexture pt))
             {
                 pt.AcquireCallback(_context, pt.UserObj);
+                _context.PresentTraceRange = pt.Range;
+
+                // Experiment: before the present lookup, flush every modified texture that
+                // overlaps the presentation range back to guest memory, so the texture the
+                // lookup returns (a shadow fed from guest memory) uploads THIS frame's data
+                // rather than whatever the range held before the game's own writer flushed.
+                // RYUJINX_GPU_PRESENT_FLUSH=1
+                if (_presentFlush)
+                {
+                    int flushed = pt.Cache.FlushOverlapsToGuest(pt.Range);
+                    if (_presentTrace && ++_flushLogs % 300 == 1)
+                    {
+                        Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu, $"present pre-flush: {flushed} texture(s) flushed on range");
+                    }
+                }
 
                 Image.Texture texture = pt.Cache.FindOrCreateTexture(null, TextureSearchFlags.WithUpscale, pt.Info, 0, range: pt.Range);
 

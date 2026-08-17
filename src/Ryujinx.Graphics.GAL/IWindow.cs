@@ -13,6 +13,12 @@ namespace Ryujinx.Graphics.GAL
         /// <summary>Diagnostic: a view of the game's final render target.</summary>
         void NoteGameFinalTargetView(ITexture texture) { }
 
+        /// <summary>Diagnostic: 1 = ReplaceView, 2 = new top-level texture.</summary>
+        void NoteTopologyEvent(int kind) { }
+
+        /// <summary>Diagnostic: which engine marked the present-range texture modified.</summary>
+        void NoteModifiedBy(string who) { }
+
         void SetSize(int width, int height);
 
         void ChangeVSyncMode(VSyncMode vSyncMode);

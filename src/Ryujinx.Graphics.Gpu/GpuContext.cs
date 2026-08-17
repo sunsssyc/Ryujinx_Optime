@@ -121,6 +121,10 @@ namespace Ryujinx.Graphics.Gpu
         /// Creates a new instance of the GPU emulation context.
         /// </summary>
         /// <param name="renderer">Host renderer</param>
+        /// <summary>Diagnostic: the presentation range being traced, if any.</summary>
+        public Ryujinx.Memory.Range.MultiRange? PresentTraceRange;
+        public bool PresentTraceEnabled = System.Environment.GetEnvironmentVariable("RYUJINX_METAL_UPLOAD_CORR") == "1";
+
         public GpuContext(IRenderer renderer, DirtyHacks hacks)
         {
             Renderer = renderer;

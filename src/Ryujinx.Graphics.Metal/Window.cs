@@ -95,6 +95,10 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        public void NoteModifiedBy(string who) => UploadCorrelator.NoteModifiedBy(who);
+
+        public void NoteTopologyEvent(int kind) => UploadCorrelator.NoteTopologyEvent(kind);
+
         public void NoteGameFinalTargetView(ITexture texture)
         {
             if (texture is Texture t)

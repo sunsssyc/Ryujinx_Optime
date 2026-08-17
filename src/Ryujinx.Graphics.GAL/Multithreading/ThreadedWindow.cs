@@ -27,6 +27,10 @@ namespace Ryujinx.Graphics.GAL.Multithreading
             _renderer.QueueCommand();
         }
 
+        public void NoteModifiedBy(string who) => _impl.Window.NoteModifiedBy(who);
+
+        public void NoteTopologyEvent(int kind) => _impl.Window.NoteTopologyEvent(kind);
+
         public void NoteGameFinalTargetView(ITexture texture)
         {
             _impl.Window.NoteGameFinalTargetView(texture is ThreadedTexture tt ? tt.Base : texture);

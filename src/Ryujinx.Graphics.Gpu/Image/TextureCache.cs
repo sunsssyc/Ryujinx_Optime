@@ -377,6 +377,35 @@ namespace Ryujinx.Graphics.Gpu.Image
             return null;
         }
 
+        /// <summary>
+        /// Flush every modified texture overlapping the range back to guest memory, so a
+        /// subsequent guest-memory-fed texture on the same range uploads current data. Also
+        /// reports which textures were actually modified (the frame's true writers).
+        /// </summary>
+        private static int _flushWhoLogs;
+
+        public int FlushOverlapsToGuest(MultiRange range)
+        {
+            Texture[] overlaps = new Texture[64];
+            int count = _textures.FindOverlaps(range, ref overlaps);
+            int flushed = 0;
+            for (int i = 0; i < count; i++)
+            {
+                Texture o = overlaps[i];
+                if (o == null) { continue; }
+                if (o.FlushModified(true))
+                {
+                    flushed++;
+                    if (++_flushWhoLogs % 300 == 1)
+                    {
+                        Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu,
+                            $"present pre-flush WHO: tex#{o.GetHashCode():X} {o.Info.Width}x{o.Info.Height} {o.Info.FormatInfo.Format} isView={o.IsView} host#{(o.HostTexture?.GetHashCode() ?? 0):X} rangeEq={o.Range.Equals(range)}");
+                    }
+                }
+            }
+            return flushed;
+        }
+
         /// <summary>Diagnostic: how many cached textures overlap this range.</summary>
         public int CountForRange(MultiRange range)
         {
@@ -980,7 +1009,8 @@ namespace Ryujinx.Graphics.Gpu.Image
                     {
                         // Only copy compatible. If there's another choice for a FULLY compatible texture, choose that instead.
 
-                        texture = new Texture(_context, _physicalMemory, info, sizeInfo, range.Value, scaleMode);
+                        _context.Renderer.Window.NoteTopologyEvent(2);
+            texture = new Texture(_context, _physicalMemory, info, sizeInfo, range.Value, scaleMode);
 
                         // If the new texture is larger than the existing one, we need to fill the remaining space with CPU data,
                         // otherwise we only need the data that is copied from the existing texture, without loading the CPU data.
@@ -1203,6 +1233,9 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                         overlap.HostTexture.CopyTo(newView, 0, 0);
 
+                        // Diagnostic: topology churn on the present range is the remaining
+                        // Metal-specific candidate for the white frame.
+                        _context.Renderer.Window.NoteTopologyEvent(1);
                         overlap.ReplaceView(texture, overlapInfo, newView, oInfo.FirstLayer, oInfo.FirstLevel);
                     }
                 }

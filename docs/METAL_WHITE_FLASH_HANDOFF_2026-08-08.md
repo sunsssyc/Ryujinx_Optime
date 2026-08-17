@@ -5642,3 +5642,29 @@ remove the white - A itself samples white on 95% of white frames.
 
 Open: which of A/V/B the GAME actually renders into, and how content reaches whichever one
 present reads. Next arm censuses all three roots side by side.
+
+### 2026-08-17 morning: the present-side structure, fully mapped; the white is inside A
+
+Where present's white comes from is now mapped end to end (every arm gated, ~11k frames each):
+
+- Present asks the cache for a 1080p RGBA8 **Unorm** at range R; the game's final target A
+  is 1080p RGBA8 **Srgb** at R (double-buffered R1/R2). The cache holds A, A's Unorm view V,
+  and a separate Unorm top-level B; present's exact match selects B. Presenting A directly
+  (`FindRenderedSibling`) does not change the rate: **A itself is white on 95% of white
+  frames.** Force-flushing R to guest memory before present: no change. Ending every pass
+  and committing before present: no change. Cache topology churn (ReplaceView/new texture):
+  occurs only on normal frames.
+- The GPU-layer modification trace for 1080p textures gives one dominant per-frame
+  signature: `RT-bind:3D:R11G11B10Float@657D9E9000 → unbind → RT-bind:3D:R8G8B8A8Srgb@R →
+  unbind` - the 1080p RG11B10 scene target is drawn, then A is bound as the 3D engine's
+  render target and drawn into (a Load pass with 3 draws: one composite/tonemap from the
+  scene target plus HUD). A is at a different address from the scene target, so it is not
+  an alias; its content is produced by that composite draw.
+- Yet the Metal-side attachment census keyed on A's root records no writer in any frame.
+
+So the remaining discrepancy is exactly one: **the 3D engine binds A as a render target and
+draws into it (GPU layer), and the Metal backend's per-draw attachment hook never sees a
+draw whose RenderTargets contain A's root.** Either the backend receives a different host
+object for that pass (a view whose root differs from A.HostTexture's), or the draws into A
+are issued through a path the hook does not cover. Resolving that names the pass that
+paints white, and it is a Metal-side bookkeeping question, not a GPU-hardware one.
