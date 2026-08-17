@@ -5762,3 +5762,27 @@ In-place corruption of a Private texture with no API-layer writer leaves only wr
 name the same bytes under a different object: a texture VIEW of the half (a different
 MTLTexture pointer, same storage) used as an attachment or image. The watch is now
 view-aware (resolves parentTexture) - that run is next.
+
+### View-aware watch: still nothing; same-half read/write: not it
+
+The watch now resolves every texture to its root storage via parentTexture, so a write
+through a view of either half would show. It does not: the only references to the two halves
+remain the composite's `attach load=Load store=Store` at the end of frame N and present's
+`useResources Read/Fragment` at the start of frame N+1. And present reads the OTHER half than
+the composite writes in the same frame on 2,603 of 2,615 white frames (same-half: 12 white,
+61 normal) - no same-frame read/write race.
+
+So the exact state, all measured on the same MTLTexture pointer across the frame boundary:
+picture when the composite's pass ends -> white when present's pass samples it one frame
+later; Private device texture; no CPU path; no API-layer command of any kind in between
+(attach, blit, sample, useResource, purgeable, view-resolved). Load->Clear, waiting on the
+composite's fence, pre-present flush, EndPass+commit before present, sibling swap: all null.
+
+What has NOT been watched at the API layer: compute encoders (`setTexture:` on a compute
+encoder, `dispatchThreadgroups`) and indirect argument buffers whose contents name the half
+without any useResource declaration (an undeclared read is legal to fail, an undeclared WRITE
+through an argument-buffer image slot would be invisible to every hook here). Both are the
+next things to hook in mtlspy: `computeCommandEncoder`'s `setTexture:atIndex:` and
+`useResource:` on the compute class, and - for the argument-buffer path - the encoder's
+`setFragmentBuffer:offset:atIndex:` at index 19 (the Textures table) so its GPU-side ids can
+be dumped and compared against the two halves' `gpuResourceID`.

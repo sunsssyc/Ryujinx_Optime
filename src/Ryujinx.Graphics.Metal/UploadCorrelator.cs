@@ -78,6 +78,7 @@ namespace Ryujinx.Graphics.Metal
             public bool AfterOutSampled;
             public IntPtr AfterOutPtr;
             public IntPtr PresentSrcPtr;
+            public IntPtr DrawnSrgbPtrThisFrame;
             public bool SamplerSampled;
             public MTLPixelFormat InputFmt;
             public bool InputWrittenAfter;
@@ -656,6 +657,9 @@ namespace Ryujinx.Graphics.Metal
         private static long _samePicToWhiteFlat, _samePicToPicFlat, _sameWhiteToWhiteFlat, _sameWhiteToPicFlat;
         private static long _samePicToWhiteNormal, _samePicToPicNormal, _sameWhiteToWhiteNormal, _sameWhiteToPicNormal;
         private static long _sameUnpairedFlat, _sameUnpairedNormal;
+        // Does present read the SAME half the composite writes in this frame (no double-buffer
+        // alternation), and does that coincide with white?
+        private static long _rwSameHalfFlat, _rwSameHalfNormal, _rwOtherHalfFlat, _rwOtherHalfNormal;
 
         public static void SampleInputAfterBlit(CommandBufferScoped cbs)
         {
@@ -1442,6 +1446,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.AfterOutSampled = _frameAfterOutSampled;
                 mine.AfterOutPtr = _frameAfterOutPtr;
                 mine.PresentSrcPtr = src.CanonicalPtr;
+                mine.DrawnSrgbPtrThisFrame = _frameAfterOutPtr;
                 mine.SamplerSampled = _frameSamplerSampled;
                 mine.InputFmt = _frameInputFmt;
                 mine.InGen = _inputGen;
@@ -2149,6 +2154,13 @@ namespace Ryujinx.Graphics.Metal
                 if (_paintedWhiteByPtr.Count > 8) { _paintedWhiteByPtr.Clear(); _paintedWhiteByPtr[slot.AfterOutPtr] = w; }
             }
 
+            if (slot.PresentSrcPtr != IntPtr.Zero && slot.DrawnSrgbPtrThisFrame != IntPtr.Zero)
+            {
+                bool sameHalf = slot.PresentSrcPtr == slot.DrawnSrgbPtrThisFrame;
+                if (flat) { if (sameHalf) { _rwSameHalfFlat++; } else { _rwOtherHalfFlat++; } }
+                else { if (sameHalf) { _rwSameHalfNormal++; } else { _rwOtherHalfNormal++; } }
+            }
+
             if (slot.PresentSrcPtr != IntPtr.Zero && _paintedWhiteByPtr.TryGetValue(slot.PresentSrcPtr, out bool paintedWhite))
             {
                 // 'flat' is what present shows NOW for this same pointer.
@@ -2405,6 +2417,7 @@ namespace Ryujinx.Graphics.Metal
             {
                 sb.Append($"\n  PRESENT-RANGE modified by [{mb.Key}]: flat {mb.Value.Flat} normal {mb.Value.Normal}");
             }
+            sb.Append($"\n  PRESENT reads the half the composite WRITES this frame: same-half flat {_rwSameHalfFlat} normal {_rwSameHalfNormal} | other-half flat {_rwOtherHalfFlat} normal {_rwOtherHalfNormal}");
             sb.Append($"\n  SAME-STORAGE painted->presented: [pic->WHITE] flat {_samePicToWhiteFlat} | [white->white] flat {_sameWhiteToWhiteFlat} | [pic->pic] normal {_samePicToPicNormal} | [white->pic] normal {_sameWhiteToPicNormal} | unpaired flat {_sameUnpairedFlat} normal {_sameUnpairedNormal}");
             sb.Append($"\n  COMPOSITE OUTPUT right after its draw (frame N) vs outcome (N+1): [white@draw] flat {_outWhiteAtDrawFlat} normal {_outWhiteAtDrawNormal} | [picture@draw] flat {_outPicAtDrawFlat} normal {_outPicAtDrawNormal}");
             sb.Append($"\n  TOPOLOGY/frame: replaceView flat {(_topoFlatN > 0 ? _rvFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _rvNormal / _topoNormalN : 0):F3} | newTexture flat {(_topoFlatN > 0 ? _ntFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _ntNormal / _topoNormalN : 0):F3}");
