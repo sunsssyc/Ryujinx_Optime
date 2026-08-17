@@ -5735,3 +5735,30 @@ shows picture->white with no API-layer writer in between is "in-place corruption
 Until then, the honest state is: present shows a half that, one frame earlier, was painted
 correctly by a composite whose input was correct - and something between those two moments
 is not yet observed.
+
+---
+
+## SAME-STORAGE, CROSS-FRAME, KEYED BY POINTER (2026-08-17 night) - the real decider
+
+The measurement the earlier "DECIDER" should have been. Each frame the correlator reads the
+half the composite just painted (region F, keyed by its MTLTexture pointer) and remembers
+white/picture per pointer; when present later reads a pointer it remembers, the two are
+paired. Gated arm, luma 140, 11,399 frames:
+
+    painted PICTURE -> presented WHITE    flat  2,563   (100% of white frames)
+    painted white   -> presented white    flat      0
+    painted PICTURE -> presented picture  normal 8,836  (100% of normal frames)
+    painted white   -> presented picture  normal     0
+    unpaired                              0 / 0
+
+**On every white frame the very same storage held a picture when the composite finished and
+holds white when present reads it one frame later, and the Metal API layer records no
+command touching that storage in between** (attach/blit/sample/useResource/purgeable all
+watched, both halves; only the composite's attach and present's useResource ever appear).
+The two halves are `storage 2` (Private) device textures - not CPU-writable, not
+buffer-backed - so a host-side memcpy is excluded too.
+
+In-place corruption of a Private texture with no API-layer writer leaves only writes that
+name the same bytes under a different object: a texture VIEW of the half (a different
+MTLTexture pointer, same storage) used as an attachment or image. The watch is now
+view-aware (resolves parentTexture) - that run is next.

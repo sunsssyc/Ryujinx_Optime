@@ -76,6 +76,8 @@ namespace Ryujinx.Graphics.Metal
             public bool InputSampled;
             public bool AfterSampled;
             public bool AfterOutSampled;
+            public IntPtr AfterOutPtr;
+            public IntPtr PresentSrcPtr;
             public bool SamplerSampled;
             public MTLPixelFormat InputFmt;
             public bool InputWrittenAfter;
@@ -643,8 +645,17 @@ namespace Ryujinx.Graphics.Metal
 
         private static bool _afterBlitArmed;
         private static bool _frameAfterOutSampled;
+        private static IntPtr _frameAfterOutPtr;
         private static bool _pendingAfterOutKnown, _pendingAfterOutWhite;
         private static long _outWhiteAtDrawFlat, _outPicAtDrawFlat, _outWhiteAtDrawNormal, _outPicAtDrawNormal;
+
+        // Same-storage, cross-frame pairing: (pointer -> was it white right after the
+        // composite painted it), remembered for a few frames; consumed when present reads
+        // that same pointer. This is the measurement the DECIDER should have been.
+        private static readonly Dictionary<IntPtr, bool> _paintedWhiteByPtr = new();
+        private static long _samePicToWhiteFlat, _samePicToPicFlat, _sameWhiteToWhiteFlat, _sameWhiteToPicFlat;
+        private static long _samePicToWhiteNormal, _samePicToPicNormal, _sameWhiteToWhiteNormal, _sameWhiteToPicNormal;
+        private static long _sameUnpairedFlat, _sameUnpairedNormal;
 
         public static void SampleInputAfterBlit(CommandBufferScoped cbs)
         {
@@ -691,6 +702,7 @@ namespace Ryujinx.Graphics.Metal
                             _buf, (ulong)(4 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16 + idx * Pixels * BytesPerPixel), BytesPerPixel, BytesPerPixel);
                     }
                     _frameAfterOutSampled = true;
+                    _frameAfterOutPtr = outTex.CanonicalPtr;
                 }
             }
 
@@ -1428,6 +1440,8 @@ namespace Ryujinx.Graphics.Metal
                 mine.WrSerial = _writerSerial;
                 mine.AfterSampled = _frameAfterSampled;
                 mine.AfterOutSampled = _frameAfterOutSampled;
+                mine.AfterOutPtr = _frameAfterOutPtr;
+                mine.PresentSrcPtr = src.CanonicalPtr;
                 mine.SamplerSampled = _frameSamplerSampled;
                 mine.InputFmt = _frameInputFmt;
                 mine.InGen = _inputGen;
@@ -2122,6 +2136,36 @@ namespace Ryujinx.Graphics.Metal
                 else { if (outWhiteForThisOutcome) { _outWhiteAtDrawNormal++; } else { _outPicAtDrawNormal++; } }
             }
 
+            // Record this frame's painted half by pointer, then pair THIS frame's present
+            // source (by pointer) with what it looked like when it was painted.
+            if (slot.AfterOutSampled && slot.AfterOutPtr != IntPtr.Zero)
+            {
+                bool w = false;
+                byte* po = (byte*)_buf.Contents + 4 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16 + index * Pixels * BytesPerPixel;
+                int sat = 0;
+                for (int i = 0; i < Pixels; i++) { byte* px = po + i * BytesPerPixel; if ((px[0] + px[1] + px[1] + px[2]) * 0.25 >= SaturatedLuma) { sat++; } }
+                w = sat >= SaturatedNeeded;
+                _paintedWhiteByPtr[slot.AfterOutPtr] = w;
+                if (_paintedWhiteByPtr.Count > 8) { _paintedWhiteByPtr.Clear(); _paintedWhiteByPtr[slot.AfterOutPtr] = w; }
+            }
+
+            if (slot.PresentSrcPtr != IntPtr.Zero && _paintedWhiteByPtr.TryGetValue(slot.PresentSrcPtr, out bool paintedWhite))
+            {
+                // 'flat' is what present shows NOW for this same pointer.
+                if (flat)
+                {
+                    if (paintedWhite) { _sameWhiteToWhiteFlat++; } else { _samePicToWhiteFlat++; }
+                }
+                else
+                {
+                    if (paintedWhite) { _sameWhiteToPicNormal++; } else { _samePicToPicNormal++; }
+                }
+            }
+            else
+            {
+                if (flat) { _sameUnpairedFlat++; } else { _sameUnpairedNormal++; }
+            }
+
             if (flat)
             {
                 if (inputKnownForThisOutcome)
@@ -2361,6 +2405,7 @@ namespace Ryujinx.Graphics.Metal
             {
                 sb.Append($"\n  PRESENT-RANGE modified by [{mb.Key}]: flat {mb.Value.Flat} normal {mb.Value.Normal}");
             }
+            sb.Append($"\n  SAME-STORAGE painted->presented: [pic->WHITE] flat {_samePicToWhiteFlat} | [white->white] flat {_sameWhiteToWhiteFlat} | [pic->pic] normal {_samePicToPicNormal} | [white->pic] normal {_sameWhiteToPicNormal} | unpaired flat {_sameUnpairedFlat} normal {_sameUnpairedNormal}");
             sb.Append($"\n  COMPOSITE OUTPUT right after its draw (frame N) vs outcome (N+1): [white@draw] flat {_outWhiteAtDrawFlat} normal {_outWhiteAtDrawNormal} | [picture@draw] flat {_outPicAtDrawFlat} normal {_outPicAtDrawNormal}");
             sb.Append($"\n  TOPOLOGY/frame: replaceView flat {(_topoFlatN > 0 ? _rvFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _rvNormal / _topoNormalN : 0):F3} | newTexture flat {(_topoFlatN > 0 ? _ntFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _ntNormal / _topoNormalN : 0):F3}");
             sb.Append($"\n  RT-vs-SRC at present: [RT picture, SRC white] flat {_rtPicSrcWhiteFlat} normal {_rtPicSrcWhiteNormal} | [both picture] flat {_bothPicFlat} normal {_bothPicNormal} | [both white] flat {_bothWhiteFlat} normal {_bothWhiteNormal} | [RT white, SRC pic] flat {_rtWhiteSrcPicFlat} normal {_rtWhiteSrcPicNormal}");
