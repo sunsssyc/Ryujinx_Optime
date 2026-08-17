@@ -525,6 +525,19 @@ namespace Ryujinx.Graphics.Metal
                     tex.PopulateRenderPassAttachment(passAttachment, _pipeline.Cbs);
                     passAttachment.LoadAction = _currentState.ClearLoadAction ? MTLLoadAction.Clear : MTLLoadAction.Load;
 
+                    // Experiment: the game's final 1080p sRGB target is Loaded every frame and
+                    // then fully repainted by its composite; the Metal API layer shows no other
+                    // command touching that storage, yet present later reads white. If Load is
+                    // handing the pass a stale tile instead of the texture's memory, forcing a
+                    // Clear here removes the only read of old contents. RYUJINX_METAL_CLEAR_SRGB1080=1
+                    if (_clearSrgb1080 && tex.Width >= 1900 && tex.Height >= 1000 &&
+                        (tex.Info.Format == Format.R8G8B8A8Srgb || tex.Info.Format == Format.B8G8R8A8Srgb) &&
+                        passAttachment.LoadAction == MTLLoadAction.Load)
+                    {
+                        passAttachment.LoadAction = MTLLoadAction.Clear;
+                        passAttachment.ClearColor = new MTLClearColor { red = 0.0, green = 0.0, blue = 0.0, alpha = 1.0 };
+                    }
+
                     // Canary: a clear colour the game never uses, set even when the load
                     // action is Load - the spec says it is ignored then. If white frames
                     // turn magenta, the driver executed this Load as a Clear, a mechanism
@@ -2143,6 +2156,9 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private static readonly bool _shadowBind =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_SHADOW_BIND") == "1";
+
+        private static readonly bool _clearSrgb1080 =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_CLEAR_SRGB1080") == "1";
 
         private static readonly bool _canaryClear =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_CANARY_CLEAR") == "1";

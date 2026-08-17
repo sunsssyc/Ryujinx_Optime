@@ -5701,3 +5701,37 @@ last reader ran. Both are allocation/lifetime, which is exactly the axis that ev
 rate (own-allocation +11 points; the RAW split -21). The next and final measurement is at
 the Metal API layer, outside Ryujinx's accounting: for the storage the composite just wrote,
 list every command that touches it between that pass and the next present.
+
+---
+
+## 2026-08-17 evening: the Metal-API-layer watch, and where it leaves things
+
+`tools/mtlspy.m` now watches the storage the game's composite just painted (pointer handed
+over per frame via `RYUJINX_METAL_WATCH_PTR_FILE` / `MTLSPY_WATCH_FILE`), both halves of
+the double buffer, logging every command that names it: attachments (load/store/clear),
+blit src/dst, `setFragmentTexture`, `useResource(s)`, `setPurgeableState`. Result, per
+frame, with nothing else in between:
+
+    frame N   (enc#3xx-4xx)  NEW attach  load=Load store=Store       <- composite paints NEW
+    frame N+1 (enc#1)        OLD useResources Read/Fragment          <- present reads OLD (= last frame's NEW)
+
+Present reads the other half than the composite writes (391:9), so no same-frame RAW hazard.
+No third texture, no blit in or out, no purgeable change, no direct sampler bind.
+
+Interventions on this exact pair, all gated, all null:
+- Load -> Clear(black) on the sRGB 1080p target: 23.05%, white shape unchanged
+- present waits on the previous composite CB's fence before encoding: 22.61%
+- present-before-composite commit inversion happens on 41% of white and 44% of normal
+  frames - uncorrelated, so cross-CB commit order is not the discriminator
+- earlier: pre-present guest flush, EndPass+commit before present, sibling swap - all null
+
+**A measurement error to fix first next time.** "The composite's output is a picture right
+after its draw" (the DECIDER) sampled the NEW half at frame N; "present's source is white"
+sampled the OLD half at frame N+1. Those are different storages painted in different frames,
+so that comparison did not prove content changed in place. The needed measurement is the
+SAME storage read twice: right after the composite paints it (frame N), and again when
+present reads it (frame N+1), keyed by pointer, split by frame N+1's outcome. Only if that
+shows picture->white with no API-layer writer in between is "in-place corruption" real.
+Until then, the honest state is: present shows a half that, one frame earlier, was painted
+correctly by a composite whose input was correct - and something between those two moments
+is not yet observed.

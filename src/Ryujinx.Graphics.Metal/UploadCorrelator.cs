@@ -88,6 +88,10 @@ namespace Ryujinx.Graphics.Metal
             public string Attrib;
             public string Raster;
             public int WriterCb;
+            public int PresentCb;
+            public long PresentRent;
+            public int CompCb;
+            public long CompRent;
             public long WriterRent;
             public int BlitCb;
             public long BlitRent;
@@ -264,6 +268,7 @@ namespace Ryujinx.Graphics.Metal
         private static readonly List<string> _frameFullResAttach = new();
         private static IntPtr _frameDrawnSrgbRoot;
         private static Texture _frameDrawnSrgbTex;
+        private static readonly string _watchFile = Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_PTR_FILE");
         public static bool _inPresent;
         private static int _rootCompareLogs;
 
@@ -292,6 +297,19 @@ namespace Ryujinx.Graphics.Metal
                 {
                     _frameDrawnSrgbRoot = t.CanonicalPtr;
                     _frameDrawnSrgbTex = t;
+
+                    // Hand the storage pointer to the out-of-process Metal probe (mtlspy) via
+                    // a tiny file: it watches every command that touches this MTLTexture
+                    // between the composite's pass and the next present, outside Ryujinx's
+                    // own accounting, which records no writer at all in that window.
+                    if (_watchFile != null)
+                    {
+                        try
+                        {
+                            System.IO.File.WriteAllText(_watchFile, $"{t.CanonicalPtr.ToInt64():X} {_frame}\n");
+                        }
+                        catch (System.IO.IOException) { }
+                    }
                 }
             }
         }
@@ -1116,6 +1134,13 @@ namespace Ryujinx.Graphics.Metal
             _frameBlitInputRoot = inputRoot;
             _frameBlitCb = cbIndex;
             _frameBlitRent = rentSeq;
+            _lastCompositeCb = cbIndex;
+            _lastCompositeRent = rentSeq;
+            if (_pool != null)
+            {
+                FenceHolder f = _pool.GetFence(cbIndex);
+                if (f != null) { f.Get(); _lastCompositeFence?.Put(); _lastCompositeFence = f; }
+            }
 
             // The capture's shape: Render Encoder 0 (HUD, attachment X) then the RCAS blit
             // reading Y, and X != Y on the white frame. _lastAttachmentRoot is X here.
@@ -1128,6 +1153,31 @@ namespace Ryujinx.Graphics.Metal
                 _frameWriterRent = w.Rent;
             }
         }
+
+        // The REAL pair: composite in frame N (its cb rent/commit seq) against present in
+        // frame N+1 (the cb OnPresent runs in). Held one frame.
+        private static int _lastCompositeCb = -1; private static long _lastCompositeRent = -1;
+        private static FenceHolder _lastCompositeFence;
+        private static readonly bool _waitComposite = Environment.GetEnvironmentVariable("RYUJINX_METAL_PRESENT_WAIT_COMPOSITE") == "1";
+        private static long _waitCompositeCount;
+
+        /// <summary>
+        /// Called at present, before its encoding: block until the previous frame's
+        /// composite command buffer has COMPLETED on the GPU. If white frames vanish, the
+        /// composite's store had not landed when present sampled - a cross-command-buffer
+        /// visibility gap that commit order alone does not close.
+        /// </summary>
+        public static void WaitForLastComposite()
+        {
+            if (!_waitComposite || _lastCompositeFence == null) { return; }
+            _lastCompositeFence.Wait();
+            if (++_waitCompositeCount % 600 == 1)
+            {
+                Logger.Info?.PrintMsg(LogClass.Gpu, $"present waited for composite cb fence: {_waitCompositeCount}");
+            }
+        }
+        private static int _prevCompositeCb = -1; private static long _prevCompositeRent = -1;
+        private static long _cpSameFlat, _cpSameNormal, _cpOrderedFlat, _cpOrderedNormal, _cpInvertedFlat, _cpInvertedNormal, _cpUnkFlat, _cpUnkNormal;
 
         private static long _pairSameCbFlat, _pairSameCbNormal;
         private static long _pairOrderedFlat, _pairOrderedNormal;
@@ -1362,6 +1412,12 @@ namespace Ryujinx.Graphics.Metal
                 mine.Indices = _frameIndices;
                 mine.Attrib = _frameAttrib;
                 mine.Raster = _frameRaster;
+                mine.PresentCb = cbs.CommandBufferIndex;
+                mine.PresentRent = _pool != null ? _pool.RentSeqOf(cbs.CommandBufferIndex) : -1;
+                mine.CompCb = _prevCompositeCb;
+                mine.CompRent = _prevCompositeRent;
+                _prevCompositeCb = _lastCompositeCb;
+                _prevCompositeRent = _lastCompositeRent;
                 mine.WriterCb = _frameWriterCb;
                 mine.WriterRent = _frameWriterRent;
                 mine.BlitCb = _frameBlitCb;
@@ -1869,6 +1925,22 @@ namespace Ryujinx.Graphics.Metal
                 else { if (flat) { _staleFlat++; } else { _staleNormal++; } }
             }
 
+            if (slot.CompCb >= 0 && slot.PresentCb >= 0 && _pool != null)
+            {
+                if (slot.CompCb == slot.PresentCb && slot.CompRent == slot.PresentRent)
+                {
+                    if (flat) { _cpSameFlat++; } else { _cpSameNormal++; }
+                }
+                else
+                {
+                    long cc = _pool.CommitSeqOf(slot.CompCb);
+                    long pc = _pool.CommitSeqOf(slot.PresentCb);
+                    if (cc == 0 || pc == 0) { if (flat) { _cpUnkFlat++; } else { _cpUnkNormal++; } }
+                    else if (cc < pc) { if (flat) { _cpOrderedFlat++; } else { _cpOrderedNormal++; } }
+                    else { if (flat) { _cpInvertedFlat++; } else { _cpInvertedNormal++; } }
+                }
+            }
+
             if (slot.WriterCb >= 0 && slot.BlitCb >= 0)
             {
                 if (slot.WriterCb == slot.BlitCb && slot.WriterRent == slot.BlitRent)
@@ -2228,6 +2300,7 @@ namespace Ryujinx.Graphics.Metal
                 sb.Append($"\n  blit w[slot{c}]: flat mean {(_wFlatN[c] > 0 ? _wFlatSum[c] / _wFlatN[c] : 0):G4} min {(_wFlatN[c] > 0 ? _wFlatMin[c] : 0):G4} n={_wFlatN[c]}  normal mean {(_wNormalN[c] > 0 ? _wNormalSum[c] / _wNormalN[c] : 0):G4} min {(_wNormalN[c] > 0 ? _wNormalMin[c] : 0):G4} n={_wNormalN[c]}");
             }
 
+            sb.Append($"\n  COMPOSITE(N)->PRESENT(N+1) CB ORDER: same-cb flat {_cpSameFlat} normal {_cpSameNormal} | composite committed FIRST flat {_cpOrderedFlat} normal {_cpOrderedNormal} | INVERTED (present first) flat {_cpInvertedFlat} normal {_cpInvertedNormal} | unknown flat {_cpUnkFlat} normal {_cpUnkNormal}");
             sb.Append($"\n  WRITER/BLIT PAIR: same-cb flat {_pairSameCbFlat} normal {_pairSameCbNormal} | ordered flat {_pairOrderedFlat} normal {_pairOrderedNormal} | INVERTED flat {_pairInvertedFlat} normal {_pairInvertedNormal} | uncommitted flat {_pairUncommittedFlat} normal {_pairUncommittedNormal}");
             sb.Append($"\n  SAMPLER-UNIT vs read-path disagree: flat {_sampVsReadFlat}/{_sampVsReadFlat + _sampSameFlat}, normal {_sampVsReadNormal}/{_sampVsReadNormal + _sampSameNormal}");
             sb.Append($"\n  TWO-PATH sampler-vs-blit disagree: flat {_twoPathDisagreeFlat}/{_twoPathDisagreeFlat + _twoPathAgreeFlat}, normal {_twoPathDisagreeNormal}/{_twoPathDisagreeNormal + _twoPathAgreeNormal}");

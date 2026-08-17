@@ -903,6 +903,7 @@ namespace Ryujinx.Graphics.Metal
             UploadCorrelator._inPresent = true;
             try
             {
+            UploadCorrelator.WaitForLastComposite();
             // The GPU-layer modification trace shows the game's final sRGB target is BOUND as
             // a render target across the present boundary (RT-bind:Srgb at frame end,
             // RT-unbind:Srgb at next frame start). If the encoder writing it is still open
