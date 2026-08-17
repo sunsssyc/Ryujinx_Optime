@@ -741,6 +741,22 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _forceFullRebind =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_FULL_REBIND") == "1";
 
+        /// <summary>
+        /// Every image currently bound for compute is a potential writer of that texture
+        /// through kernel write(); register them so a compute-filled target shows up in the
+        /// writer census, which only ever covered render attachments and copies.
+        /// </summary>
+        public readonly void NoteComputeImageWriters()
+        {
+            for (int i = 0; i < _currentState.ImageRefs.Length; i++)
+            {
+                if (_currentState.ImageRefs[i].Storage is Texture img)
+                {
+                    UploadCorrelator.NoteAttachmentDraw(img.CanonicalPtr, "compute-img");
+                }
+            }
+        }
+
         public readonly void RenderResourcesPrepass()
         {
             _currentState.RenderEncoderBindings.Clear();
@@ -2111,7 +2127,7 @@ namespace Ryujinx.Graphics.Metal
         /// pass-through blit that writes the presented surface.
         /// </summary>
         private static readonly string _watchLabel =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_LABEL") ?? "bd6e03";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_LABEL") ?? "480117";
 
         private static readonly int _redeclareEvery =
             int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_REDECLARE"), out int rd) ? rd : 0;

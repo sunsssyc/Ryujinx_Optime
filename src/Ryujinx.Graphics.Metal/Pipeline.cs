@@ -1505,6 +1505,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void DispatchCompute(int groupsX, int groupsY, int groupsZ)
         {
+            _encoderStateManager.NoteComputeImageWriters();
             string computeLabel = _encoderStateManager.ComputeProgram?.DebugLabel;
 
             if (_skipDispatchLabels.Length != 0 && computeLabel != null)
@@ -2095,6 +2096,9 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndexedIndirectOffset(BufferRange indirectBuffer, int offset = 0)
         {
+            // Indirect draws write attachments too; the writer census had only the direct
+            // entry points and never saw a target painted through here.
+            NoteAttachmentWriter();
             // TODO: Reindex unsupported topologies
             if (TopologyUnsupported(_encoderStateManager.Topology))
             {
@@ -2137,6 +2141,9 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndexedIndirectCount(BufferRange indirectBuffer, BufferRange parameterBuffer, int maxDrawCount, int stride)
         {
+            // Indirect draws write attachments too; the writer census had only the direct
+            // entry points and never saw a target painted through here.
+            NoteAttachmentWriter();
             for (int i = 0; i < maxDrawCount; i++)
             {
                 DrawIndexedIndirectOffset(indirectBuffer, stride * i);
@@ -2150,6 +2157,9 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndirectOffset(BufferRange indirectBuffer, int offset = 0)
         {
+            // Indirect draws write attachments too; the writer census had only the direct
+            // entry points and never saw a target painted through here.
+            NoteAttachmentWriter();
             if (TopologyUnsupported(_encoderStateManager.Topology))
             {
                 // TODO: Reindex unsupported topologies
@@ -2180,6 +2190,9 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndirectCount(BufferRange indirectBuffer, BufferRange parameterBuffer, int maxDrawCount, int stride)
         {
+            // Indirect draws write attachments too; the writer census had only the direct
+            // entry points and never saw a target painted through here.
+            NoteAttachmentWriter();
             for (int i = 0; i < maxDrawCount; i++)
             {
                 DrawIndirectOffset(indirectBuffer, stride * i);
@@ -2188,6 +2201,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawTexture(ITexture texture, ISampler sampler, Extents2DF srcRegion, Extents2DF dstRegion)
         {
+            NoteAttachmentWriter();
             _renderer.HelperShader.DrawTexture(texture, sampler, srcRegion, dstRegion);
         }
 

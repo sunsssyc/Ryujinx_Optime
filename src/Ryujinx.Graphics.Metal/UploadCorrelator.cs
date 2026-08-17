@@ -75,6 +75,7 @@ namespace Ryujinx.Graphics.Metal
             public string Writers;
             public bool InputSampled;
             public bool AfterSampled;
+            public bool AfterOutSampled;
             public bool SamplerSampled;
             public MTLPixelFormat InputFmt;
             public bool InputWrittenAfter;
@@ -201,6 +202,7 @@ namespace Ryujinx.Graphics.Metal
         private static int _gameRtPassLogs, _gameRtEndLogs;
         private static string _prevFrameGameRtWriters = "(unknown)";
         private static Texture _frameGameRtTex;
+        private static Texture _frameGameRtViewTex;
 
         private static int _gameRtLogs;
 
@@ -209,12 +211,16 @@ namespace Ryujinx.Graphics.Metal
         public static void NoteGameFinalTargetView(Texture t)
         {
             if (!Enabled || t == null) { return; }
+            _frameGameRtViewTex = t;
             if (++_viewLogs % 300 == 1)
             {
-                bool inCensus = _pendingWriterCount.TryGetValue(t.CanonicalPtr, out int c) && c > 0;
-                string w = inCensus ? string.Join(",", _pendingWriters[t.CanonicalPtr], 0, Math.Min(c, MaxWriters)) : "(none)";
+                // The dangling-view test: does V's Metal parent equal the CURRENT A's storage,
+                // and does that storage still hold a live texture?
+                bool sameParent = _frameGameRtTex != null && t.CanonicalPtr == _frameGameRtTex.CanonicalPtr;
+                bool parentAliveInMetal = _frameGameRtTex != null && _frameGameRtTex.GetHandle().NativePtr != IntPtr.Zero;
+                bool viewAlive = t.GetHandle().NativePtr != IntPtr.Zero;
                 Logger.Warning?.PrintMsg(LogClass.Gpu,
-                    $"game RT VIEW: {t.Width}x{t.Height} {t.Info.Format} canon=0x{t.CanonicalPtr:X} native=0x{t.GetHandle().NativePtr:X} sameRootAsRT={(t.CanonicalPtr == _frameGameRtRoot)} writers={w}");
+                    $"DANGLING-VIEW TEST: V.canon=0x{t.CanonicalPtr:X} A.canon=0x{(_frameGameRtTex?.CanonicalPtr ?? IntPtr.Zero):X} sameParent={sameParent} viewAlive={viewAlive} parentAlive={parentAliveInMetal} V.serial={t.Serial} A.serial={_frameGameRtTex?.Serial}");
             }
         }
 
@@ -257,6 +263,7 @@ namespace Ryujinx.Graphics.Metal
 
         private static readonly List<string> _frameFullResAttach = new();
         private static IntPtr _frameDrawnSrgbRoot;
+        private static Texture _frameDrawnSrgbTex;
         public static bool _inPresent;
         private static int _rootCompareLogs;
 
@@ -284,6 +291,7 @@ namespace Ryujinx.Graphics.Metal
                 if (t.Info.Format == Format.R8G8B8A8Srgb && !_inPresent)
                 {
                     _frameDrawnSrgbRoot = t.CanonicalPtr;
+                    _frameDrawnSrgbTex = t;
                 }
             }
         }
@@ -616,6 +624,9 @@ namespace Ryujinx.Graphics.Metal
         public static void ArmAfterBlitSample() { if (Enabled) { _afterBlitArmed = true; } }
 
         private static bool _afterBlitArmed;
+        private static bool _frameAfterOutSampled;
+        private static bool _pendingAfterOutKnown, _pendingAfterOutWhite;
+        private static long _outWhiteAtDrawFlat, _outPicAtDrawFlat, _outWhiteAtDrawNormal, _outPicAtDrawNormal;
 
         public static void SampleInputAfterBlit(CommandBufferScoped cbs)
         {
@@ -643,6 +654,27 @@ namespace Ryujinx.Graphics.Metal
 
             int idx = (int)(_frame % Slots);
             MTLBlitCommandEncoder blit = cbs.Encoders.EnsureBlitEncoder();
+
+            // The OUTPUT of the composite, right after its pass ended, same command buffer.
+            // If it is already white here, the composite painted it; if it is a picture here
+            // and white at present, something between this point and present overwrote it.
+            Texture outTex = _frameDrawnSrgbTex;
+            _frameAfterOutSampled = false;
+            if (outTex != null && outTex.Width > GridSide && outTex.Height > GridSide)
+            {
+                MTLTexture ot = outTex.GetHandle(cbs);
+                if (ot.NativePtr != IntPtr.Zero)
+                {
+                    for (int i = 0; i < Pixels; i++)
+                    {
+                        blit.CopyFromTexture(ot, 0, 0,
+                            new MTLOrigin { x = (ulong)(outTex.Width * (i % GridSide + 1) / (GridSide + 1)), y = (ulong)(outTex.Height * (i / GridSide + 1) / (GridSide + 1)), z = 0 },
+                            new MTLSize { width = 1, height = 1, depth = 1 },
+                            _buf, (ulong)(4 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16 + idx * Pixels * BytesPerPixel), BytesPerPixel, BytesPerPixel);
+                    }
+                    _frameAfterOutSampled = true;
+                }
+            }
 
             for (int i = 0; i < Pixels; i++)
             {
@@ -822,6 +854,8 @@ namespace Ryujinx.Graphics.Metal
         // the input it averages over is a single colour, which is exactly the condition
         // that drives the weight sum to zero.
         private static double _flatInputDistinctSum, _normalInputDistinctSum;
+        private static int _pendingInputDistinct;
+        private static bool _pendingInputKnown;
         private static long _flatInputFrames, _normalInputFrames;
 
         // What a viewer actually counts is flashes, not flat frames. Consecutive flat
@@ -917,7 +951,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            _buf = device.NewBuffer((ulong)(4 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16), MTLResourceOptions.ResourceStorageModeShared);
+            _buf = device.NewBuffer((ulong)(5 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16), MTLResourceOptions.ResourceStorageModeShared);
             SamplerPathProbe.Initialize(device);
 
             Logger.Warning?.PrintMsg(LogClass.Gpu,
@@ -1337,6 +1371,7 @@ namespace Ryujinx.Graphics.Metal
                 mine.InSerial = _inputSerial;
                 mine.WrSerial = _writerSerial;
                 mine.AfterSampled = _frameAfterSampled;
+                mine.AfterOutSampled = _frameAfterOutSampled;
                 mine.SamplerSampled = _frameSamplerSampled;
                 mine.InputFmt = _frameInputFmt;
                 mine.InGen = _inputGen;
@@ -1360,6 +1395,14 @@ namespace Ryujinx.Graphics.Metal
                 // list snapshotted at the previous present.
                 if (_frameGameRtTex != null && ++_rootCompareLogs % 300 == 1)
                 {
+                    // Every candidate root side by side, with its writer list, so the
+                    // question "who writes the half that present will show next frame" is
+                    // answered by reading one line rather than by inference.
+                    string W(IntPtr r) => r != IntPtr.Zero && _pendingWriterCount.TryGetValue(r, out int c) && c > 0
+                        ? string.Join(",", _pendingWriters[r], 0, Math.Min(c, MaxWriters)) : "-";
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"ROOTS: gameRT(GAL)=0x{_frameGameRtRoot:X}[{W(_frameGameRtRoot)}] drawnSrgb=0x{_frameDrawnSrgbRoot:X}[{W(_frameDrawnSrgbRoot)}] presentSrc=0x{src.CanonicalPtr:X}[{W(src.CanonicalPtr)}] lastFullRes=0x{_frameLastFullResRt:X}[{W(_frameLastFullResRt)}]");
+
                     bool seen = false;
                     foreach (string e in _frameFullResAttach) { if (e.Contains($"0x{_frameGameRtRoot:X}")) { seen = true; break; } }
                     Logger.Warning?.PrintMsg(LogClass.Gpu,
@@ -1372,10 +1415,14 @@ namespace Ryujinx.Graphics.Metal
                     Logger.Warning?.PrintMsg(LogClass.Gpu, $"game RT pass: clear={_gameRtPassClear} drawsSince={_drawsSeen - _gameRtPassDrawStart}");
                 }
                 _gameRtPassOpen = false;
-                _prevFrameGameRtWriters = _frameDrawnSrgbRoot != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameDrawnSrgbRoot, out int swc) && swc > 0
-                    ? string.Join(",", _pendingWriters[_frameDrawnSrgbRoot], 0, Math.Min(swc, MaxWriters))
-                    : "(none-drawn)";
-                if (_frameDrawnSrgbRoot != IntPtr.Zero) { _pendingWriterCount[_frameDrawnSrgbRoot] = 0; }
+                // _frameGameRtRoot is what the GPU layer identifies as the game's final
+                // target and it IS the half drawn this frame (ROOT COMPARE: it is in the
+                // attachment list, present's source is not). Census it, attribute to next
+                // frame's outcome, and reset so each frame's list is its own.
+                _prevFrameGameRtWriters = _frameGameRtRoot != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameGameRtRoot, out int swc) && swc > 0
+                    ? string.Join(",", _pendingWriters[_frameGameRtRoot], 0, Math.Min(swc, MaxWriters))
+                    : "(none-gameRT)";
+                if (_frameGameRtRoot != IntPtr.Zero) { _pendingWriterCount[_frameGameRtRoot] = 0; }
                 _frameDrawnSrgbRoot = IntPtr.Zero;
                 mine.RtWriters = _frameLastFullResRt != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameLastFullResRt, out int rwc) && rwc > 0
                     ? string.Join(",", _pendingWriters[_frameLastFullResRt], 0, Math.Min(rwc, MaxWriters))
@@ -1402,7 +1449,9 @@ namespace Ryujinx.Graphics.Metal
                 mine.ReplaceViews = _frameReplaceViews;
                 mine.NewTextures = _frameNewTextures;
                 mine.ModifiedBy = _frameModifiedBy.Length == 0 ? "(none)" : _frameModifiedBy;
-                Texture rtTex = _frameGameRtTex ?? _frameLastFullResTex;
+                // Sample the VIEW (V), not A: A has no writers, so if V holds the picture on
+                // white frames while A is white, the copy lands in V's storage and A is the shadow.
+                Texture rtTex = _frameGameRtViewTex ?? _frameGameRtTex ?? _frameLastFullResTex;
                 if (rtTex != null && rtTex.CanonicalPtr != src.CanonicalPtr)
                 {
                     MTLTexture rt = rtTex.GetHandle(cbs);
@@ -1469,6 +1518,7 @@ namespace Ryujinx.Graphics.Metal
             _writerSerial = -1;
             _inputGen = -1;
             _frameAfterSampled = false;
+            _frameAfterOutSampled = false;
             _frameSamplerSampled = false;
             _afterBlitArmed = false;
             _writerGen = -1;
@@ -1622,6 +1672,11 @@ namespace Ryujinx.Graphics.Metal
             }
 
             int inputDistinct = 0;
+
+            // The composite draws in frame N, present shows it in N+1: the input sampled
+            // in frame N belongs to frame N+1's outcome. One-frame delay line.
+            int inputDistinctForThisOutcome = _pendingInputDistinct;
+            bool inputKnownForThisOutcome = _pendingInputKnown;
 
             if (slot.InputSampled)
             {
@@ -1968,11 +2023,38 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
+            _pendingInputDistinct = inputDistinct;
+            _pendingInputKnown = slot.InputSampled;
+
+            bool outKnownForThisOutcome = _pendingAfterOutKnown;
+            bool outWhiteForThisOutcome = _pendingAfterOutWhite;
+            {
+                bool w = false;
+                if (slot.AfterOutSampled)
+                {
+                    byte* po = (byte*)_buf.Contents + 4 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16 + index * Pixels * BytesPerPixel;
+                    int sat = 0;
+                    for (int i = 0; i < Pixels; i++)
+                    {
+                        byte* px = po + i * BytesPerPixel;
+                        if ((px[0] + px[1] + px[1] + px[2]) * 0.25 >= SaturatedLuma) { sat++; }
+                    }
+                    w = sat >= SaturatedNeeded;
+                }
+                _pendingAfterOutKnown = slot.AfterOutSampled;
+                _pendingAfterOutWhite = w;
+            }
+            if (outKnownForThisOutcome)
+            {
+                if (flat) { if (outWhiteForThisOutcome) { _outWhiteAtDrawFlat++; } else { _outPicAtDrawFlat++; } }
+                else { if (outWhiteForThisOutcome) { _outWhiteAtDrawNormal++; } else { _outPicAtDrawNormal++; } }
+            }
+
             if (flat)
             {
-                if (slot.InputSampled)
+                if (inputKnownForThisOutcome)
                 {
-                    _flatInputDistinctSum += inputDistinct;
+                    _flatInputDistinctSum += inputDistinctForThisOutcome;
                     _flatInputFrames++;
                 }
 
@@ -1998,9 +2080,9 @@ namespace Ryujinx.Graphics.Metal
             }
             else
             {
-                if (slot.InputSampled)
+                if (inputKnownForThisOutcome)
                 {
-                    _normalInputDistinctSum += inputDistinct;
+                    _normalInputDistinctSum += inputDistinctForThisOutcome;
                     _normalInputFrames++;
                 }
 
@@ -2206,6 +2288,7 @@ namespace Ryujinx.Graphics.Metal
             {
                 sb.Append($"\n  PRESENT-RANGE modified by [{mb.Key}]: flat {mb.Value.Flat} normal {mb.Value.Normal}");
             }
+            sb.Append($"\n  COMPOSITE OUTPUT right after its draw (frame N) vs outcome (N+1): [white@draw] flat {_outWhiteAtDrawFlat} normal {_outWhiteAtDrawNormal} | [picture@draw] flat {_outPicAtDrawFlat} normal {_outPicAtDrawNormal}");
             sb.Append($"\n  TOPOLOGY/frame: replaceView flat {(_topoFlatN > 0 ? _rvFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _rvNormal / _topoNormalN : 0):F3} | newTexture flat {(_topoFlatN > 0 ? _ntFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _ntNormal / _topoNormalN : 0):F3}");
             sb.Append($"\n  RT-vs-SRC at present: [RT picture, SRC white] flat {_rtPicSrcWhiteFlat} normal {_rtPicSrcWhiteNormal} | [both picture] flat {_bothPicFlat} normal {_bothPicNormal} | [both white] flat {_bothWhiteFlat} normal {_bothWhiteNormal} | [RT white, SRC pic] flat {_rtWhiteSrcPicFlat} normal {_rtWhiteSrcPicNormal}");
             sb.Append($"\n  PRESENT src is a recent drawable: yes flat {_srcWasRecentDstFlat} normal {_srcWasRecentDstNormal} | no flat {_srcNotDstFlat} normal {_srcNotDstNormal}");

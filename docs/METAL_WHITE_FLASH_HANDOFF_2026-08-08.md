@@ -5668,3 +5668,36 @@ draw whose RenderTargets contain A's root.** Either the backend receives a diffe
 object for that pass (a view whose root differs from A.HostTexture's), or the draws into A
 are issued through a path the hook does not cover. Resolving that names the pass that
 paints white, and it is a Metal-side bookkeeping question, not a GPU-hardware one.
+
+---
+
+## THE DECIDER (2026-08-17): the composite paints a picture; something overwrites it before present
+
+Corrected identities first (three days late): **480117 is the GAME's final composite** (one
+sample + perspective divide + pass-through, writing the 1080p RGBA8 sRGB output), and
+**0f5a37 is Ryujinx's present upscaler** (writing the drawable). ROOTS side by side:
+
+    drawnSrgb  = 0x7B13FE580 [480117,attach]   the half drawn this frame, by the composite
+    presentSrc = 0x7B13FCF00 [-]               last frame's half, shown this frame
+    drawable   = 0x7B41BAF80 [0f5a37,attach]
+
+Then the decider, with the composite's OUTPUT read back by the blit engine in the SAME
+command buffer immediately after its pass, attributed to the NEXT frame's outcome (gated
+arm, 11,399 frames):
+
+    white at draw   flat    0    normal    0
+    picture at draw flat 2,521   normal 8,864
+
+**On every frame that presents white, the composite had just painted a picture into that
+very texture.** Its input at that moment was also a picture (19.92 distinct of 25). The
+white is not produced by the composite. It is produced AFTER the composite finishes and
+BEFORE present samples the same storage one frame later - and in that window the Metal
+backend's own bookkeeping records no draw, no indirect draw, no copy, no blit, no upload
+and no compute image write to that storage.
+
+Everything left is a write the backend does not know it is making: an alias of the same
+storage under another texture object, or the storage being released and reused before its
+last reader ran. Both are allocation/lifetime, which is exactly the axis that ever moved the
+rate (own-allocation +11 points; the RAW split -21). The next and final measurement is at
+the Metal API layer, outside Ryujinx's accounting: for the storage the composite just wrote,
+list every command that touches it between that pass and the next present.
