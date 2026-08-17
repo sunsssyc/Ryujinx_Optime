@@ -255,10 +255,20 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        private static readonly List<string> _frameFullResAttach = new();
+        private static IntPtr _frameDrawnSrgbRoot;
+        public static bool _inPresent;
+        private static int _rootCompareLogs;
+
         public static void NoteFullResAttachment(Texture t)
         {
             if (Enabled && t != null && t.Width >= 1900 && t.Height >= 1000 && !t.Info.Format.IsDepthOrStencil)
             {
+                if (_frameFullResAttach.Count < 16)
+                {
+                    string entry = $"{t.Info.Format}@0x{t.CanonicalPtr:X}/n0x{t.GetHandle().NativePtr:X}{(t.CanonicalPtr != t.GetHandle().NativePtr ? "(view)" : "")}";
+                    if (!_frameFullResAttach.Contains(entry)) { _frameFullResAttach.Add(entry); }
+                }
                 _frameLastFullResRt = t.CanonicalPtr;
                 _frameLastFullResTex = t;
 
@@ -267,6 +277,13 @@ namespace Ryujinx.Graphics.Metal
                     t.Info.Format == Format.R8G8B8A8Srgb || t.Info.Format == Format.B8G8R8A8Srgb)
                 {
                     _frameLastRgba8Rt = t.CanonicalPtr;
+                }
+
+                // The drawable is also RGBA8 sRGB and is bound during present; only the
+                // game's own sRGB target (bound outside present) is wanted here.
+                if (t.Info.Format == Format.R8G8B8A8Srgb && !_inPresent)
+                {
+                    _frameDrawnSrgbRoot = t.CanonicalPtr;
                 }
             }
         }
@@ -1341,15 +1358,25 @@ namespace Ryujinx.Graphics.Metal
                 // The game's final RT was drawn LAST frame (lastAttachFrame == nowFrame - 1,
                 // measured), so this frame's writer table never holds its writers. Use the
                 // list snapshotted at the previous present.
+                if (_frameGameRtTex != null && ++_rootCompareLogs % 300 == 1)
+                {
+                    bool seen = false;
+                    foreach (string e in _frameFullResAttach) { if (e.Contains($"0x{_frameGameRtRoot:X}")) { seen = true; break; } }
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"ROOT COMPARE: A={_frameGameRtTex.Info.Format}@0x{_frameGameRtRoot:X}/n0x{_frameGameRtTex.GetHandle().NativePtr:X} seenAsAttachment={seen} | attachments this frame: {string.Join(" ; ", _frameFullResAttach)}");
+                }
+                _frameFullResAttach.Clear();
                 mine.SceneWriters = _prevFrameGameRtWriters;
                 if (_gameRtPassOpen && ++_gameRtEndLogs % 300 == 1)
                 {
                     Logger.Warning?.PrintMsg(LogClass.Gpu, $"game RT pass: clear={_gameRtPassClear} drawsSince={_drawsSeen - _gameRtPassDrawStart}");
                 }
                 _gameRtPassOpen = false;
-                _prevFrameGameRtWriters = _frameGameRtRoot != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameGameRtRoot, out int swc) && swc > 0
-                    ? string.Join(",", _pendingWriters[_frameGameRtRoot], 0, Math.Min(swc, MaxWriters))
-                    : "(none-this-frame)";
+                _prevFrameGameRtWriters = _frameDrawnSrgbRoot != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameDrawnSrgbRoot, out int swc) && swc > 0
+                    ? string.Join(",", _pendingWriters[_frameDrawnSrgbRoot], 0, Math.Min(swc, MaxWriters))
+                    : "(none-drawn)";
+                if (_frameDrawnSrgbRoot != IntPtr.Zero) { _pendingWriterCount[_frameDrawnSrgbRoot] = 0; }
+                _frameDrawnSrgbRoot = IntPtr.Zero;
                 mine.RtWriters = _frameLastFullResRt != IntPtr.Zero && _pendingWriterCount.TryGetValue(_frameLastFullResRt, out int rwc) && rwc > 0
                     ? string.Join(",", _pendingWriters[_frameLastFullResRt], 0, Math.Min(rwc, MaxWriters))
                     : "(none)";
