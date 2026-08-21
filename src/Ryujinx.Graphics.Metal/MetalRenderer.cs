@@ -156,7 +156,7 @@ namespace Ryujinx.Graphics.Metal
         public IProgram CreateProgram(ShaderSource[] shaders, ShaderInfo info)
         {
             ProgramCount++;
-            return new Program(this, _device, shaders, info.ResourceLayout, info.ComputeLocalSize);
+            return new Program(this, _device, shaders, info.ResourceLayout, info.ComputeLocalSize, info.FragmentOutputMap);
         }
 
         public ISampler CreateSampler(SamplerCreateInfo info)

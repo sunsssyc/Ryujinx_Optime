@@ -77,6 +77,15 @@ namespace Ryujinx.Graphics.Metal
             public bool AfterSampled;
             public bool AfterOutSampled;
             public IntPtr AfterOutPtr;
+            public bool PreProbed;
+            public string InputWriters;
+            public string InputDesc;
+            public string StageDraw;
+            public string StageInputWriters;
+            public string StageInputLastWriters;
+            public string StageInputId;
+            public float[] Const;
+            public bool ConstSeen;
             public IntPtr PresentSrcPtr;
             public IntPtr DrawnSrgbPtrThisFrame;
             public bool SamplerSampled;
@@ -381,6 +390,31 @@ namespace Ryujinx.Graphics.Metal
         /// white - and if its output is not uniform while the presented surface is, the
         /// white arrives after it, somewhere nobody has looked.
         /// </summary>
+        // Which programs drew into the composite's INPUT during this frame, snapshotted at
+        // the composite's bind (and the census counter for that storage reset there, so the
+        // list is per frame). Full-surface dumps showed the input already white when the
+        // composite runs; the white therefore comes from one of these writers, or from
+        // upstream of it. Tallied per outcome at classification.
+        private static string _frameInputWriters = "-", _frameInputDesc = "-";
+        private static readonly Dictionary<string, (long Flat, long Normal)> _inputWriterStats = new();
+        private static readonly Dictionary<string, (long Flat, long Normal)> _inputDescStats = new();
+
+        public static void NoteCompositeInputWriters(Texture input)
+        {
+            if (!Enabled || input == null)
+            {
+                return;
+            }
+
+            IntPtr root = input.CanonicalPtr;
+            int count = _pendingWriterCount.TryGetValue(root, out int c) ? c : 0;
+            _frameInputWriters = count > 0 ? string.Join(",", _pendingWriters[root], 0, Math.Min(count, MaxWriters)) : "-";
+            _pendingWriterCount[root] = 0;
+            _frameInputDesc = $"{input.Width}x{input.Height} {input.MtlFormat} 0x{root.ToInt64():X}";
+            _stageTargetRoot = root;
+        }
+        private static IntPtr _stageTargetRoot;
+
         public static void NoteCompositeOutput(Texture target)
         {
             if (Enabled && target != null)
@@ -644,6 +678,584 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         public static void ArmAfterBlitSample() { if (Enabled) { _afterBlitArmed = true; } }
 
+        // ---- stage dump ------------------------------------------------------------
+        // Generic "photograph this program's inputs and output right after its pass" for one
+        // program label (RYUJINX_METAL_STAGE_LABEL, prefix match), written for the first
+        // few white frames. Used to walk upstream: the composite's input is already white,
+        // its first writer this frame is ff14da - dump ff14da's inputs and output.
+        private static readonly string _stageLabel = Environment.GetEnvironmentVariable("RYUJINX_METAL_STAGE_LABEL") ?? "";
+        // RYUJINX_METAL_STAGE_RT=WxH arms the stage dump by render-target size instead of by
+        // the composite's input storage (for stages upstream of the upscaler).
+        private static readonly int _stageRtW = ParseDim(Environment.GetEnvironmentVariable("RYUJINX_METAL_STAGE_RT"), 0);
+        private static readonly int _stageRtH = ParseDim(Environment.GetEnvironmentVariable("RYUJINX_METAL_STAGE_RT"), 1);
+        private static int ParseDim(string v, int part)
+        {
+            if (string.IsNullOrEmpty(v)) { return 0; }
+            string[] p = v.ToLowerInvariant().Split('x');
+            return p.Length == 2 && int.TryParse(p[part], out int d) ? d : 0;
+        }
+        private const int StageSlots = 8, StageMaxInputs = 2;
+        private static bool _stageCollect;
+        private static readonly MTLBuffer[] _stageOut = new MTLBuffer[StageSlots];
+        // The stage input photographed BEFORE the stage's pass (at the pre-probe point).
+        private static readonly MTLBuffer[] _stagePre = new MTLBuffer[StageSlots];
+        private static readonly int[] _stagePreBytes = new int[StageSlots];
+        private static readonly string[] _stagePreDesc = new string[StageSlots];
+        private static readonly long[] _stagePreFrame = new long[StageSlots];
+        private static readonly FenceHolder[] _stagePreFence = new FenceHolder[StageSlots];
+        // Writers of the stage input this frame (census snapshot at the stage draw).
+        private static string _frameStageInputWriters = "-", _frameStageInputLastWriters = "-";
+        private static readonly Dictionary<string, (long Flat, long Normal)> _stageInputLastWriterStats = new();
+        private static readonly Dictionary<string, (long Flat, long Normal)> _stageInputWriterStats = new();
+        private static readonly MTLBuffer[,] _stageIn = new MTLBuffer[StageSlots, StageMaxInputs];
+        private static readonly FenceHolder[] _stageFence = new FenceHolder[StageSlots];
+        private static readonly long[] _stageFrame = new long[StageSlots];
+        private static readonly string[] _stageOutDesc = new string[StageSlots];
+        private static readonly int[] _stageOutBytes = new int[StageSlots];
+        private static readonly string[,] _stageInDesc = new string[StageSlots, StageMaxInputs];
+        private static readonly int[,] _stageInBytes = new int[StageSlots, StageMaxInputs];
+        private static readonly List<Texture> _stageInputs = new();
+        private static Texture _stageOutput;
+        private static bool _stageArmed;
+        private static int _stageDumpsWritten, _stageDumpsNormal;
+        private static long _stageArms, _stageSamples, _stageMisses, _stageMissLogged;
+
+        // The stage program's constant buffers: what the CPU side holds at bind time (the
+        // buffer/mirror the draw is bound to) and what the GPU sees at the pass end (blit of
+        // the same range), per ring slot. The upscaler's texel-coordinate transform lives in
+        // fp_c3[0] (scale.xy, offset.zw); a collapsed scale makes every output pixel read the
+        // same 4x3 neighbourhood, which is exactly a uniform near-white field after the x3.5.
+        private const int StageCbMax = 4, StageCbFloats = 16;
+        private const int StageCbBase = 5 * Slots * Pixels * BytesPerPixel + 4 * Slots * Pixels * 16;  // after the pre-probe regions
+        private static readonly MTLBuffer[] _stageCbBuf = new MTLBuffer[StageCbMax];
+        private static readonly int[] _stageCbOffset = new int[StageCbMax];
+        private static readonly int[] _stageCbBinding = new int[StageCbMax];
+        private static int _stageCbCount;
+        private static readonly float[,,] _stageCbCpu = new float[StageSlots, StageCbMax, StageCbFloats];
+        private static readonly int[,] _stageCbBindingAt = new int[StageSlots, StageCbMax];
+        private static readonly int[] _stageCbCountAt = new int[StageSlots];
+        private static long _cbEqFlat, _cbEqNormal, _cbDiffFlat, _cbDiffNormal, _cbUnknownFlat, _cbUnknownNormal, _cbDiffLogged;
+        private static readonly Dictionary<string, (long Flat, long Normal, double Min, double Max)> _cbStats = new();
+
+        private static string ConstStatsText()
+        {
+            if (_constLabel.Length == 0 || _constStats.Count == 0) { return ""; }
+            StringBuilder sb = new();
+            sb.Append($"\n  const[{_constLabel}] uniform slots 0..4, floats [0..7]=vec4[0].xyzw vec4[1].xyzw, by outcome (only nonzero-spread rows):");
+            foreach (KeyValuePair<int, (long Fn, double Fmin, double Fmax, double Fsum, long Nn, double Nmin, double Nmax, double Nsum)> kv in System.Linq.Enumerable.OrderBy(_constStats, x => x.Key))
+            {
+                (long Fn, double Fmin, double Fmax, double Fsum, long Nn, double Nmin, double Nmax, double Nsum) v = kv.Value;
+                bool interesting = (v.Fn > 0 && (v.Fmax - v.Fmin) != 0) || (v.Nn > 0 && (v.Nmax - v.Nmin) != 0) || (v.Fn > 0 && v.Nn > 0 && Math.Abs(v.Fsum / Math.Max(1, v.Fn) - v.Nsum / Math.Max(1, v.Nn)) > 1e-4);
+                if (!interesting) { continue; }
+                sb.Append($"\n      s{kv.Key / ConstFloats}[{kv.Key % ConstFloats}] WHITE min {(v.Fn > 0 ? v.Fmin : 0):G5} max {(v.Fn > 0 ? v.Fmax : 0):G5} mean {(v.Fn > 0 ? v.Fsum / v.Fn : 0):G5} (n {v.Fn}) | normal min {(v.Nn > 0 ? v.Nmin : 0):G5} max {(v.Nn > 0 ? v.Nmax : 0):G5} mean {(v.Nn > 0 ? v.Nsum / v.Nn : 0):G5} (n {v.Nn})");
+            }
+            return sb.ToString();
+        }
+
+        private static string StageDrawStatsText()
+        {
+            StringBuilder sb = new();
+            sb.Append("\n  stage INPUT writers this frame (before the stage draw) by outcome:");
+            foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_stageInputWriterStats, x => x.Value.Flat + x.Value.Normal), 10))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            sb.Append("\n  stage INPUT identity vs previous frame by outcome:");
+            foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_stageInputIdStats, x => x.Value.Flat + x.Value.Normal), 8))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            sb.Append("\n  stage INPUT LAST writers (last 6 in draw order, before the stage draw) by outcome:");
+            foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_stageInputLastWriterStats, x => x.Value.Flat + x.Value.Normal), 10))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            sb.Append("\n  stage draw render targets by outcome:");
+            foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_stageDrawStats, x => x.Value.Flat + x.Value.Normal), 8))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            return sb.ToString();
+        }
+
+        private static string CbStatsText()
+        {
+            StringBuilder sb = new();
+            foreach (KeyValuePair<string, (long Flat, long Normal, double Min, double Max)> kv in System.Linq.Enumerable.OrderBy(_cbStats, x => x.Key))
+            {
+                sb.Append($"\n      {kv.Key}: min {kv.Value.Min:G6} max {kv.Value.Max:G6} (n flat {kv.Value.Flat} normal {kv.Value.Normal})");
+            }
+            return sb.ToString();
+        }
+
+        public static unsafe void NoteStageUniform(int binding, MTLBuffer buf, int offset, int size)
+        {
+            if (!Enabled || !_stageCollect || buf.NativePtr == IntPtr.Zero || _stageCbCount >= StageCbMax)
+            {
+                return;
+            }
+
+            _stageCbBuf[_stageCbCount] = buf;
+            _stageCbOffset[_stageCbCount] = offset;
+            _stageCbBinding[_stageCbCount] = binding;
+            _stageCbCount++;
+        }
+
+        private static unsafe void SnapshotStageCb(int j, MTLBlitCommandEncoder blit)
+        {
+            _stageCbCountAt[j] = _stageCbCount;
+            for (int k = 0; k < _stageCbCount; k++)
+            {
+                _stageCbBindingAt[j, k] = _stageCbBinding[k];
+                IntPtr c = _stageCbBuf[k].Contents;
+                if (c != IntPtr.Zero)
+                {
+                    float* f = (float*)((byte*)c + _stageCbOffset[k]);
+                    for (int i = 0; i < StageCbFloats; i++) { _stageCbCpu[j, k, i] = f[i]; }
+                }
+                blit.CopyFromBuffer(_stageCbBuf[k], (ulong)_stageCbOffset[k], _buf, (ulong)(StageCbBase + (j * StageCbMax + k) * StageCbFloats * 4), (ulong)(StageCbFloats * 4));
+            }
+            _stageCbCount = 0;
+        }
+
+        private static unsafe void ClassifyStageCb(long presentedFrame, bool flat)
+        {
+            long want = presentedFrame - 1;
+            for (int j = 0; j < StageSlots; j++)
+            {
+                if (_stageFrame[j] != want || _stageFence[j] == null || !_stageFence[j].IsSignaled()) { continue; }
+                int n = _stageCbCountAt[j];
+                if (n == 0) { if (flat) { _cbUnknownFlat++; } else { _cbUnknownNormal++; } return; }
+                bool anyDiff = false;
+                StringBuilder diff = null;
+                for (int k = 0; k < n; k++)
+                {
+                    float* g = (float*)((byte*)_buf.Contents + StageCbBase + (j * StageCbMax + k) * StageCbFloats * 4);
+                    for (int i = 0; i < StageCbFloats; i++)
+                    {
+                        float cpu = _stageCbCpu[j, k, i];
+                        if (BitConverter.SingleToInt32Bits(cpu) != BitConverter.SingleToInt32Bits(g[i]))
+                        {
+                            anyDiff = true;
+                            diff ??= new StringBuilder();
+                            if (diff.Length < 400) { diff.Append($" b{_stageCbBindingAt[j, k]}[{i}] cpu {cpu:G6} gpu {g[i]:G6};"); }
+                        }
+                        // per-field extrema of the CPU-side values, first 8 floats of each binding
+                        if (i < 8)
+                        {
+                            string key = $"b{_stageCbBindingAt[j, k]}[{i}]";
+                            (long Flat, long Normal, double Min, double Max) v = _cbStats.TryGetValue(key, out (long Flat, long Normal, double Min, double Max) e) ? e : (0, 0, double.MaxValue, double.MinValue);
+                            double d = cpu;
+                            _cbStats[key] = flat ? (v.Flat + 1, v.Normal, Math.Min(v.Min, d), Math.Max(v.Max, d)) : (v.Flat, v.Normal + 1, Math.Min(v.Min, d), Math.Max(v.Max, d));
+                        }
+                    }
+                }
+                if (anyDiff) { if (flat) { _cbDiffFlat++; } else { _cbDiffNormal++; } if (_cbDiffLogged < 6) { _cbDiffLogged++; Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage cb GPU!=CPU on {(flat ? "WHITE" : "normal")} frame {presentedFrame}:{diff}"); } }
+                else { if (flat) { _cbEqFlat++; } else { _cbEqNormal++; } }
+                return;
+            }
+            if (flat) { _cbUnknownFlat++; } else { _cbUnknownNormal++; }
+        }
+        private static string _stageInputsOnce;
+
+        // The render-target configuration of the stage program's draw, per outcome.
+        private static string _frameStageDraw = "-";
+        private static readonly Dictionary<string, (long Flat, long Normal)> _stageDrawStats = new();
+        public static void NoteStageDrawState(string desc, int fragmentOutputMap)
+        {
+            if (Enabled) { _frameStageDraw = $"{desc} fom0x{fragmentOutputMap:X}"; }
+        }
+
+        public static Texture LastStageInput { get; private set; }
+
+        // Dedicated, self-contained probe of one program's fp_c3[0] (and fp_c3[1]) by
+        // outcome. RYUJINX_METAL_CONST_LABEL selects the program (prefix). The white 1600x896
+        // scene buffer is a smooth ~137 fill written by 1997e8, whose output is
+        // clamp(sample+attr-1,0,1) * fp_c3[0].xyz - capped at fp_c3[0]; this reads whether
+        // that cap itself is ~137 on white frames or the same as normal.
+        private static readonly string _constLabel = Environment.GetEnvironmentVariable("RYUJINX_METAL_CONST_LABEL") ?? "";
+        private const int ConstSlots = 5, ConstFloats = 8;   // slots 0..4, first 2 vec4 each
+        private static readonly float[] _frameConst = new float[ConstSlots * ConstFloats];
+        private static readonly bool[] _frameConstSlot = new bool[ConstSlots];
+        private static bool _frameConstSeen;
+        private static readonly Dictionary<int, (long Fn, double Fmin, double Fmax, double Fsum, long Nn, double Nmin, double Nmax, double Nsum)> _constStats = new();
+
+        public static unsafe void NoteProgramConst(int slot, IntPtr contents, int offset)
+        {
+            if (!Enabled || _constLabel.Length == 0 || contents == IntPtr.Zero || (uint)slot >= ConstSlots) { return; }
+            float* f = (float*)((byte*)contents + offset);
+            for (int i = 0; i < ConstFloats; i++) { _frameConst[slot * ConstFloats + i] = f[i]; }
+            _frameConstSlot[slot] = true;
+            _frameConstSeen = true;
+        }
+
+        public static string ConstLabel => _constLabel;
+
+        // Identity of the stage program's first input across frames. The 1x1 RGBA32Float
+        // auto-exposure texture reads [1.0, 1.015, 0, 1] on every white frame and [0.13, 0, 0,
+        // 1] normally - a reset default, not noise. Eye adaptation is a temporal feedback
+        // (new = f(previous)), so if the texture object carrying the history is swapped or
+        // re-created, the history is lost and the exposure jumps. This records whether the
+        // pointer/serial changed since the previous frame, split by outcome.
+        private static IntPtr _prevStageInputPtr;
+        private static long _prevStageInputSerial;
+        private static string _frameStageInputId = "-";
+        private static readonly Dictionary<string, (long Flat, long Normal)> _stageInputIdStats = new();
+
+        public static void NoteStageInput(Texture t)
+        {
+            if (Enabled && _stageCollect && t != null && !_stageInputs.Contains(t) && _stageInputs.Count < StageMaxInputs)
+            {
+                _stageInputs.Add(t);
+                if (_stageInputs.Count == 1)
+                {
+                    LastStageInput = t;
+                    bool ptrSame = t.CanonicalPtr == _prevStageInputPtr;
+                    bool serialSame = t.Serial == _prevStageInputSerial;
+                    _frameStageInputId = $"{t.Width}x{t.Height} {t.MtlFormat} ptr{(ptrSame ? "SAME" : "CHANGED")} serial{(serialSame ? "SAME" : "CHANGED")}";
+                    _prevStageInputPtr = t.CanonicalPtr;
+                    _prevStageInputSerial = t.Serial;
+                }
+            }
+        }
+
+        // Only the draw of the labelled program that targets the composite's input storage
+        // (the same program label is reused by the game for many small targets), and only
+        // its bindings are collected.
+        public static void ArmStageDump(Texture[] renderTargets)
+        {
+            if (!Enabled || _stageLabel.Length == 0 || renderTargets == null)
+            {
+                return;
+            }
+
+            // The game's composite writes its output at whichever MRT slot; pick the slot
+            // that is the composite's input storage (RT0 alone armed once per run, at boot).
+            Texture output = null;
+            foreach (Texture rt in renderTargets)
+            {
+                if (rt == null) { continue; }
+                bool match = _stageRtW > 0
+                    ? (rt.Width == _stageRtW && rt.Height == _stageRtH)
+                    : (_stageTargetRoot == IntPtr.Zero || rt.CanonicalPtr == _stageTargetRoot);
+                if (match) { output = rt; break; }
+            }
+
+            if (output != null)
+            {
+                _stageOutput = output;
+                _stageArmed = true;
+                _stageCollect = true;
+                _stageInputs.Clear();
+                _stageArms++;
+            }
+        }
+
+        private static int BytesPerPixelOf(MTLPixelFormat f)
+        {
+            switch (f)
+            {
+                case MTLPixelFormat.RGBA16Float: case MTLPixelFormat.RGBA16Unorm: case MTLPixelFormat.RG32Float: return 8;
+                case MTLPixelFormat.RGBA32Float: return 16;
+                case MTLPixelFormat.R8Unorm: case MTLPixelFormat.A8Unorm: return 1;
+                case MTLPixelFormat.R16Float: case MTLPixelFormat.RG8Unorm: case MTLPixelFormat.R16Unorm: return 2;
+                default: return 4;
+            }
+        }
+
+        public static void SampleStageAfterPass(CommandBufferScoped cbs)
+        {
+            if (!_stageArmed)
+            {
+                return;
+            }
+            _stageArmed = false;
+            _stageCollect = false;
+
+            if (_stageOut[0].NativePtr == IntPtr.Zero || _stageDumpsWritten >= DumpMaxFiles)
+            {
+                _stageInputs.Clear();
+                _stageOutput = null;
+                return;
+            }
+
+            int j = (int)(_frame % StageSlots);
+            MTLBlitCommandEncoder blit = cbs.Encoders.EnsureBlitEncoder();
+            _stageOutBytes[j] = 0;
+
+            if (_stageOutput != null)
+            {
+                int bpp = BytesPerPixelOf(_stageOutput.MtlFormat);
+                int bytes = _stageOutput.Width * _stageOutput.Height * bpp;
+                MTLTexture ot = _stageOutput.GetHandle(cbs);
+                if (bytes <= DumpMaxBytes && ot.NativePtr != IntPtr.Zero)
+                {
+                    blit.CopyFromTexture(ot, 0, 0, new MTLOrigin { x = 0, y = 0, z = 0 },
+                        new MTLSize { width = (ulong)_stageOutput.Width, height = (ulong)_stageOutput.Height, depth = 1 },
+                        _stageOut[j], 0, (ulong)(_stageOutput.Width * bpp), (ulong)bytes);
+                    _stageOutBytes[j] = bytes;
+                    _stageOutDesc[j] = $"{_stageOutput.Width}x{_stageOutput.Height}_fmt{(int)_stageOutput.MtlFormat}";
+                }
+            }
+
+            for (int k = 0; k < StageMaxInputs; k++)
+            {
+                _stageInBytes[j, k] = 0;
+                if (k >= _stageInputs.Count) { continue; }
+                Texture t = _stageInputs[k];
+                int bpp = BytesPerPixelOf(t.MtlFormat);
+                int bytes = t.Width * t.Height * bpp;
+                MTLTexture it = t.GetHandle(cbs);
+                if (bytes <= DumpMaxBytes && it.NativePtr != IntPtr.Zero && t.Width > 0)
+                {
+                    blit.CopyFromTexture(it, 0, 0, new MTLOrigin { x = 0, y = 0, z = 0 },
+                        new MTLSize { width = (ulong)t.Width, height = (ulong)t.Height, depth = 1 },
+                        _stageIn[j, k], 0, (ulong)(t.Width * bpp), (ulong)bytes);
+                    _stageInBytes[j, k] = bytes;
+                    _stageInDesc[j, k] = $"{t.Width}x{t.Height}_fmt{(int)t.MtlFormat}";
+                }
+            }
+
+            if (_stageInputsOnce == null)
+            {
+                _stageInputsOnce = string.Join(" | ", System.Linq.Enumerable.Select(_stageInputs, t => $"{t.Width}x{t.Height} {t.MtlFormat} 0x{t.CanonicalPtr.ToInt64():X}"));
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage {_stageLabel} output {_stageOutput?.Width}x{_stageOutput?.Height} {_stageOutput?.MtlFormat} inputs: {_stageInputsOnce}");
+            }
+
+            SnapshotStageCb(j, blit);
+
+            _stageFence[j]?.Put();
+            _stageFence[j] = cbs.GetFence();
+            _stageFence[j].Get();
+            _stageFrame[j] = _frame;
+            _stageSamples++;
+            _stageInputs.Clear();
+            _stageOutput = null;
+            _stageCollect = false;
+        }
+
+        private static unsafe void WriteStageDumps(long presentedFrame, bool flat)
+        {
+            // The stage ran in the period BEFORE the one whose present shows the result.
+            long want = presentedFrame - 1;
+            for (int j = 0; j < StageSlots; j++)
+            {
+                if (_stageFrame[j] != want || _stageFence[j] == null) { continue; }
+                if (!_stageFence[j].IsSignaled()) { Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage dump for frame {want} not ready"); return; }
+                string tag = flat ? "white" : "normal";
+                try
+                {
+                    if (_stageOutBytes[j] > 0)
+                    {
+                        using var fo = new System.IO.FileStream($"/tmp/stage_{_stageLabel}_{tag}_f{presentedFrame}_out_{_stageOutDesc[j]}.raw", System.IO.FileMode.Create);
+                        fo.Write(new ReadOnlySpan<byte>((void*)_stageOut[j].Contents, _stageOutBytes[j]));
+                    }
+                    for (int q = 0; q < StageSlots; q++)
+                    {
+                        if (_stagePreFrame[q] == want && _stagePreBytes[q] > 0 && _stagePreFence[q] != null && _stagePreFence[q].IsSignaled())
+                        {
+                            using var fp = new System.IO.FileStream($"/tmp/stage_{_stageLabel}_{tag}_f{presentedFrame}_pre_{_stagePreDesc[q]}.raw", System.IO.FileMode.Create);
+                            fp.Write(new ReadOnlySpan<byte>((void*)_stagePre[q].Contents, _stagePreBytes[q]));
+                        }
+                    }
+                    for (int k = 0; k < StageMaxInputs; k++)
+                    {
+                        if (_stageInBytes[j, k] <= 0) { continue; }
+                        using var fi = new System.IO.FileStream($"/tmp/stage_{_stageLabel}_{tag}_f{presentedFrame}_in{k}_{_stageInDesc[j, k]}.raw", System.IO.FileMode.Create);
+                        fi.Write(new ReadOnlySpan<byte>((void*)_stageIn[j, k].Contents, _stageInBytes[j, k]));
+                    }
+                    if (flat) { _stageDumpsWritten++; } else { _stageDumpsNormal++; }
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage {_stageLabel} dumps written for {tag} frame {presentedFrame} (stage frame {want})");
+                }
+                catch (Exception e)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage dump failed: {e.Message}");
+                }
+                return;
+            }
+            _stageMisses++;
+            if (_stageMissLogged < 3)
+            {
+                _stageMissLogged++;
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage lookup miss for presented frame {presentedFrame} (want {want}): ring frames [{string.Join(",", _stageFrame)}] arms {_stageArms} samples {_stageSamples}");
+            }
+        }
+
+        // ---- pass-by-pass trace of the stage input ------------------------------------
+        // At every pass end (from the first draw into the stage input onward), 5 texels of
+        // the stage input are blitted into a ring together with the pass's description, so a
+        // white frame prints the exact pass boundary at which that texture first reads white.
+        // RYUJINX_METAL_PASS_TRACE=1 (needs RYUJINX_METAL_STAGE_LABEL so the input is known).
+        private static readonly bool _passTrace = Environment.GetEnvironmentVariable("RYUJINX_METAL_PASS_TRACE") == "1";
+        private const int TracePasses = 128, TraceTexels = 5;   // ring: the LAST 128 pass ends of the period
+        private const int TraceBase = 5 * Slots * Pixels * BytesPerPixel + 4 * Slots * Pixels * 16 + StageSlots * StageCbMax * StageCbFloats * 4;
+        private const int TraceBytes = Slots * TracePasses * TraceTexels * 4;
+        private static readonly string[,] _traceDesc = new string[Slots, TracePasses];
+        private static readonly MTLPixelFormat[,] _traceFmt = new MTLPixelFormat[Slots, TracePasses];
+        private static readonly int[] _traceCount = new int[Slots];
+        private static int _traceLogged, _traceLoggedNormal;
+        private static string _frameLastDrawLabel = "-";
+        private static int _frameDrawsInPass;
+        private static Texture _traceTexture;            // by RYUJINX_METAL_TRACE_RT=WxH, else the stage input
+        private static readonly int _traceRtW = ParseDim(Environment.GetEnvironmentVariable("RYUJINX_METAL_TRACE_RT"), 0);
+        private static readonly int _traceRtH = ParseDim(Environment.GetEnvironmentVariable("RYUJINX_METAL_TRACE_RT"), 1);
+        public static void NoteTraceCandidate(Texture t)
+        {
+            if (_passTrace && _traceRtW > 0 && t != null && t.Width == _traceRtW && t.Height == _traceRtH && t.MtlFormat == MTLPixelFormat.RG11B10Float)
+            {
+                _traceTexture = t;
+            }
+        }
+        private static bool _traceArmedThisFrame;
+
+        public static void NotePassDrawLabel(string label)
+        {
+            _frameLastDrawLabel = label ?? "-";
+            _frameDrawsInPass++;
+        }
+        public static string LastPassLastLabel => _frameLastDrawLabel;
+        public static int LastPassDraws => _frameDrawsInPass;
+
+        /// <summary>Called at every pass end with the pass's own rt0 and a description.</summary>
+        public static void TracePassEnd(CommandBufferScoped cbs, Texture t, string passDesc)
+        {
+            if (!_passTrace || !Enabled || _buf.NativePtr == IntPtr.Zero)
+            {
+                return;
+            }
+
+            // Only the HDR colour pipeline: RG11B10Float / RGBA16Float, at least 16px.
+            if (t == null || t.Width < 16 || t.Height < 16 ||
+                (t.MtlFormat != MTLPixelFormat.RG11B10Float && t.MtlFormat != MTLPixelFormat.RGBA16Float))
+            {
+                return;
+            }
+
+            int idx = (int)(_frame % Slots);
+            int n = _traceCount[idx] % TracePasses;   // ring position; the count keeps growing
+
+            MTLTexture mt = t.GetHandle(cbs);
+            if (mt.NativePtr == IntPtr.Zero)
+            {
+                return;
+            }
+
+            MTLBlitCommandEncoder blit = cbs.Encoders.EnsureBlitEncoder();
+            int w = t.Width, h = t.Height;
+            Span<(int X, int Y)> pts = stackalloc (int X, int Y)[TraceTexels];
+            pts[0] = (w / 2, h / 2); pts[1] = (w / 4, h / 4); pts[2] = (3 * w / 4, h / 4); pts[3] = (w / 4, 3 * h / 4); pts[4] = (3 * w / 4, 3 * h / 4);
+            for (int i = 0; i < TraceTexels; i++)
+            {
+                blit.CopyFromTexture(mt, 0, 0, new MTLOrigin { x = (ulong)pts[i].X, y = (ulong)pts[i].Y, z = 0 },
+                    new MTLSize { width = 1, height = 1, depth = 1 },
+                    _buf, (ulong)(TraceBase + ((idx * TracePasses + n) * TraceTexels + i) * 4), 4, 4);
+            }
+            _traceDesc[idx, n] = $"{w}x{h}:{(t.MtlFormat == MTLPixelFormat.RGBA16Float ? "16F" : "11B10")} {passDesc} last={_frameLastDrawLabel} draws={_frameDrawsInPass}";
+            _traceFmt[idx, n] = t.MtlFormat;
+            _traceCount[idx]++;
+            _frameDrawsInPass = 0;
+        }
+
+        private static unsafe string TraceReport(int index)
+        {
+            StringBuilder sb = new();
+            int total = _traceCount[index];
+            int n = Math.Min(total, TracePasses);
+            int first = total - n;   // absolute index of the oldest entry still in the ring
+            sb.Append($" (passes {first}..{total - 1} of {total})");
+            for (int a = first; a < total; a++)
+            {
+                int k = a % TracePasses;
+                uint* px = (uint*)((byte*)_buf.Contents + TraceBase + ((index * TracePasses + k) * TraceTexels) * 4);
+                // RG11B10Float decode of the 5 texels -> mean luma
+                double sum = 0;
+                for (int i = 0; i < TraceTexels; i++)
+                {
+                    (float r, float g, float b) = SamplerPathProbe.DecodeRaw(px[i], _traceFmt[index, k]);
+                    float lp = (r + 2 * g + b) * 0.25f;
+                    sum += float.IsFinite(lp) ? lp : 1e9f;
+                }
+                sb.Append($"\n      pass {a,3}: luma {sum / TraceTexels:F3} {(sum / TraceTexels >= 0.9 ? "WHITE" : "     ")}  {_traceDesc[index, k]}");
+            }
+            return sb.ToString();
+        }
+
+        // ---- pre-composite probe -------------------------------------------------
+        // The composite's fragment shader samples its input and gets white on ~20% of
+        // frames, while compute reads of the same texels AFTER its pass always find a
+        // picture. Two readings: the data was not visible yet when the fragment stage ran
+        // (an ordering fault between the input's writer and the composite), or the fragment
+        // path reads it wrong while the data is there. This reads the input with the compute
+        // engine (texture.read and a sampler) right BEFORE the composite pass begins, at the
+        // read-after-write split point, same command buffer - the one moment nobody looked.
+        // Region P (compute read) and PS (sampler) sit after F in the ring buffer.
+        private const int PreProbeReadBase = 5 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16;
+        private const int PreProbeSampBase = 5 * Slots * Pixels * BytesPerPixel + 3 * Slots * Pixels * 16;
+        private static bool _framePreProbed;
+        private static long _preWhiteFlat, _prePicFlat, _preWhiteNormal, _prePicNormal, _preUnprobedFlat, _preUnprobedNormal;
+        private static long _preSampWhiteFlat, _preSampPicFlat, _preSampWhiteNormal, _preSampPicNormal;
+        private static double _preFlatMeanSum; private static long _preFlatMeanN;
+        private static double _preNormalMeanSum; private static long _preNormalMeanN;
+        private static long _preDistinctFlatSum, _preDistinctNormalSum;
+
+        public static bool PreProbedThisPeriod { get; private set; }
+
+        public static void PreCompositeProbe(CommandBufferScoped cbs, Texture input)
+        {
+            if (!Enabled || input == null || _buf.NativePtr == IntPtr.Zero || !SamplerPathProbe.Ready || PreProbedThisPeriod)
+            {
+                return;
+            }
+            PreProbedThisPeriod = true;
+
+            MTLTexture stex = input.GetHandle(cbs);
+            if (stex.NativePtr == IntPtr.Zero || input.Width <= GridSide || input.Height <= GridSide)
+            {
+                return;
+            }
+
+            int idx = (int)(_frame % Slots);
+            SamplerPathProbe.Read(cbs, stex, (ulong)input.Width, (ulong)input.Height, _buf, PreProbeReadBase + idx * Pixels * 16);
+            SamplerPathProbe.ReadSampled(cbs, stex, _buf, PreProbeSampBase + idx * Pixels * 16);
+            _framePreProbed = true;
+            _preProbes++;
+
+            // Whole surface of the input BEFORE the stage's pass, for the white frames.
+            if (_stageLabel.Length != 0 && _stagePre[0].NativePtr != IntPtr.Zero && _stageDumpsWritten < DumpMaxFiles)
+            {
+                int j = (int)(_frame % StageSlots);
+                int bpp = BytesPerPixelOf(input.MtlFormat);
+                int bytes = input.Width * input.Height * bpp;
+                if (bytes <= DumpMaxBytes)
+                {
+                    MTLBlitCommandEncoder blit = cbs.Encoders.EnsureBlitEncoder();
+                    blit.CopyFromTexture(stex, 0, 0, new MTLOrigin { x = 0, y = 0, z = 0 },
+                        new MTLSize { width = (ulong)input.Width, height = (ulong)input.Height, depth = 1 },
+                        _stagePre[j], 0, (ulong)(input.Width * bpp), (ulong)bytes);
+                    _stagePreBytes[j] = bytes;
+                    _stagePreDesc[j] = $"{input.Width}x{input.Height}_fmt{(int)input.MtlFormat}";
+                    _stagePreFrame[j] = _frame;
+                    _stagePreFence[j]?.Put();
+                    _stagePreFence[j] = cbs.GetFence();
+                    _stagePreFence[j].Get();
+                }
+            }
+
+            // Who drew into the input so far this frame (census since its last snapshot).
+            {
+                IntPtr root = input.CanonicalPtr;
+                int count = _pendingWriterCount.TryGetValue(root, out int c) ? c : 0;
+                _frameStageInputWriters = count > 0 ? string.Join(",", _pendingWriters[root], 0, Math.Min(count, MaxWriters)) : "-";
+                _pendingWriterCount[root] = 0;
+                _frameStageInputLastWriters = LastWritersOf(root);
+            }
+        }
+        private static long _preProbes;
+
         private static bool _afterBlitArmed;
         private static bool _frameAfterOutSampled;
         private static IntPtr _frameAfterOutPtr;
@@ -654,6 +1266,32 @@ namespace Ryujinx.Graphics.Metal
         // composite painted it), remembered for a few frames; consumed when present reads
         // that same pointer. This is the measurement the DECIDER should have been.
         private static readonly Dictionary<IntPtr, bool> _paintedWhiteByPtr = new();
+
+        // Full-surface dumps. 25 points say "white, min 246 max 254 sd 2.2" - not a memory
+        // fill (that would be 255/255/0) but a structured near-white. What that structure IS
+        // (tile-shaped, a smooth field, an over-exposed picture with its edges intact) is the
+        // one property of the white nobody has looked at, and it discriminates mechanisms
+        // that no 25-point statistic can. Whole-texture blits of the presented half at
+        // present (A) and of the half the composite just painted (F), per ring slot with
+        // their own fences; the first few white frames are written to /tmp as raw RGBA
+        // together with the SAME storage's F dump from the previous frame, keyed by pointer.
+        // RYUJINX_METAL_DUMP_WHITE=1. Identity instrument, not for rate arms.
+        private static readonly bool _dumpWhite = Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_WHITE") == "1";
+        private const int DumpMaxBytes = 1920 * 1080 * 4;
+        private static readonly MTLBuffer[] _dumpA = new MTLBuffer[Slots];
+        private static readonly MTLBuffer[] _dumpF = new MTLBuffer[Slots];
+        // The composite's INPUT right after its pass, same encoder as F (raw texels; the
+        // scene target is RG11B10Float, decoded offline by tools/white_dump.py).
+        private static readonly MTLBuffer[] _dumpI = new MTLBuffer[Slots];
+        private static readonly int[] _dumpIW = new int[Slots], _dumpIH = new int[Slots];
+        private static readonly MTLPixelFormat[] _dumpIFmt = new MTLPixelFormat[Slots];
+        private static readonly FenceHolder[] _dumpFFence = new FenceHolder[Slots];
+        private static readonly IntPtr[] _dumpFPtr = new IntPtr[Slots];
+        private static readonly int[] _dumpFW = new int[Slots], _dumpFH = new int[Slots];
+        private static readonly int[] _dumpAW = new int[Slots], _dumpAH = new int[Slots];
+        private static readonly bool[] _dumpAValid = new bool[Slots];
+        private static int _dumpsWritten, _dumpNormalWritten, _dumpFNotReady, _dumpFUnpaired;
+        private const int DumpMaxFiles = 4;
         private static long _samePicToWhiteFlat, _samePicToPicFlat, _sameWhiteToWhiteFlat, _sameWhiteToPicFlat;
         private static long _samePicToWhiteNormal, _samePicToPicNormal, _sameWhiteToWhiteNormal, _sameWhiteToPicNormal;
         private static long _sameUnpairedFlat, _sameUnpairedNormal;
@@ -698,15 +1336,40 @@ namespace Ryujinx.Graphics.Metal
                 MTLTexture ot = outTex.GetHandle(cbs);
                 if (ot.NativePtr != IntPtr.Zero)
                 {
+                    // BUG FIXED 2026-08-18: the destination offset lacked "+ i * BytesPerPixel",
+                    // so all 25 copies landed on texel 0 of the region and texels 1..24 stayed
+                    // zero forever. The classifier (>= SaturatedNeeded saturated of 25) could
+                    // therefore never call this region white - which is why "the composite
+                    // paints a picture" came out 100% on every arm since a4225946, and why the
+                    // whole "in-place corruption between composite and present" line of
+                    // investigation existed. Full-surface dumps (RYUJINX_METAL_DUMP_WHITE)
+                    // showed the freshly painted half bit-identical to the white presented one.
                     for (int i = 0; i < Pixels; i++)
                     {
                         blit.CopyFromTexture(ot, 0, 0,
                             new MTLOrigin { x = (ulong)(outTex.Width * (i % GridSide + 1) / (GridSide + 1)), y = (ulong)(outTex.Height * (i / GridSide + 1) / (GridSide + 1)), z = 0 },
                             new MTLSize { width = 1, height = 1, depth = 1 },
-                            _buf, (ulong)(4 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16 + idx * Pixels * BytesPerPixel), BytesPerPixel, BytesPerPixel);
+                            _buf, (ulong)(4 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16 + (idx * Pixels + i) * BytesPerPixel), BytesPerPixel, BytesPerPixel);
                     }
                     _frameAfterOutSampled = true;
                     _frameAfterOutPtr = outTex.CanonicalPtr;
+
+                    if (_dumpWhite && outTex.Width * outTex.Height * 4 <= DumpMaxBytes && _dumpsWritten < DumpMaxFiles)
+                    {
+                        // Whole surface, this slot; its own fence so the pairing at
+                        // classification can tell a finished dump from one still in flight
+                        // (the composite CB commits after the present CB on ~40% of frames).
+                        blit.CopyFromTexture(ot, 0, 0,
+                            new MTLOrigin { x = 0, y = 0, z = 0 },
+                            new MTLSize { width = (ulong)outTex.Width, height = (ulong)outTex.Height, depth = 1 },
+                            _dumpF[idx], 0, (ulong)(outTex.Width * 4), (ulong)(outTex.Width * outTex.Height * 4));
+                        _dumpFFence[idx]?.Put();
+                        _dumpFFence[idx] = cbs.GetFence();
+                        _dumpFFence[idx].Get();
+                        _dumpFPtr[idx] = outTex.CanonicalPtr;
+                        _dumpFW[idx] = outTex.Width;
+                        _dumpFH[idx] = outTex.Height;
+                    }
                 }
             }
 
@@ -727,6 +1390,24 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _frameAfterSampled = true;
+
+            if (_dumpWhite && sceneTex.Width * sceneTex.Height * 4 <= DumpMaxBytes && _dumpsWritten < DumpMaxFiles &&
+                (sceneTex.MtlFormat == MTLPixelFormat.RG11B10Float || sceneTex.MtlFormat == MTLPixelFormat.RGBA8Unorm ||
+                 sceneTex.MtlFormat == MTLPixelFormat.RGBA8UnormsRGB || sceneTex.MtlFormat == MTLPixelFormat.BGRA8Unorm ||
+                 sceneTex.MtlFormat == MTLPixelFormat.RGBA16Float))
+            {
+                int bpp = sceneTex.MtlFormat == MTLPixelFormat.RGBA16Float ? 8 : 4;
+                if (sceneTex.Width * sceneTex.Height * bpp <= DumpMaxBytes)
+                {
+                    blit.CopyFromTexture(stex, 0, 0,
+                        new MTLOrigin { x = 0, y = 0, z = 0 },
+                        new MTLSize { width = (ulong)sceneTex.Width, height = (ulong)sceneTex.Height, depth = 1 },
+                        _dumpI[idx], 0, (ulong)(sceneTex.Width * bpp), (ulong)(sceneTex.Width * sceneTex.Height * bpp));
+                    _dumpIW[idx] = sceneTex.Width;
+                    _dumpIH[idx] = sceneTex.Height;
+                    _dumpIFmt[idx] = sceneTex.MtlFormat;
+                }
+            }
 
             // The same texels again, through the sampler hardware. Back to back with the
             // blit-engine copies above, same stream position: the two decoders agree unless
@@ -985,8 +1666,35 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            _buf = device.NewBuffer((ulong)(5 * Slots * Pixels * BytesPerPixel + 2 * Slots * Pixels * 16), MTLResourceOptions.ResourceStorageModeShared);
+            // + 2 float4 regions for the pre-composite probe (compute read / sampler read).
+            _buf = device.NewBuffer((ulong)(5 * Slots * Pixels * BytesPerPixel + 4 * Slots * Pixels * 16 + StageSlots * StageCbMax * StageCbFloats * 4 + TraceBytes), MTLResourceOptions.ResourceStorageModeShared);
             SamplerPathProbe.Initialize(device);
+
+            if (_stageLabel.Length != 0)
+            {
+                for (int i = 0; i < StageSlots; i++)
+                {
+                    _stageOut[i] = device.NewBuffer((ulong)DumpMaxBytes, MTLResourceOptions.ResourceStorageModeShared);
+                    _stagePre[i] = device.NewBuffer((ulong)DumpMaxBytes, MTLResourceOptions.ResourceStorageModeShared);
+                    for (int k = 0; k < StageMaxInputs; k++)
+                    {
+                        _stageIn[i, k] = device.NewBuffer((ulong)DumpMaxBytes, MTLResourceOptions.ResourceStorageModeShared);
+                    }
+                }
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage dumps armed for program {_stageLabel}");
+            }
+
+            if (_dumpWhite)
+            {
+                for (int i = 0; i < Slots; i++)
+                {
+                    _dumpA[i] = device.NewBuffer((ulong)DumpMaxBytes, MTLResourceOptions.ResourceStorageModeShared);
+                    _dumpF[i] = device.NewBuffer((ulong)DumpMaxBytes, MTLResourceOptions.ResourceStorageModeShared);
+                    _dumpI[i] = device.NewBuffer((ulong)DumpMaxBytes, MTLResourceOptions.ResourceStorageModeShared);
+                }
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: full-surface white dumps armed ({Slots}x2x{DumpMaxBytes / 1048576} MB), first {DumpMaxFiles} white frames -> /tmp/white_*.rgba");
+            }
 
             Logger.Warning?.PrintMsg(LogClass.Gpu,
                 $"uploadcorr armed: ring={Slots} grid={GridSide}x{GridSide} satLuma={SaturatedLuma} need={SaturatedNeeded} minPixels={MinPixels}");
@@ -1079,6 +1787,7 @@ namespace Ryujinx.Graphics.Metal
 
             _attachedThisFrame.Add(target.CanonicalPtr);
             _lastAttachmentFrame[target.CanonicalPtr] = _frame;
+            NoteTraceCandidate(target);
 
             // How the game's final RT gets its content: log the pass that binds it - was
             // it cleared, how many draws followed (filled in at pass end), which program.
@@ -1204,11 +1913,45 @@ namespace Ryujinx.Graphics.Metal
         private static bool _frameBlitReadsPrevAttachment, _frameBlitPairKnown;
         private static long _blitPrevMatchFlat, _blitPrevMatchNormal, _blitPrevMismatchFlat, _blitPrevMismatchNormal;
 
+        // The LAST few writers of each storage (the census above keeps the FIRST 24 distinct
+        // labels; the scene texture has more writers than that and its last one - the
+        // tonemap/post pass - is the one whose output the upscaler reads).
+        private static readonly Dictionary<IntPtr, string[]> _lastWriters = new();
+        private static readonly Dictionary<IntPtr, int> _lastWriterPos = new();
+        private const int LastWritersN = 6;
+
+        private static void NoteLastWriter(IntPtr root, string program)
+        {
+            string label = program ?? "?";
+            label = label.Length > 6 ? label[..6] : label;
+            if (!_lastWriters.TryGetValue(root, out string[] ring)) { ring = new string[LastWritersN]; _lastWriters[root] = ring; _lastWriterPos[root] = 0; }
+            int pos = _lastWriterPos[root];
+            // collapse consecutive draws of the same program
+            int prev = (pos + LastWritersN - 1) % LastWritersN;
+            if (ring[prev] == label) { return; }
+            ring[pos] = label;
+            _lastWriterPos[root] = (pos + 1) % LastWritersN;
+        }
+
+        public static string LastWritersOf(IntPtr root)
+        {
+            if (!_lastWriters.TryGetValue(root, out string[] ring)) { return "-"; }
+            int pos = _lastWriterPos[root];
+            StringBuilder sb = new();
+            for (int i = 0; i < LastWritersN; i++)
+            {
+                string l = ring[(pos + i) % LastWritersN];
+                if (l != null) { if (sb.Length > 0) { sb.Append(','); } sb.Append(l); }
+            }
+            return sb.Length > 0 ? sb.ToString() : "-";
+        }
+
         public static void NoteAttachmentDraw(IntPtr root, string program)
         {
             _drawsSeen++;
             _lastAttachmentRoot = root;
             NoteWriteOrdering(root, program);
+            if (Enabled && root != IntPtr.Zero) { NoteLastWriter(root, program); }
 
             if (!Enabled || root == IntPtr.Zero)
             {
@@ -1383,6 +2126,18 @@ namespace Ryujinx.Graphics.Metal
                         _buf, (ulong)((idx * Pixels + i) * BytesPerPixel), BytesPerPixel, BytesPerPixel);
                 }
 
+                _dumpAValid[idx] = false;
+                if (_dumpWhite && src.Width * src.Height * 4 <= DumpMaxBytes && _dumpsWritten < DumpMaxFiles)
+                {
+                    blit.CopyFromTexture(tex, 0, 0,
+                        new MTLOrigin { x = 0, y = 0, z = 0 },
+                        new MTLSize { width = (ulong)src.Width, height = (ulong)src.Height, depth = 1 },
+                        _dumpA[idx], 0, (ulong)(src.Width * 4), (ulong)(src.Width * src.Height * 4));
+                    _dumpAW[idx] = src.Width;
+                    _dumpAH[idx] = src.Height;
+                    _dumpAValid[idx] = true;
+                }
+
                 // Twenty-five more points, from the composite's input. Sampled as raw
                 // 32-bit values rather than luma: the scene target is RG11B10Float, so
                 // its bytes are not BGRA and only equality is meaningful. A flat input
@@ -1445,6 +2200,20 @@ namespace Ryujinx.Graphics.Metal
                 mine.AfterSampled = _frameAfterSampled;
                 mine.AfterOutSampled = _frameAfterOutSampled;
                 mine.AfterOutPtr = _frameAfterOutPtr;
+                mine.PreProbed = _framePreProbed;
+                _framePreProbed = false;
+                mine.InputWriters = _frameInputWriters;
+                mine.InputDesc = _frameInputDesc;
+                _frameInputWriters = "-";
+                mine.StageDraw = _frameStageDraw;
+                _frameStageDraw = "-";
+                mine.StageInputWriters = _frameStageInputWriters;
+                _frameStageInputWriters = "-";
+                mine.StageInputLastWriters = _frameStageInputLastWriters;
+                _frameStageInputLastWriters = "-";
+                mine.StageInputId = _frameStageInputId;
+                _frameStageInputId = "-";
+                if (_frameConstSeen) { mine.Const = (float[])_frameConst.Clone(); mine.ConstSeen = true; _frameConstSeen = false; Array.Clear(_frameConstSlot); } else { mine.ConstSeen = false; }
                 mine.PresentSrcPtr = src.CanonicalPtr;
                 mine.DrawnSrgbPtrThisFrame = _frameAfterOutPtr;
                 mine.SamplerSampled = _frameSamplerSampled;
@@ -1623,10 +2392,62 @@ namespace Ryujinx.Graphics.Metal
             _frameBigCopiesOntoRt = 0;
 
             _frame++;
+            PreProbedThisPeriod = false;
+            if (_passTrace) { _traceCount[(int)(_frame % Slots)] = 0; }
 
             if (_frame % ReportInterval == 0)
             {
                 Report();
+            }
+        }
+
+        private static unsafe void WriteDumps(ref Slot slot, int index, bool flat)
+        {
+            string tag = flat ? "white" : "normal";
+            long fr = _frame;
+            try
+            {
+                int w = _dumpAW[index], h = _dumpAH[index];
+                string pa = $"/tmp/{tag}_A_f{fr}_{w}x{h}.rgba";
+                using (var fs = new System.IO.FileStream(pa, System.IO.FileMode.Create))
+                {
+                    fs.Write(new ReadOnlySpan<byte>((void*)_dumpA[index].Contents, w * h * 4));
+                }
+
+                // The same storage, photographed right after the composite painted it in the
+                // previous frame: slot index-1, provided its pointer matches and its CB is done.
+                int prev = (index + Slots - 1) % Slots;
+                string pf = "-";
+                if (_dumpFPtr[prev] == slot.PresentSrcPtr && slot.PresentSrcPtr != IntPtr.Zero)
+                {
+                    if (_dumpFFence[prev] != null && _dumpFFence[prev].IsSignaled())
+                    {
+                        int fw = _dumpFW[prev], fh = _dumpFH[prev];
+                        pf = $"/tmp/{tag}_F_f{fr}_{fw}x{fh}.rgba";
+                        using var ff = new System.IO.FileStream(pf, System.IO.FileMode.Create);
+                        ff.Write(new ReadOnlySpan<byte>((void*)_dumpF[prev].Contents, fw * fh * 4));
+                    }
+                    else { _dumpFNotReady++; pf = "F-not-ready"; }
+
+                    // The composite's input from that same pass end (only meaningful when
+                    // the F pair matched: same slot, same encoder).
+                    if (_dumpFFence[prev] != null && _dumpFFence[prev].IsSignaled() && _dumpIW[prev] > 0)
+                    {
+                        int iw = _dumpIW[prev], ih = _dumpIH[prev];
+                        int bpp = _dumpIFmt[prev] == MTLPixelFormat.RGBA16Float ? 8 : 4;
+                        string pi = $"/tmp/{tag}_I_f{fr}_{iw}x{ih}_fmt{(int)_dumpIFmt[prev]}.raw";
+                        using var fi = new System.IO.FileStream(pi, System.IO.FileMode.Create);
+                        fi.Write(new ReadOnlySpan<byte>((void*)_dumpI[prev].Contents, iw * ih * bpp));
+                    }
+                }
+                else { _dumpFUnpaired++; pf = "F-unpaired"; }
+
+                if (flat) { _dumpsWritten++; } else { _dumpNormalWritten++; }
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: dumped {tag} frame {fr}: A={pa} F={pf} (ptr 0x{slot.PresentSrcPtr:X})");
+            }
+            catch (Exception e)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: dump failed: {e.Message}");
             }
         }
 
@@ -2178,6 +2999,121 @@ namespace Ryujinx.Graphics.Metal
                 if (flat) { _sameUnpairedFlat++; } else { _sameUnpairedNormal++; }
             }
 
+            if (slot.ConstSeen && slot.Const != null)
+            {
+                for (int i = 0; i < ConstSlots * ConstFloats; i++)
+                {
+                    double v = slot.Const[i];
+                    (long Fn, double Fmin, double Fmax, double Fsum, long Nn, double Nmin, double Nmax, double Nsum) e =
+                        _constStats.TryGetValue(i, out (long Fn, double Fmin, double Fmax, double Fsum, long Nn, double Nmin, double Nmax, double Nsum) cur)
+                        ? cur : (0, double.MaxValue, double.MinValue, 0, 0, double.MaxValue, double.MinValue, 0);
+                    if (flat) { e = (e.Fn + 1, Math.Min(e.Fmin, v), Math.Max(e.Fmax, v), e.Fsum + v, e.Nn, e.Nmin, e.Nmax, e.Nsum); }
+                    else { e = (e.Fn, e.Fmin, e.Fmax, e.Fsum, e.Nn + 1, Math.Min(e.Nmin, v), Math.Max(e.Nmax, v), e.Nsum + v); }
+                    _constStats[i] = e;
+                }
+            }
+
+            {
+                string sik = slot.StageInputId ?? "-";
+                (long Flat, long Normal) siv = _stageInputIdStats.TryGetValue(sik, out (long Flat, long Normal) sie) ? sie : (0, 0);
+                _stageInputIdStats[sik] = flat ? (siv.Flat + 1, siv.Normal) : (siv.Flat, siv.Normal + 1);
+            }
+
+            {
+                string slk = slot.StageInputLastWriters ?? "-";
+                (long Flat, long Normal) slv = _stageInputLastWriterStats.TryGetValue(slk, out (long Flat, long Normal) sle) ? sle : (0, 0);
+                _stageInputLastWriterStats[slk] = flat ? (slv.Flat + 1, slv.Normal) : (slv.Flat, slv.Normal + 1);
+            }
+
+            {
+                string swk = slot.StageInputWriters ?? "-";
+                (long Flat, long Normal) swv = _stageInputWriterStats.TryGetValue(swk, out (long Flat, long Normal) swe) ? swe : (0, 0);
+                _stageInputWriterStats[swk] = flat ? (swv.Flat + 1, swv.Normal) : (swv.Flat, swv.Normal + 1);
+            }
+
+            {
+                string sdk = slot.StageDraw ?? "-";
+                (long Flat, long Normal) sdv = _stageDrawStats.TryGetValue(sdk, out (long Flat, long Normal) sde) ? sde : (0, 0);
+                _stageDrawStats[sdk] = flat ? (sdv.Flat + 1, sdv.Normal) : (sdv.Flat, sdv.Normal + 1);
+            }
+
+            {
+                string k = slot.InputWriters ?? "-";
+                (long Flat, long Normal) v = _inputWriterStats.TryGetValue(k, out (long Flat, long Normal) e) ? e : (0, 0);
+                _inputWriterStats[k] = flat ? (v.Flat + 1, v.Normal) : (v.Flat, v.Normal + 1);
+                string d = slot.InputDesc ?? "-";
+                (long Flat, long Normal) dv = _inputDescStats.TryGetValue(d, out (long Flat, long Normal) de) ? de : (0, 0);
+                _inputDescStats[d] = flat ? (dv.Flat + 1, dv.Normal) : (dv.Flat, dv.Normal + 1);
+            }
+
+            if (slot.PreProbed)
+            {
+                float* pr = (float*)((byte*)_buf.Contents + PreProbeReadBase + index * Pixels * 16);
+                float* ps = (float*)((byte*)_buf.Contents + PreProbeSampBase + index * Pixels * 16);
+                int satR = 0, satS = 0; double meanR = 0;
+                for (int i = 0; i < Pixels; i++)
+                {
+                    float lr = (pr[i * 4] + 2 * pr[i * 4 + 1] + pr[i * 4 + 2]) * 0.25f;
+                    float ls = (ps[i * 4] + 2 * ps[i * 4 + 1] + ps[i * 4 + 2]) * 0.25f;
+                    meanR += lr;
+                    // Linear-light threshold matching SaturatedLuma/255 in sRGB terms (~0.9).
+                    if (lr >= 0.9f) { satR++; }
+                    if (ls >= 0.9f) { satS++; }
+                }
+                // For the upscaler's input the question is not "white" but "still the clear":
+                // count distinct read values too (an exact clear is 1 distinct of 25).
+                int distinctR = 0;
+                for (int i = 0; i < Pixels; i++)
+                {
+                    bool seen = false;
+                    for (int j2 = 0; j2 < i; j2++) { if (pr[j2 * 4] == pr[i * 4] && pr[j2 * 4 + 1] == pr[i * 4 + 1] && pr[j2 * 4 + 2] == pr[i * 4 + 2]) { seen = true; break; } }
+                    if (!seen) { distinctR++; }
+                }
+                if (flat) { _preDistinctFlatSum += distinctR; } else { _preDistinctNormalSum += distinctR; }
+                bool preWhite = satR >= SaturatedNeeded || distinctR <= 3, preSampWhite = satS >= SaturatedNeeded;
+                if (flat) { if (preWhite) { _preWhiteFlat++; } else { _prePicFlat++; } _preFlatMeanSum += meanR / Pixels; _preFlatMeanN++; }
+                else { if (preWhite) { _preWhiteNormal++; } else { _prePicNormal++; } _preNormalMeanSum += meanR / Pixels; _preNormalMeanN++; }
+                if (flat) { if (preSampWhite) { _preSampWhiteFlat++; } else { _preSampPicFlat++; } }
+                else { if (preSampWhite) { _preSampWhiteNormal++; } else { _preSampPicNormal++; } }
+            }
+            else
+            {
+                if (flat) { _preUnprobedFlat++; } else { _preUnprobedNormal++; }
+            }
+
+            if (_dumpWhite && _dumpAValid[index] && (flat ? _dumpsWritten < DumpMaxFiles : _dumpNormalWritten < 1))
+            {
+                WriteDumps(ref slot, index, flat);
+            }
+
+            if (_passTrace)
+            {
+                if (flat && _traceLogged < 4)
+                {
+                    _traceLogged++;
+                    // This slot's trace is the frame that PRODUCED the presented white (the
+                    // present of frame N shows what the game drew during period N-1); the
+                    // trace recorded during period N-1 sits in slot (index-1).
+                    int prev = (index + Slots - 1) % Slots;
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: PASS TRACE of the stage input for WHITE frame {slot.Frame} (period {slot.Frame - 1}, {_traceCount[prev]} passes):{TraceReport(prev)}");
+                }
+                else if (!flat && _traceLoggedNormal < 2 && slot.Frame > 1000)
+                {
+                    _traceLoggedNormal++;
+                    int prev = (index + Slots - 1) % Slots;
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: PASS TRACE of the stage input for a NORMAL frame {slot.Frame} ({_traceCount[prev]} passes):{TraceReport(prev)}");
+                }
+            }
+
+            if (_stageLabel.Length != 0 && slot.Frame > 1)
+            {
+                ClassifyStageCb(slot.Frame, flat);
+                if (flat ? _stageDumpsWritten < DumpMaxFiles : _stageDumpsNormal < 1)
+                {
+                    WriteStageDumps(slot.Frame, flat);
+                }
+            }
+
             if (flat)
             {
                 if (inputKnownForThisOutcome)
@@ -2419,6 +3355,22 @@ namespace Ryujinx.Graphics.Metal
             }
             sb.Append($"\n  PRESENT reads the half the composite WRITES this frame: same-half flat {_rwSameHalfFlat} normal {_rwSameHalfNormal} | other-half flat {_rwOtherHalfFlat} normal {_rwOtherHalfNormal}");
             sb.Append($"\n  SAME-STORAGE painted->presented: [pic->WHITE] flat {_samePicToWhiteFlat} | [white->white] flat {_sameWhiteToWhiteFlat} | [pic->pic] normal {_samePicToPicNormal} | [white->pic] normal {_sameWhiteToPicNormal} | unpaired flat {_sameUnpairedFlat} normal {_sameUnpairedNormal}");
+            Logger.Warning?.PrintMsg(LogClass.Gpu,
+                $"  PRE-STAGE input (compute read of the pre-probe program's input right BEFORE its pass, same CB): white/uniform flat {_preWhiteFlat} normal {_preWhiteNormal} | picture flat {_prePicFlat} normal {_prePicNormal} | unprobed flat {_preUnprobedFlat} normal {_preUnprobedNormal} | probes {_preProbes} | distinct-of-25 flat {(_preFlatMeanN > 0 ? (double)_preDistinctFlatSum / _preFlatMeanN : 0):F2} normal {(_preNormalMeanN > 0 ? (double)_preDistinctNormalSum / _preNormalMeanN : 0):F2} | mean linear luma flat {(_preFlatMeanN > 0 ? _preFlatMeanSum / _preFlatMeanN : 0):F3} normal {(_preNormalMeanN > 0 ? _preNormalMeanSum / _preNormalMeanN : 0):F3} | sampler path: white flat {_preSampWhiteFlat} normal {_preSampWhiteNormal} picture flat {_preSampPicFlat} normal {_preSampPicNormal}");
+                {
+                    StringBuilder wsb = new();
+                    foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_inputWriterStats, x => x.Value.Flat + x.Value.Normal), 10))
+                    {
+                        long tot = kv.Value.Flat + kv.Value.Normal;
+                        wsb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+                    }
+                    StringBuilder dsb = new();
+                    foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_inputDescStats, x => x.Value.Flat + x.Value.Normal), 6))
+                    {
+                        dsb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal}");
+                    }
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"  COMPOSITE INPUT writers this frame (program label prefixes, in draw order) by outcome:{wsb}\n  composite input storage:{dsb}\n  stage[{_stageLabel}]: arms {_stageArms} samples {_stageSamples} written white {_stageDumpsWritten} normal {_stageDumpsNormal} lookup misses {_stageMisses}{ConstStatsText()}{StageDrawStatsText()}\n  stage cb GPU-vs-CPU: equal flat {_cbEqFlat} normal {_cbEqNormal} | DIFFER flat {_cbDiffFlat} normal {_cbDiffNormal} | unknown flat {_cbUnknownFlat} normal {_cbUnknownNormal}{CbStatsText()}");
+                }
             sb.Append($"\n  COMPOSITE OUTPUT right after its draw (frame N) vs outcome (N+1): [white@draw] flat {_outWhiteAtDrawFlat} normal {_outWhiteAtDrawNormal} | [picture@draw] flat {_outPicAtDrawFlat} normal {_outPicAtDrawNormal}");
             sb.Append($"\n  TOPOLOGY/frame: replaceView flat {(_topoFlatN > 0 ? _rvFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _rvNormal / _topoNormalN : 0):F3} | newTexture flat {(_topoFlatN > 0 ? _ntFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _ntNormal / _topoNormalN : 0):F3}");
             sb.Append($"\n  RT-vs-SRC at present: [RT picture, SRC white] flat {_rtPicSrcWhiteFlat} normal {_rtPicSrcWhiteNormal} | [both picture] flat {_bothPicFlat} normal {_bothPicNormal} | [both white] flat {_bothWhiteFlat} normal {_bothWhiteNormal} | [RT white, SRC pic] flat {_rtWhiteSrcPicFlat} normal {_rtWhiteSrcPicNormal}");

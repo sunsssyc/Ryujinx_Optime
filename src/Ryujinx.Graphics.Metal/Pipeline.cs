@@ -115,6 +115,15 @@ namespace Ryujinx.Graphics.Metal
         // and Vulkan sits at zero under the same conditions, so something else still
         // differs. RYUJINX_METAL_RAW_SPLIT=0 opts out; the frame cost was measured only
         // at the reproducing save, where there is headroom inside the 30fps cap.
+        private static readonly bool _dumpAllShaders = Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_SHADERS") == "1";
+        private static readonly bool _drawTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_DRAW_TRACE") == "1";
+        private static readonly bool _passTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_PASS_TRACE") == "1";
+        private static readonly string _stageLabel = Environment.GetEnvironmentVariable("RYUJINX_METAL_STAGE_LABEL") ?? "";
+        // The program whose input is read by the compute engine right before its pass, at the
+        // read-after-write split point (UploadCorrelator.PreCompositeProbe). Default: the
+        // game's 12-tap upscaler, whose output is the first white surface of the frame.
+        private static readonly string _preProbeLabel = Environment.GetEnvironmentVariable("RYUJINX_METAL_PREPROBE_LABEL") ?? "7d92cd";
+        private static long _preDraws, _preDrawsFlushedBefore, _preSplitHits, _preSplitNull, _preDrawsSplitPath;
         private static bool _rawSplit =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT") != "0";
 
@@ -273,6 +282,15 @@ namespace Ryujinx.Graphics.Metal
             if (!UploadCorrelator.Enabled)
             {
                 return;
+            }
+
+            if (_passTraceOn)
+            {
+                UploadCorrelator.NotePassDrawLabel(_encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string dl && dl.Length > 6 ? dl[..6] : "?");
+            }
+            if (_dumpAllShaders)
+            {
+                _encoderStateManager.RenderProgram?.DumpSources(FrameCapture.ShaderDumpDir);
             }
 
             // All colour attachments, not only slot 0: the game's final render target can
@@ -561,6 +579,17 @@ namespace Ryujinx.Graphics.Metal
             // of the few things left that has not been.
             string blitLabel = _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel;
 
+            // Per-draw trace: split the pass after every draw whose colour target is the
+            // 1600x896 RG11B10 combine buffer, so the pass-luma trace records each draw's
+            // cumulative output and the exact draw that lifts it from ~0.6 to ~147 is named.
+            // RYUJINX_METAL_DRAW_TRACE=1 (with RYUJINX_METAL_PASS_TRACE=1).
+            bool forceDrawTrace = forDraw && _drawTraceOn &&
+                Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
+                DrawCount != _drawCountAtPassStart &&
+                _encoderStateManager.RenderTargets[0] is Texture dtTex &&
+                dtTex.Width == 1600 && dtTex.Height == 896 &&
+                dtTex.MtlFormat == SharpMetal.Metal.MTLPixelFormat.RG11B10Float;
+
             bool forceAllSplit = forDraw && _splitAll &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
                 DrawCount != _drawCountAtPassStart;
@@ -571,7 +600,7 @@ namespace Ryujinx.Graphics.Metal
                 blitLabel != null &&
                 blitLabel.StartsWith("480117", StringComparison.Ordinal);
 
-            if (forceAllSplit || forceBlitSplit || (forDraw && _rawSplit &&
+            if (forceDrawTrace || forceAllSplit || forceBlitSplit || (forDraw && _rawSplit &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
                 DrawCount != _drawCountAtPassStart &&
                 _encoderStateManager.SamplesEarlierWrite()))
@@ -590,9 +619,27 @@ namespace Ryujinx.Graphics.Metal
                     _fenceWaitPending = true;
                 }
 
+                // Before ending the pass, remember which earlier-written texture this draw
+                // samples; the split then leaves the command buffer between the writer's
+                // pass and the composite's, and the pre-composite probe reads it right there.
+                bool isPreLabel = UploadCorrelator.Enabled && blitLabel != null && _preProbeLabel.Length != 0 &&
+                    blitLabel.StartsWith(_preProbeLabel, StringComparison.Ordinal);
+                Texture preInput = isPreLabel
+                    ? (_encoderStateManager.EarlierWrittenSampledTexture() ?? _encoderStateManager.FirstBoundLargeTexture())
+                    : null;
+                if (isPreLabel) { _preSplitHits++; if (preInput == null) { _preSplitNull++; } }
+
                 EndCurrentPass(PassEndReason.FragmentDependency);
                 _encoderStateManager.SignalRenderDirty();
                 _rawSplits++;
+
+                if (preInput != null)
+                {
+                    UploadCorrelator.PreCompositeProbe(Cbs, preInput);
+                    // The probe opened a compute encoder; the render encoder for the composite
+                    // is created afresh by the acquisition that follows.
+                    _encoderStateManager.SignalRenderDirty();
+                }
             }
 
             // Partial-render discriminator. AGX splits a render pass by itself when the
@@ -788,6 +835,11 @@ namespace Ryujinx.Graphics.Metal
 
             // The in-stream witness: photograph the blit's input the moment its pass ends.
             UploadCorrelator.SampleInputAfterBlit(Cbs);
+            UploadCorrelator.SampleStageAfterPass(Cbs);
+            if (_passTraceOn)
+            {
+                UploadCorrelator.TracePassEnd(Cbs, _encoderStateManager.RenderTargets[0], $"{reason} last={UploadCorrelator.LastPassLastLabel} draws={UploadCorrelator.LastPassDraws}");
+            }
 
             // Sample the watched target right after a pass on it ends. Sampling only on
             // encoder transitions left every chart entry between transitions holding the
@@ -1175,6 +1227,7 @@ namespace Ryujinx.Graphics.Metal
 
                     string passText =
                         $" skipped draws: {_skippedDraws}, by program: {_skippedByProgram}, raw splits: {_rawSplits}, fence waits: {_fenceWaits}." +
+                        $" pre-probe[{_preProbeLabel}]: draws {_preDraws}, auto-flushed-before {_preDrawsFlushedBefore}, split-block hits {_preSplitHits}, null input {_preSplitNull}, pass-start probes {_prePassProbes}, no-input {_prePassProbesNoInput}. mask-unwritten: {(PipelineState.MaskUnwrittenOutputs ? "on" : "off")}, pipelines masked {PipelineState.MaskedUnwrittenCount}." +
                         $" per frame: {passes / (ulong)SyncStatsLogFrameInterval} passes, " +
                         $"{draws / (ulong)SyncStatsLogFrameInterval} draws " +
                         $"({(passes != 0 ? (double)draws / passes : 0):F1} draws/pass).";
@@ -1567,11 +1620,61 @@ namespace Ryujinx.Graphics.Metal
 
         // Must run before any state or buffer is captured against the current
         // command buffer, since a flush swaps Cbs.
+        // The split-point probe never fired for the upscaler: its read-after-write on the
+        // scene texture is resolved by the pass boundary that the render-target change
+        // causes, not by the RAW split. So for the pre-probe program the pass is ended here
+        // explicitly (it would end a moment later anyway when the target changes; when it
+        // would not, this is one extra Load/Store split per frame) and the program's input
+        // is read by the compute engine in the gap, before its render encoder is created.
+        // Note the probe itself is a tracked read of the scene texture: if that read alone
+        // makes the flash vanish, the ordering fault is between the scene pass and this draw.
+        private static long _prePassProbes, _prePassProbesNoInput;
+        private void PreProbeAtPassStart()
+        {
+            if (_preProbeLabel.Length == 0 || !UploadCorrelator.Enabled ||
+                _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is not string pl ||
+                !pl.StartsWith(_preProbeLabel, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            // The program's own first texture binding (recorded at its previous bind), not
+            // the first stale texture in the guest's binding table: the earlier probe read a
+            // different, brighter texture (mean 0.5 vs the scene's 0.135).
+            Texture input = UploadCorrelator.LastStageInput ?? _encoderStateManager.EarlierWrittenSampledTexture() ?? _encoderStateManager.FirstBoundLargeTexture();
+            UploadCorrelator.NoteStageDrawState(_encoderStateManager.DescribeRenderTargets(input), _encoderStateManager.RenderProgram?.FragmentOutputMap ?? -2);
+            if (input == null)
+            {
+                _prePassProbesNoInput++;
+                return;
+            }
+
+            if (UploadCorrelator.PreProbedThisPeriod)
+            {
+                return;   // once per period: a label with many draws must not be split at each
+            }
+
+            if (Cbs.Encoders.CurrentEncoderType == EncoderType.Render)
+            {
+                EndCurrentPass(PassEndReason.Unspecified);
+            }
+
+            UploadCorrelator.PreCompositeProbe(Cbs, input);
+            _encoderStateManager.SignalRenderDirty();
+            _prePassProbes++;
+        }
+
         private void AutoFlushPreDraw()
         {
+            bool isPre = _preProbeLabel.Length != 0 && UploadCorrelator.Enabled &&
+                _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string pl &&
+                pl.StartsWith(_preProbeLabel, StringComparison.Ordinal);
+            if (isPre) { _preDraws++; }
+
             if (_renderer.AutoFlush.ShouldFlushDraw(DrawCount))
             {
                 _autoFlushDrawCount++;
+                if (isPre) { _preDrawsFlushedBefore++; }
                 FlushCommandsImpl();
             }
 
@@ -1797,6 +1900,15 @@ namespace Ryujinx.Graphics.Metal
 
             NoteAttachmentWriter();
 
+            if (_stageLabel.Length != 0 && UploadCorrelator.Enabled &&
+                _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string stageLbl &&
+                stageLbl.StartsWith(_stageLabel, StringComparison.Ordinal))
+            {
+                UploadCorrelator.ArmStageDump(_encoderStateManager.RenderTargets);
+            }
+
+            PreProbeAtPassStart();
+
             AutoFlushPreDraw();
 
             if (_hardSync && _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel == "3ebc3a8f6b77cc8f")
@@ -1979,6 +2091,15 @@ namespace Ryujinx.Graphics.Metal
             {
                 return;
             }
+
+            if (_stageLabel.Length != 0 && UploadCorrelator.Enabled &&
+                _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string stageLbl2 &&
+                stageLbl2.StartsWith(_stageLabel, StringComparison.Ordinal))
+            {
+                UploadCorrelator.ArmStageDump(_encoderStateManager.RenderTargets);
+            }
+
+            PreProbeAtPassStart();
 
             AutoFlushPreDraw();
 

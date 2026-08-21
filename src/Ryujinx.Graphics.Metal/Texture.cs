@@ -50,6 +50,9 @@ namespace Ryujinx.Graphics.Metal
             return current;
         }
 
+        private static readonly int _noGpuOpt =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_NO_GPU_OPT"), out int v) ? v : 0;
+
         public Texture(MTLDevice device, MetalRenderer renderer, Pipeline pipeline, TextureCreateInfo info) : base(device, renderer, pipeline, info)
         {
             MTLPixelFormat pixelFormat = HostFormat(Info.Format);
@@ -73,6 +76,24 @@ namespace Ryujinx.Graphics.Metal
                 // RYUJINX_METAL_SHARED_TEXTURES=1 restores the old default.
                 StorageMode = _sharedTextures ? MTLStorageMode.Shared : MTLStorageMode.Private,
             };
+
+            // Lossless framebuffer compression is the one thing every previous arm left on.
+            // "GPU-optimized contents" is Apple's name for the compressed layout with its
+            // side-band metadata; the presentation half goes picture -> white between the
+            // composite's store and present's read with no API-layer command in between, and
+            // a texture whose *metadata* is misread would show exactly that under both the
+            // sampler and the blit engine (both decode through it). MoltenVK leaves this on
+            // too, so a null here does not indict it - but a hit isolates the mechanism.
+            // RYUJINX_METAL_NO_GPU_OPT=1: every non-depth texture; =2: only 1080p RGBA8 sRGB.
+            if (_noGpuOpt == 1 && !info.Format.IsDepthOrStencil)
+            {
+                descriptor.AllowGPUOptimizedContents = false;
+            }
+            else if (_noGpuOpt == 2 && pixelFormat == MTLPixelFormat.RGBA8UnormsRGB && info.Width == 1920 && info.Height == 1080)
+            {
+                descriptor.AllowGPUOptimizedContents = false;
+                Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(Ryujinx.Common.Logging.LogClass.Gpu, "no-gpu-opt: 1080p sRGB target created uncompressed");
+            }
 
             if (info.Target == Target.Texture3D)
             {

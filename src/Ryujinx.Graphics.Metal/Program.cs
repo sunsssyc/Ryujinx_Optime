@@ -514,6 +514,50 @@ namespace Ryujinx.Graphics.Metal
             return result;
         }
 
+        private static readonly bool _sanitizeOutput = Environment.GetEnvironmentVariable("RYUJINX_METAL_SANITIZE_OUTPUT") == "1";
+
+        // Replace every non-finite (Inf/NaN) fragment colour output with 0 just before the
+        // shader returns. The pass trace localised the white flash to Inf/NaN entering the
+        // 800x448/256x256 RGBA16Float post-processing buffers (unguarded 1.0/x, rsqrt, log2,
+        // exp2 in the bloom/DOF/exposure shaders) and being spread by the separable-blur
+        // ping-pong and re-combined into the scene by 1997e8, where the tonemap saturates it
+        // to white. The check uses the IEEE bit pattern (exponent all ones) rather than
+        // isnan/isinf, which Metal's fast math is permitted to fold to false.
+        // RYUJINX_METAL_SANITIZE_OUTPUT=1.
+        private static string SanitizeColorOutputs(string code)
+        {
+            int ret = code.IndexOf("return out;", StringComparison.Ordinal);
+            if (ret < 0)
+            {
+                return code;
+            }
+
+            // Which colour attachments does this shader write?
+            System.Collections.Generic.SortedSet<int> outs = new();
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(code, @"out\.color(\d+)"))
+            {
+                outs.Add(int.Parse(m.Groups[1].Value));
+            }
+
+            if (outs.Count == 0)
+            {
+                return code;
+            }
+
+            System.Text.StringBuilder sb = new();
+            sb.Append("{ ");
+            foreach (int i in outs)
+            {
+                // exponent == 0xFF (Inf or NaN) <=> (bits & 0x7f800000) == 0x7f800000.
+                sb.Append($"out.color{i} = select(out.color{i}, float4(0.0f), (as_type<uint4>(out.color{i}) & uint4(0x7f800000u)) == uint4(0x7f800000u)); ");
+            }
+            sb.Append("}\n    return out;");
+
+            // Only the first return; the translator emits a single real one followed by a
+            // dead duplicate, so replacing the first is enough and avoids double insertion.
+            return code.Substring(0, ret) + sb.ToString() + code.Substring(ret + "return out;".Length);
+        }
+
         private static string GuardReciprocal(string code)
         {
             // Matched independently rather than as adjacent lines: the emitted MSL carries a
@@ -750,6 +794,11 @@ namespace Ryujinx.Graphics.Metal
             if (_guardRcp)
             {
                 code = GuardReciprocal(code);
+            }
+
+            if (_sanitizeOutput)
+            {
+                code = SanitizeColorOutputs(code);
             }
 
             if (_blitPattern)
@@ -1025,14 +1074,25 @@ namespace Ryujinx.Graphics.Metal
         // Argument buffer sizes for Fragment stage
         public int[] FragArgumentBufferSizes { get; }
 
+        /// <summary>
+        /// Per-component mask of the fragment outputs this program actually writes (4 bits
+        /// per colour attachment, bit = index*4 + component), or -1 when unknown. The OpenGL
+        /// backend ANDs the guest's colour masks with this; Metal leaves an attachment the
+        /// fragment function does not write with UNDEFINED contents, so a stale render
+        /// target still bound by the guest is overwritten with garbage unless masked.
+        /// </summary>
+        public int FragmentOutputMap { get; }
+
         public Program(
             MetalRenderer renderer,
             MTLDevice device,
             ShaderSource[] shaders,
             ResourceLayout resourceLayout,
-            ComputeSize computeLocalSize = default)
+            ComputeSize computeLocalSize = default,
+            int fragmentOutputMap = -1)
         {
             _renderer = renderer;
+            FragmentOutputMap = fragmentOutputMap;
             renderer.Programs.Add(this);
 
             ComputeLocalSize = computeLocalSize;

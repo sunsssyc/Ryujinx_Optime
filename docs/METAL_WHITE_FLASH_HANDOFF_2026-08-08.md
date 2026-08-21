@@ -5786,3 +5786,239 @@ next things to hook in mtlspy: `computeCommandEncoder`'s `setTexture:atIndex:` a
 `useResource:` on the compute class, and - for the argument-buffer path - the encoder's
 `setFragmentBuffer:offset:atIndex:` at index 19 (the Textures table) so its GPU-side ids can
 be dumped and compared against the two halves' `gpuResourceID`.
+
+## 2026-08-18: compute encoders and argument-buffer tables - the last two API routes, both clean
+
+`tools/mtlspy.m` now hooks the compute encoder class (`computeCommandEncoder`,
+`computeCommandEncoderWithDescriptor:` - the one Ryujinx actually calls -
+`computeCommandEncoderWithDispatchType:`; on it `setTexture:atIndex:`, `useResource:usage:`,
+`useResources:count:usage:`, `setBuffer:offset:atIndex:`), and scans every argument table
+bound at buffer index 19 (Textures) or 20 (Images) on render (vertex+fragment) and compute
+encoders. Each 8-byte word is compared against the two halves' `gpuResourceID` AND against
+an id->root map filled at every texture/view creation, so a view of a half named through a
+table is caught too. Two gameplay runs (2,805 and 2,827 present frames), resolved by
+`tools/argbuf_hits.py`:
+
+    word[0] referencers per frame       : exactly 1 on every frame  (= present's texture table)
+    frames with a second referencer     : 0
+    word[i>0] hits                      : 1,255 / 1,324 - all but 3 / 1 are ring spill-over into
+                                          a known table start (the ring is one staging buffer,
+                                          a scan runs past its own table into the next)
+    compute setTexture on either half   : 3 / 2 in the whole run - the correlator's own
+                                          SamplerPathProbe (region D) reading it
+    compute useResource / images table  : none
+
+The residual "unexplained" deep hits are single events (one at frame 482 during boot; two at
+the same ring address in one frame) with ids in the sampler-id numeric range - the Textures
+table interleaves texture and sampler ids and the two id spaces overlap numerically, so a
+deep-word match is not even a texture reference until proven so. Nothing repeats, nothing
+sits between the composite's store and present's read on the storage the watch follows.
+
+**So every API-level route by which the storage could be written or read is now watched -
+attachment (incl. views), blit src/dst, direct sampler bind, useResource(s), purgeable state,
+compute setTexture/useResource, argument-table ids on all three stages - and between the
+composite's `store=Store` at the end of frame N and present's read at the start of frame N+1
+nothing names it, on any frame, white or not.**
+
+Full-length confirmation (gated, luma 138, 13,199 frames, 13,345 present frames):
+exactly one word[0] referencer per frame on all 13,345 (present), no second referencer ever,
+zero hits on the Images table (index 20), compute `setTexture` on either half only the
+correlator's own probe. The deep-word hits are dominated by ids that also belong to samplers
+(the Textures table interleaves texture and sampler ids and the two id spaces overlap; one
+sampler id, 0x24, alone matched at word[1] of thousands of tables) - inconclusive by
+construction and irrelevant to writes.
+
+**Instrument incident, and it rewrites yesterday's spy runs.** Seven runs today "died on
+their own" ~2 minutes after launch (exit 137 = SIGKILL, no crash report, RSS flat). Not
+the tool harness (a 600 s timeout changed nothing), not the sandbox (disabled: same), not
+`RYUJINX_METAL_ARGBUF_OWN=1` (that one is a different, real crash: with the correlator it
+FailFasts at ~20 s with an AccessViolation in `UploadCorrelator.Classify` - do not combine).
+The cause was `tools/mtlspy.m` itself, built with ARC: every hook that returns an object
+(`id t = origIMP(...); return t;`) retained the +1 result once more and autoreleased it into
+a pool that does not exist on Ryujinx's .NET threads, so every texture, buffer, command
+buffer and encoder created through a hook leaked one retain. The UI layer alone creates two
+2560x1520 depth textures per frame; nothing was ever freed; the process was killed after
+~5,200-5,650 frames. **Yesterday's watch runs stopped at 5,143 and 5,482 frames for the same
+reason** - they were never gated, so nobody noticed. Built with `-fno-objc-arc` the same
+arm ran 13,199 frames with wired memory flat. `tools/run_arm.sh` now runs an arm end to end
+and `drive_in.sh` writes the game's exit status to `<log>.exit`, so a kill can never again
+be read as "died on its own".
+
+Note for the flat rate: under this probe (a table scan on every buffer bind) the gated rate
+was 30.4%, not the usual 22-23%; the spy is for identity questions, not for rate arms.
+
+### Lossless compression is not it either (2026-08-18 evening)
+
+The one texture property every earlier arm left at its default: `allowGPUOptimizedContents`
+(Apple's compressed render-target layout with side-band metadata - the thing that could make
+both the sampler and the blit engine misread a surface nothing wrote). `RYUJINX_METAL_NO_GPU_OPT`
+=2 turns it off for the two 1080p RGBA8 sRGB halves only, =1 for every non-depth texture
+(build v254). Gated arms, 13,199 frames each:
+
+    halves uncompressed (=2)        luma 140   flat 2,472 = 18.73%   shape min 246 max 254 sd 2.2
+    all non-depth uncompressed (=1) luma 141   flat 2,454 = 18.59%   shape min 247 max 254 sd 2.1
+
+Both a few points under the usual 21-23% and identical to each other, and the white's shape is
+unchanged - the same structured near-white (never a 255/255/0 fill). Not the mechanism; at
+best a small perturbation of the rate like the fence-volume and texel-fetch arms before it.
+(MoltenVK leaves this on as well, so it was never a backend difference.)
+
+The white's *shape* is the next observable: 25 points say min 246 / max 254 / sd 2.2 on every
+white frame of every arm - structured, not a fill. Build v255 adds `RYUJINX_METAL_DUMP_WHITE=1`:
+whole-surface blits of the presented half at present (A) and of the freshly painted half after
+the composite (F), per ring slot with their own fences; the first four white frames (and one
+normal one) are written to `/tmp/white_*.rgba` / `/tmp/normal_*.rgba` with the SAME storage's F
+dump from the previous frame, keyed by pointer. `tools/white_dump.py` turns them into PNGs and
+prints tile/edge/gradient statistics and the A-vs-F correlation - a memory fill, a tile-metadata
+fault, an over-exposed picture and an upsampled small texture all look different there.
+
+## RETRACTION (2026-08-18 20:00): the composite PAINTS the white - the DECIDER's instrument was broken
+
+The full-surface dumps decided it. On every dumped white frame the freshly painted half (F,
+blitted right after the composite's pass, same encoder) is **bit-identical** to the white half
+present shows one frame later (corr 1.0000, same 5 distinct luma values, 72% at 253, corners
+at 229-230, HUD intact on top). Nothing was ever overwritten in place. The 25-point F sample
+that reported "picture" on 100% of white frames since a4225946 had its destination offset
+wrong - all 25 copies landed on texel 0 of the region, texels 1..24 stayed zero, and the
+saturation classifier could not, structurally, ever say "white" for it. Fixed
+(`(idx * Pixels + i) * BytesPerPixel`), re-run gated (luma 140, 12,599 frames):
+
+    SAME-STORAGE painted->presented:  [WHITE->WHITE] flat 2,484   [pic->WHITE] flat 12
+                                      [pic->pic] normal 10,091    [white->pic] normal 12
+
+So retracted, in full: "THE DECIDER", "SAME-STORAGE ... the real decider", "in-place
+corruption of a Private texture with no API-layer writer", and everything that followed from
+them (the view-aware watch, compute/argument-table hooks, the compression arm - all correct
+measurements of a question that did not exist). Also retracted: "the compute paths at pass end
+always read a picture" - that used a distinct-count criterion (uniform = <=3 distinct of 25),
+and the composite's input on white frames is a *dithered* white field with 4-9 distinct values
+in any 5x5 patch, which that criterion calls a picture. Distinct-count is not a whiteness test.
+
+**What is now established, with correctly timed, saturation-based instruments:**
+
+1. The presented half S is white; the composite painted it white (F, fixed; dumps).
+2. The composite's INPUT - a 1920x1080 RG11B10Float texture (`fmt92`), not the 800x448
+   scene - is already white when the composite samples it, and still white right after its
+   pass: linear luma mean 0.99 (one frame 0.886), sd 0.005, 31-34 distinct 32-bit values in the
+   whole surface (`/tmp/dumps_v256/white_I_*.raw`, decoded by the RG11B10 snippet in the
+   session log). The composite is faithful: white in, white out.
+3. Therefore the white is made UPSTREAM of the composite, in whatever writes that RG11B10
+   1080p texture during the frame (or further up). The earliest input-side split in this
+   ledger - "the game's final scene texture is flat on white frames (distinct 4.67 vs 21.87)",
+   2026-08-16 - was pointing the right way; the "correction" that overrode it used the
+   present-time B sample, which photographs the input one frame late (already re-rendered).
+
+Instrument rules re-learned, the hard way: (a) a classifier that can only ever return one
+answer must be caught by its own numbers - "0 white at draw over 11k frames" was that number,
+twice; (b) distinct-count says "not constant", never "not white"; (c) when two instruments
+disagree, dump the whole surface and look at it before building on either.
+
+Next: the writer census of the composite's input by outcome (build v258, `COMPOSITE INPUT
+writers` line), then full-surface dumps of that writer's own inputs on white frames, stage by
+stage upstream until the first white surface and its reader are found.
+
+## LOCALIZED TO THE HDR/BLOOM POST-CHAIN (2026-08-21) — the origin, upstream of every prior probe
+
+The retraction above (composite paints the white; input already white) was correct but stopped
+one stage short. A generic per-pass output-luma trace (`RYUJINX_METAL_PASS_TRACE=1`, v274:
+sample rt0 of every HDR pass end, decode RG11B10/── luma, ring of the last 128 passes)
+walked the whole frame on white vs normal frames and pinned the origin:
+
+- The **scene forward pass** (800×448 RG11B10, ~2040 draws) renders **normal** on white frames
+  (luma 0.344), and the 1600×896 post targets stay normal (0.27–0.68) through mid-frame.
+- **Late in the frame the 1600×896 scene buffer jumps to luma ~147** at the bloom-combine pass
+  (the 14-draw pass whose last program is `1997e8`, an additive fullscreen combine). The tonemap
+  (`135f6c`) then compresses 147 → 0.99 and the upscaler/composite present it as white.
+- Full-surface dumps of that 1600×896 buffer on white frames: uniform **35–170**, smooth
+  corner-to-corner gradient, only ~900–5000 distinct values over 1.4M px = a **low-res buffer
+  (the bloom pyramid) upscaled**, not geometry. Normal frame: ~0.01–0.2.
+
+So the white is a genuine, **finite** HDR over-brightness of ~100–600× injected by the
+bloom/DOF post chain (the 800×448/256×256 RGBA16Float ping-pong blur buffers, programs
+`dd3b94`/`ac721f`/`fafbc1`/`78eddc`, all full of unguarded `1.0/x`, `rsqrt`, `log2`, `exp2`),
+re-combined into the scene by `1997e8`. White frames arrive in **clusters ~every 5 frames**
+(1281/1284/1287/1289; 848/854/859/861), which points at a temporal/feedback buffer that
+oscillates rather than a per-frame race.
+
+Ruled out here, each measured on this localization (gated, ~12k frames):
+- **NaN/Inf is NOT the carrier.** `RYUJINX_METAL_SANITIZE_OUTPUT=1` (v275) replaces every
+  non-finite fragment colour output with 0 using the IEEE bit test `(bits & 0x7f800000) ==
+  0x7f800000` (fast-math cannot fold it, unlike isnan/isinf): **18.4%, unchanged**. The
+  "1e9" the pass trace printed for the RGBA16Float buffers was a decode artifact
+  (`SamplerPathProbe.DecodeRaw` is a 32-bit-format decoder; RGBA16Float is 64-bit/px), not a
+  real Inf — the RG11B10 scene value 147 decodes correctly and is finite.
+- **Fast math is NOT it** (re-confirmed with the current harness, not the old wrong-shader
+  era): `RYUJINX_METAL_FAST_MATH=0` → **23.1%, unchanged**.
+- **Not the combine's constants:** `1997e8`'s `fp_c3[0..1]` are bit-identical on white and
+  normal frames (`fp_c3[0].xyz ≈ 0.10 / 0.088 / 0.070`), so `1997e8` itself (output capped at
+  `fp_c3[0]≈0.1`) is not what writes the 147 — one of the other 13 draws in its pass does.
+- **Not masking unwritten outputs, not the argument-buffer/compute routes, not the composite,
+  upscaler, or tonemap** (all faithful; they pass the 147 through unchanged).
+
+The two live hypotheses, and the clean way to split them:
+1. **Arithmetic divergence** — a bloom/DOF op computes ~147 on Metal that Vulkan keeps at ~0.6
+   (same game state, same constants). 
+2. **Genuine bright game event** — the HDR scene really is ~147 on those frames and Metal's
+   tonemap fails to compress it while Vulkan's succeeds.
+
+Next: dump the SAME 1600×896 scene buffer (before and after the bloom-combine) and the 16F
+bloom buffers on **Vulkan** at the same repro save — the cross-backend comparison the whole
+investigation wanted, now aimed at the buffer that actually carries the white. If Vulkan's
+scene is ~0.6 there, the fault is in the Metal bloom/DOF arithmetic (hypothesis 1) and the
+next step is per-draw isolation inside `1997e8`'s 14-draw pass; if Vulkan's is also ~147, it
+is the tonemap (hypothesis 2). Tools: `tools/run_arm.sh`, `RYUJINX_METAL_PASS_TRACE=1`,
+`RYUJINX_METAL_STAGE_LABEL`/`STAGE_RT`, `tools/stage_dump.py` (fix its RGBA16F stride first).
+
+## ROOT CAUSE (2026-08-22): the 1×1 auto-exposure texture saturates to 1.0 on white frames
+
+The per-draw trace (`RYUJINX_METAL_DRAW_TRACE=1`, v276: split the pass after every draw whose
+rt0 is the 1600×896 RG11B10 buffer) put the jump on one program, and its stage dump named the
+carrier:
+
+    p147  luma 0.629   1600x896  (post chain, normal)
+    p164  luma 5.316   1600x896  last=2b36a7   <<< the jump
+    2b36a7 = out.rgb = sample(tex).rgb * fp_c3[0].rgb        (a plain modulate)
+
+`2b36a7`'s bound inputs, dumped at its own bind: **a 1×1 RGBA32Float** and a 64×64 LUT. The
+1×1 is the game's auto-exposure / eye-adaptation value, and it is the whole story:
+
+    normal frame f216    exposure RGBA = [0.130, 0.000, 0, 1]     scene out luma   0.006
+    WHITE  frame f1339   exposure RGBA = [1.000, 1.015, 0, 1]     scene out luma 128.303
+    WHITE  frame f1348   exposure RGBA = [1.000, 1.015, 0, 1]     scene out luma  36.036
+    WHITE  frame f1351   exposure RGBA = [1.000, 1.015, 0, 1]     scene out luma  80.358
+    WHITE  frame f1354   exposure RGBA = [1.000, 1.015, 0, 1]     scene out luma  32.581
+
+Bit-identical on every white frame - a saturated ceiling value, not noise. Everything
+downstream is faithful and was correctly measured as such all along: the modulate, the bloom
+combine (`1997e8`), the tonemap (`135f6c`), the composite (`480117`), the upscaler
+(`0f5a37`), and present each pass the over-bright value through unchanged.
+
+Mechanism checks on the exposure texture itself (gated, ~10.8k frames):
+- **It is not recreated or swapped**: `ptrSAME serialSAME` on **2,485 / 2,486** white frames.
+  The same MTLTexture object holds a wrong value - so "history lost to a new allocation" is
+  out, and so is the whole texture-cache/aliasing family.
+- Its multiplier constants are bit-identical on white and normal frames (`2b36a7`'s
+  `fp_c3[0].xyz ≈ 0.03`; `1997e8`'s ≈ 0.10/0.088/0.070) - the difference enters as *data*,
+  through the exposure texture, never through a constant buffer. This is why every
+  constant-buffer, binding-identity and descriptor probe in this ledger came back clean.
+- It is finite: not Inf/NaN (`RYUJINX_METAL_SANITIZE_OUTPUT=1` → 18.4%, unchanged) and not
+  fast-math (`RYUJINX_METAL_FAST_MATH=0` → 23.1%, unchanged).
+- White frames arrive in clusters ~every 5 frames (1339/1348/1351/1354) - the signature of a
+  temporal feedback loop oscillating, which is exactly what eye adaptation is.
+
+Consistent with this, at the START of a white frame the luminance-reduction pyramid is already
+hot (16×16 luma 3.6-7.0, 64×64/32×32 ≈ 1.0) while the scene forward pass that frame renders
+normally (800×448 luma 0.344). So the loop is: bright reduction pyramid → exposure pins to
+1.0 → `2b36a7` scales the scene by ~175× → bloom combine → tonemap saturates → white frame;
+and full serialisation never fixed it because it is not a sync hazard but a wrong *value*
+circulating in the feedback loop.
+
+**Next step, and it is now a small target.** The exposure is written by `889419`
+(`out.rgb = sample(tex).rgb * fp_c3[6].rgb`, into an 8×1 RGBA32Float, then reduced to 1×1;
+`ff14da` clears the pair) fed by the luminance-reduction chain (`341168`, `8458d0`, `616f9c`,
+`889419` over 642×360 → 324×180 → 162×90 → 81×45 → 40×22 → 8×1). Dump the 1×1 exposure value
+and that reduction chain on **Vulkan** at the same save: if Vulkan's exposure stays ≈0.13
+while Metal's periodically pins to 1.0, the divergence is inside those six small reduction
+shaders - a handful of `1.0/x`, `log2`, `exp2` ops on tiny targets - and that is where the fix
+is. (Note `889419`'s draw does not go through `Pipeline.Draw`/`DrawIndexed`; the stage arm
+missed it, so hook the indirect draw paths too when instrumenting it.)

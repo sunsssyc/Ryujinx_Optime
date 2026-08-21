@@ -166,6 +166,29 @@ namespace Ryujinx.Graphics.Metal
                     MTLRenderPipelineColorAttachmentDescriptor pipelineAttachment = renderPipelineDescriptor.ColorAttachments.Object((ulong)i);
 
                     BuildColorAttachment(pipelineAttachment, blendState);
+
+                    // An attachment the fragment function does not write gets UNDEFINED
+                    // contents from Metal (the OpenGL backend masks these with the program's
+                    // FragmentOutputMap; MoltenVK disables the write mask for them). Without
+                    // this, a render target the guest left bound - e.g. the scene texture
+                    // during the game's upscaler draw - is overwritten with garbage.
+                    // RYUJINX_METAL_MASK_UNWRITTEN=0 opts out.
+                    if (MaskUnwrittenOutputs && program.FragmentOutputMap != -1)
+                    {
+                        uint bits = ((uint)program.FragmentOutputMap >> (i * 4)) & 0xFu;
+                        MTLColorWriteMask allowed = MTLColorWriteMask.None;
+                        allowed |= (bits & 1u) != 0 ? MTLColorWriteMask.Red : 0;
+                        allowed |= (bits & 2u) != 0 ? MTLColorWriteMask.Green : 0;
+                        allowed |= (bits & 4u) != 0 ? MTLColorWriteMask.Blue : 0;
+                        allowed |= (bits & 8u) != 0 ? MTLColorWriteMask.Alpha : 0;
+                        MTLColorWriteMask before = pipelineAttachment.WriteMask;
+                        MTLColorWriteMask after = before & allowed;
+                        if (after != before)
+                        {
+                            pipelineAttachment.WriteMask = after;
+                            MaskedUnwrittenCount++;
+                        }
+                    }
                 }
             }
 
@@ -216,6 +239,9 @@ namespace Ryujinx.Graphics.Metal
 
             return renderPipelineDescriptor;
         }
+
+        public static readonly bool MaskUnwrittenOutputs = Environment.GetEnvironmentVariable("RYUJINX_METAL_MASK_UNWRITTEN") != "0";
+        public static long MaskedUnwrittenCount;
 
         public MTLRenderPipelineState CreateRenderPipeline(MTLDevice device, Program program)
         {

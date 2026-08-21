@@ -6,6 +6,7 @@ using Ryujinx.Graphics.Metal.SharpMetalExtensions;
 using Ryujinx.Graphics.Shader;
 using SharpMetal.Metal;
 using System;
+using System.Text;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -2139,6 +2140,7 @@ namespace Ryujinx.Graphics.Metal
         /// The program whose sampled texture the correlator photographs. Defaults to the
         /// pass-through blit that writes the presented surface.
         /// </summary>
+        private static readonly string _stageLabel = Environment.GetEnvironmentVariable("RYUJINX_METAL_STAGE_LABEL") ?? "";
         private static readonly string _watchLabel =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_LABEL") ?? "480117";
 
@@ -2264,6 +2266,57 @@ namespace Ryujinx.Graphics.Metal
         public readonly void ClearWrittenThisCb()
         {
             _writtenThisCb.Clear();
+        }
+
+        /// <summary>
+        /// The bound texture this draw samples that was written earlier in this command
+        /// buffer - the composite's input at the read-after-write split point. Null if none.
+        /// </summary>
+        public readonly Texture EarlierWrittenSampledTexture()
+        {
+            if (_writtenThisCb.Count == 0)
+            {
+                return null;
+            }
+
+            foreach (TextureRef reference in _currentState.TextureRefs)
+            {
+                if (reference.Storage is Texture sampled && _writtenThisCb.Contains(sampled.CanonicalPtr))
+                {
+                    return sampled;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>All colour attachments of the next pass with their write masks, marking
+        /// the one that is the given input texture's storage, plus the clear-load flag.</summary>
+        public readonly string DescribeRenderTargets(Texture input)
+        {
+            StringBuilder sb = new();
+            for (int i = 0; i < _currentState.RenderTargets.Length; i++)
+            {
+                if (_currentState.RenderTargets[i] is not Texture t) { continue; }
+                MTLColorWriteMask wm = _currentState.Pipeline.Internal.ColorBlendState[i].WriteMask;
+                sb.Append($"rt{i}:{t.Width}x{t.Height}:{t.MtlFormat}:wm{(int)wm:X}{(input != null && t.CanonicalPtr == input.CanonicalPtr ? "=IN" : "")} ");
+            }
+            if (_currentState.DepthStencil is Texture ds) { sb.Append($"ds:{ds.Width}x{ds.Height} "); }
+            sb.Append(_currentState.ClearLoadAction ? "clearLoad" : "load");
+            return sb.ToString();
+        }
+
+        public readonly Texture FirstBoundLargeTexture()
+        {
+            foreach (TextureRef reference in _currentState.TextureRefs)
+            {
+                if (reference.Storage is Texture t && t.Width >= 256 && t.Height >= 128)
+                {
+                    return t;
+                }
+            }
+
+            return null;
         }
 
         public readonly bool SamplesEarlierWrite()
@@ -2479,6 +2532,28 @@ namespace Ryujinx.Graphics.Metal
                             ref BufferRef buffer = ref _currentState.UniformBufferRefs[index];
                             (ulong gpuAddress, IntPtr nativePtr) = AddressForBuffer(ref buffer);
 
+                            // The stage program's constant buffers, resolved exactly as the
+                            // draw binds them (mirror included), for the CPU-vs-GPU snapshot.
+                            if (UploadCorrelator.Enabled && _stageLabel.Length != 0 && buffer.Buffer != null &&
+                                program.DebugLabel != null && program.DebugLabel.StartsWith(_stageLabel, StringComparison.Ordinal))
+                            {
+                                int sOff = buffer.Range?.Offset ?? 0;
+                                int sSize = buffer.Range?.Size ?? 0;
+                                MTLBuffer sb = buffer.Range.HasValue && !buffer.Range.Value.Write
+                                    ? buffer.Buffer.GetMirrorable(_pipeline.Cbs, ref sOff, sSize, out _).Value
+                                    : buffer.Buffer.Get(_pipeline.Cbs, sOff, sSize, buffer.Range?.Write ?? false).Value;
+                                UploadCorrelator.NoteStageUniform(index, sb, sOff, sSize);
+                            }
+
+                            // Dedicated fp_c3[0..1] probe for RYUJINX_METAL_CONST_LABEL.
+                            if (UploadCorrelator.Enabled && buffer.Buffer != null && index <= 4 &&
+                                UploadCorrelator.ConstLabel.Length != 0 && program.DebugLabel != null &&
+                                program.DebugLabel.StartsWith(UploadCorrelator.ConstLabel, StringComparison.Ordinal))
+                            {
+                                MTLBuffer c3 = buffer.Buffer.GetUnsafe().Value;
+                                UploadCorrelator.NoteProgramConst(index, c3.Contents, (int)(buffer.Range?.Offset ?? 0));
+                            }
+
                             // Contents, not identity. The composite's weight sum can be
                             // driven to zero by its constants alone, and identity is what
                             // every previous binding check compared.
@@ -2626,6 +2701,13 @@ namespace Ryujinx.Graphics.Metal
                                     UploadCorrelator.NoteCompositeOutput(watchCandidate);
                                 }
 
+                                if (UploadCorrelator.Enabled && hasTexture && _stageLabel.Length != 0 &&
+                                    texture.Storage is Texture stageInput && program.DebugLabel != null &&
+                                    program.DebugLabel.StartsWith(_stageLabel, StringComparison.Ordinal))
+                                {
+                                    UploadCorrelator.NoteStageInput(stageInput);
+                                }
+
                                 if (UploadCorrelator.Enabled && hasTexture &&
                                     texture.Storage is Texture sceneCandidate &&
                                     Texture.IsSceneClass(sceneCandidate.Info))
@@ -2643,6 +2725,7 @@ namespace Ryujinx.Graphics.Metal
                                         program.DebugLabel.StartsWith(_watchLabel, StringComparison.Ordinal))
                                     {
                                         UploadCorrelator.NoteCompositeOutput(sceneCandidate);
+                                        UploadCorrelator.NoteCompositeInputWriters(sceneCandidate);
 
                                         // The blit's own command buffer and its input - the
                                         // other half of the writer/blit pair.
