@@ -1991,6 +1991,8 @@ namespace Ryujinx.Graphics.Metal
                 {
                     bindings.VertexBuffers.Add(new BufferResource(mtlBuffer, (ulong)offset, (ulong)i));
 
+                    UploadCorrelator.NoteStageVertexBuffer(i, mtlBuffer, offset, (int)bufferStates[i].Stride);
+
                     // The UVs of the pass-through blit that writes the presented surface
                     // come from a vertex attribute, and on a white frame they are constant
                     // across the primitive. This photographs the buffer that attribute is
@@ -2288,6 +2290,13 @@ namespace Ryujinx.Graphics.Metal
             }
 
             return null;
+        }
+
+        /// <summary>The blend state of one colour attachment, for the draw census.</summary>
+        public readonly string DescribeBlend(int index)
+        {
+            ColorBlendStateUid b = _currentState.Pipeline.Internal.ColorBlendState[index];
+            return $"blendId0=0x{b.Id0:X} rgb({(int)b.SourceRGBBlendFactor},{(int)b.DestinationRGBBlendFactor},op{(int)b.RgbBlendOperation}) a({(int)b.SourceAlphaBlendFactor},{(int)b.DestinationAlphaBlendFactor},op{(int)b.AlphaBlendOperation}) wm{(int)b.WriteMask:X}";
         }
 
         /// <summary>All colour attachments of the next pass with their write masks, marking
@@ -2705,7 +2714,7 @@ namespace Ryujinx.Graphics.Metal
                                     texture.Storage is Texture stageInput && program.DebugLabel != null &&
                                     program.DebugLabel.StartsWith(_stageLabel, StringComparison.Ordinal))
                                 {
-                                    UploadCorrelator.NoteStageInput(stageInput);
+                                    UploadCorrelator.NoteStageInputBinding(index, stageInput);
                                 }
 
                                 if (UploadCorrelator.Enabled && hasTexture &&

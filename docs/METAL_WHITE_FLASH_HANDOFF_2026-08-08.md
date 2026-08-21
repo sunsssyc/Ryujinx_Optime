@@ -6022,3 +6022,63 @@ while Metal's periodically pins to 1.0, the divergence is inside those six small
 shaders - a handful of `1.0/x`, `log2`, `exp2` ops on tiny targets - and that is where the fix
 is. (Note `889419`'s draw does not go through `Pipeline.Draw`/`DrawIndexed`; the stage arm
 missed it, so hook the indirect draw paths too when instrumenting it.)
+
+## 2026-08-22: the exposure "root cause" is RETRACTED; the carrier is the 1600x896 scene buffer
+
+**Retraction first.** "The 1x1 auto-exposure texture saturates to 1.0 on white frames" (commit
+e63dc628) is wrong. It compared a normal frame at f216 against white frames at f1339. A
+per-frame time series of that texture settles it:
+
+    f243..745   exp 0.13   all normal      f746..750  exp 0.06   normal
+    f751..      exp 1.0    <- permanent; white AND normal frames both sit here, 22% white
+
+The exposure changes once, when the camera enters a bright area, and never again; white frames
+are a 22% minority *inside* that regime. The comparison was dark-scene-normal vs bright-scene-
+white - two different scenes. Same class of error as the F-region offset bug, and it was caught
+by the instrument that was built to test it.
+
+**Structural fix, so it cannot recur:** every "normal reference" sample (stage dumps, full-surface
+dumps, pass traces) is now gated behind *at least one white sample having been taken*, so the
+reference is always drawn from the flashing period. In practice the samples now interleave
+across adjacent frames (white f1409, normal f1410, white f1411, ...).
+
+### What is established, all same-regime
+
+1. **Presented white frame N ⇔ the 1600x896 RG11B10 HDR scene buffer was 20-180x too bright
+   during period N-1.** Perfect 1:1 over hundreds of frames, and the bright frames are
+   *isolated singles* - 0.85, 0.91, **64.17**, 0.92, 0.91 - not a multi-frame ramp, so no
+   feedback loop. The multiplier is a continuum: 1.1x, 1.7x, 3x, 6.6x, 8.9x, 17x ... 126x.
+2. Within such a frame the buffer is normal (0.79 vs the normal frame's 0.76) through the early
+   post chain - the two traces are pass-for-pass identical up to that point - and goes bright at
+   the group of `2b36a7` draws.
+3. `2b36a7` is a modulated blit: `out.rgb = sample(tex).rgb * fp_c3[0].rgb`,
+   `out.a = sample.a * fp_c3[0].w * attr1.x`, drawn with **additive blending**
+   `rgb(SourceAlpha, One, Add)` - so its contribution is `src.rgb * src.a` added to the buffer,
+   and `fp_c3[0].w = 18`.
+4. At the **first** such draw of the frame (the one the trace blames), compared white-vs-normal
+   on adjacent frames: **all five bound textures are bit-identical** (md5), the constants
+   overlap (no disjoint field; rgb multipliers <= 0.09), the blend state is identical, and
+   vertex buffer 1 overlaps. The *output* differs 50-180x.
+
+Identical inputs and identical state with a 100x different result means the discriminator is
+still not in view. The remaining candidates, in order: the vertex attribute that feeds
+`attr1.x` (measured buffer 1 by assumption - the vertex *descriptor* mapping must be followed
+instead), the number of times the draw is issued into an additively-blended target, and any
+write to the buffer through an MRT slot the instrument still misses.
+
+### Instrument fixes made along the way (all previously silent)
+
+- **The pass trace only ever looked at MRT slot 0.** This buffer is attached at a non-zero slot
+  for part of the post chain, so every pass that wrote it that way was invisible - 33 recorded
+  passes became 268 once all slots were scanned. Every earlier "which pass first makes it
+  bright" answer was drawn from a partial view.
+- The trace ring was indexed by the 8-slot sample ring, which a later frame had already reused
+  by classification time: a white frame got 102 passes and a normal one 2. It is now a
+  dedicated 16-period ring stamped with its frame number, and reports "expired" rather than
+  lying.
+- `_traceFmt` was left at the old size after the ring grew (IndexOutOfRange), and the trace
+  sampled 5 coordinates while claiming 25 (twenty were uninitialised stack).
+- The stage dump armed on *every* matching draw, so it photographed the last of 5-7 draws per
+  frame while the trace blamed the first; it now arms once per frame on the first.
+- `RYUJINX_METAL_MASK_UNWRITTEN` (mask fragment outputs the shader does not write, as the GL
+  backend and MoltenVK do) engaged 0 pipelines on this title - correct in principle, null here.

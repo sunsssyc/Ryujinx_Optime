@@ -583,12 +583,22 @@ namespace Ryujinx.Graphics.Metal
             // 1600x896 RG11B10 combine buffer, so the pass-luma trace records each draw's
             // cumulative output and the exact draw that lifts it from ~0.6 to ~147 is named.
             // RYUJINX_METAL_DRAW_TRACE=1 (with RYUJINX_METAL_PASS_TRACE=1).
-            bool forceDrawTrace = forDraw && _drawTraceOn &&
+            bool forceDrawTrace = false;
+            if (forDraw && _drawTraceOn &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
-                DrawCount != _drawCountAtPassStart &&
-                _encoderStateManager.RenderTargets[0] is Texture dtTex &&
-                dtTex.Width == 1600 && dtTex.Height == 896 &&
-                dtTex.MtlFormat == SharpMetal.Metal.MTLPixelFormat.RG11B10Float;
+                DrawCount != _drawCountAtPassStart)
+            {
+                // Any MRT slot: this buffer is attached at slot 1 for part of the chain.
+                foreach (Texture dtTex in _encoderStateManager.RenderTargets)
+                {
+                    if (dtTex != null && dtTex.Width == 1600 && dtTex.Height == 896 &&
+                        dtTex.MtlFormat == SharpMetal.Metal.MTLPixelFormat.RG11B10Float)
+                    {
+                        forceDrawTrace = true;
+                        break;
+                    }
+                }
+            }
 
             bool forceAllSplit = forDraw && _splitAll &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
@@ -838,7 +848,7 @@ namespace Ryujinx.Graphics.Metal
             UploadCorrelator.SampleStageAfterPass(Cbs);
             if (_passTraceOn)
             {
-                UploadCorrelator.TracePassEnd(Cbs, _encoderStateManager.RenderTargets[0], $"{reason} last={UploadCorrelator.LastPassLastLabel} draws={UploadCorrelator.LastPassDraws}");
+                UploadCorrelator.TracePassEnd(Cbs, _encoderStateManager.RenderTargets, $"{reason} last={UploadCorrelator.LastPassLastLabel} draws={UploadCorrelator.LastPassDraws}");
             }
 
             // Sample the watched target right after a pass on it ends. Sampling only on
@@ -1660,6 +1670,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             UploadCorrelator.PreCompositeProbe(Cbs, input);
+            UploadCorrelator.NoteStageOutputBefore(Cbs, _encoderStateManager.RenderTargets[0]);
             _encoderStateManager.SignalRenderDirty();
             _prePassProbes++;
         }
@@ -1905,6 +1916,11 @@ namespace Ryujinx.Graphics.Metal
                 stageLbl.StartsWith(_stageLabel, StringComparison.Ordinal))
             {
                 UploadCorrelator.ArmStageDump(_encoderStateManager.RenderTargets);
+                // The render target as it stands immediately BEFORE this draw, so the draw's
+                // own contribution is out - before. A blit here ends the pass, which the
+                // per-draw split already does routinely.
+                UploadCorrelator.NoteStageOutputBefore(Cbs, _encoderStateManager.RenderTargets[0]);
+                UploadCorrelator.NoteStageBlend(_encoderStateManager.DescribeBlend(0));
             }
 
             PreProbeAtPassStart();
@@ -2097,6 +2113,11 @@ namespace Ryujinx.Graphics.Metal
                 stageLbl2.StartsWith(_stageLabel, StringComparison.Ordinal))
             {
                 UploadCorrelator.ArmStageDump(_encoderStateManager.RenderTargets);
+                // The render target as it stands immediately BEFORE this draw, so the draw's
+                // own contribution is out - before. A blit here ends the pass, which the
+                // per-draw split already does routinely.
+                UploadCorrelator.NoteStageOutputBefore(Cbs, _encoderStateManager.RenderTargets[0]);
+                UploadCorrelator.NoteStageBlend(_encoderStateManager.DescribeBlend(0));
             }
 
             PreProbeAtPassStart();
