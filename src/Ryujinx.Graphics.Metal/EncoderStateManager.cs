@@ -2559,7 +2559,11 @@ namespace Ryujinx.Graphics.Metal
                                 MTLBuffer sb = buffer.Range.HasValue && !buffer.Range.Value.Write
                                     ? buffer.Buffer.GetMirrorable(_pipeline.Cbs, ref sOff, sSize, out _).Value
                                     : buffer.Buffer.Get(_pipeline.Cbs, sOff, sSize, buffer.Range?.Write ?? false).Value;
-                                UploadCorrelator.NoteStageUniform(index, sb, sOff, sSize);
+                                // Tagged by stage: fp_c3 and vp_c3 land on different indices
+                                // and only the vertex one carries the flare's two multipliers.
+                                UploadCorrelator.NoteStageUniform(
+                                    (segment.Stages & ResourceStages.Vertex) != 0 ? 2000 + index : index,
+                                    sb, sOff, sSize);
                             }
 
                             // Dedicated fp_c3[0..1] probe for RYUJINX_METAL_CONST_LABEL.

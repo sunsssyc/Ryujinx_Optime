@@ -1187,11 +1187,12 @@ namespace Ryujinx.Graphics.Metal
                 for (int k = 0; k < _pdCount[j, d]; k++)
                 {
                     int b = _pdBinding[j, d, k];
+                    NoteFlareMultipliers(j, d, k, b, flat);
                     for (int i = 0; i < PdWords; i++)
                     {
                         float cpu = _pdCpu[j, d, k, i];
                         double v = b >= 1000 ? BitConverter.SingleToInt32Bits(cpu) : cpu;
-                        string key = $"d{d}:{(b >= 1000 ? "s" + (b - 1000) : "b" + b)}[{i:D2}]";
+                        string key = $"d{d}:{(b >= 2000 ? "v" + (b - 2000) : b >= 1000 ? "s" + (b - 1000) : "b" + b)}[{i:D2}]";
                         CbStat st = _pdStats.TryGetValue(key, out CbStat e) ? e : new CbStat { FMin = double.MaxValue, FMax = double.MinValue, NMin = double.MaxValue, NMax = double.MinValue };
                         if (flat) { st.Flat++; st.FMin = Math.Min(st.FMin, v); st.FMax = Math.Max(st.FMax, v); st.FSum += v; }
                         else { st.Normal++; st.NMin = Math.Min(st.NMin, v); st.NMax = Math.Max(st.NMax, v); st.NSum += v; }
@@ -1249,6 +1250,41 @@ namespace Ryujinx.Graphics.Metal
             {
                 long tot = kv.Value.Flat + kv.Value.Normal;
                 sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            return sb.ToString();
+        }
+
+        // vp_c3[2].w (word 11) and vp_c3[6].z (word 26) of the flare's vertex constant buffer,
+        // and their product - the only factors of outAttr1.x not yet accounted for.
+        private static readonly Dictionary<string, CbStat> _flareMul = new();
+
+        private static void NoteFlareMultipliers(int j, int d, int k, int b, bool flat)
+        {
+            if (b < 2000) { return; }
+            double w11 = _pdCpu[j, d, k, 11], w26 = _pdCpu[j, d, k, 26];
+            (string, double)[] items = { ($"v{b - 2000}:c3[2].w", w11), ($"v{b - 2000}:c3[6].z", w26), ($"v{b - 2000}:product", w11 * w26) };
+            foreach ((string name, double val) in items)
+            {
+                string key = $"d{d}:{name}";
+                CbStat st = _flareMul.TryGetValue(key, out CbStat e) ? e : new CbStat { FMin = double.MaxValue, FMax = double.MinValue, NMin = double.MaxValue, NMax = double.MinValue };
+                if (flat) { st.Flat++; st.FMin = Math.Min(st.FMin, val); st.FMax = Math.Max(st.FMax, val); st.FSum += val; }
+                else { st.Normal++; st.NMin = Math.Min(st.NMin, val); st.NMax = Math.Max(st.NMax, val); st.NSum += val; }
+                _flareMul[key] = st;
+            }
+        }
+
+        private static string FlareMulText()
+        {
+            if (_flareMul.Count == 0) { return ""; }
+            StringBuilder sb = new();
+            sb.Append("\n  FLARE VERTEX MULTIPLIERS (vp_c3[2].w, vp_c3[6].z, product) by outcome:");
+            foreach (KeyValuePair<string, CbStat> kv in System.Linq.Enumerable.OrderBy(_flareMul, x => x.Key))
+            {
+                CbStat v = kv.Value;
+                if (v.Flat == 0 && v.Normal == 0) { continue; }
+                double fm = v.Flat > 0 ? v.FSum / v.Flat : 0, nm = v.Normal > 0 ? v.NSum / v.Normal : 0;
+                bool dj = v.Flat > 0 && v.Normal > 0 && (v.FMin > v.NMax || v.FMax < v.NMin);
+                sb.Append($"\n      {kv.Key}: WHITE mean {fm:G6} [{v.FMin:G4}..{v.FMax:G4}] n={v.Flat}   normal mean {nm:G6} [{v.NMin:G4}..{v.NMax:G4}] n={v.Normal}{(dj ? "   <<<< DISJOINT" : "")}");
             }
             return sb.ToString();
         }
@@ -4227,7 +4263,7 @@ namespace Ryujinx.Graphics.Metal
                     {
                         dsb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal}");
                     }
-                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"  COMPOSITE INPUT writers this frame (program label prefixes, in draw order) by outcome:{wsb}\n  composite input storage:{dsb}\n  stage[{_stageLabel}]: arms {_stageArms} samples {_stageSamples} written white {_stageDumpsWritten} normal {_stageDumpsNormal} lookup misses {_stageMisses}{ConstStatsText()}{TinyPreText()}{VtxStatsText()}{PerDrawStatsText()}{PerDrawSamplerText()}{ArgTableText()}{SceneSeriesText()}{TinySeriesText()}{StageDrawStatsText()}\n  stage cb GPU-vs-CPU: equal flat {_cbEqFlat} normal {_cbEqNormal} | DIFFER flat {_cbDiffFlat} normal {_cbDiffNormal} | unknown flat {_cbUnknownFlat} normal {_cbUnknownNormal}{CbStatsText()}");
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"  COMPOSITE INPUT writers this frame (program label prefixes, in draw order) by outcome:{wsb}\n  composite input storage:{dsb}\n  stage[{_stageLabel}]: arms {_stageArms} samples {_stageSamples} written white {_stageDumpsWritten} normal {_stageDumpsNormal} lookup misses {_stageMisses}{ConstStatsText()}{FlareMulText()}{TinyPreText()}{VtxStatsText()}{PerDrawStatsText()}{PerDrawSamplerText()}{ArgTableText()}{SceneSeriesText()}{TinySeriesText()}{StageDrawStatsText()}\n  stage cb GPU-vs-CPU: equal flat {_cbEqFlat} normal {_cbEqNormal} | DIFFER flat {_cbDiffFlat} normal {_cbDiffNormal} | unknown flat {_cbUnknownFlat} normal {_cbUnknownNormal}{CbStatsText()}");
                 }
             sb.Append($"\n  COMPOSITE OUTPUT right after its draw (frame N) vs outcome (N+1): [white@draw] flat {_outWhiteAtDrawFlat} normal {_outWhiteAtDrawNormal} | [picture@draw] flat {_outPicAtDrawFlat} normal {_outPicAtDrawNormal}");
             sb.Append($"\n  TOPOLOGY/frame: replaceView flat {(_topoFlatN > 0 ? _rvFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _rvNormal / _topoNormalN : 0):F3} | newTexture flat {(_topoFlatN > 0 ? _ntFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _ntNormal / _topoNormalN : 0):F3}");

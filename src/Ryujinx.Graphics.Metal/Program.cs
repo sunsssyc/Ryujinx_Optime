@@ -601,12 +601,17 @@ namespace Ryujinx.Graphics.Metal
             {
                 // Same value, clamped: keeps the flare visible but bounds what it can add.
                 // RYUJINX_METAL_FLARE_CLAMP sets the ceiling (default 1).
-                patched = Regex.Replace(patched, @"out\.outAttr1\.x = (temp_\d+);", m => { hits++; return $"out.outAttr1.x = min({m.Groups[1].Value}, {_flareClamp.ToString(System.Globalization.CultureInfo.InvariantCulture)}f);"; });
+                patched = Regex.Replace(patched, @"out\.outAttr1\.x = (temp_\d+);", m => { hits++; return $"out.outAttr1.x = min({m.Groups[1].Value}, {_flareClamp.ToString("0.0###", System.Globalization.CultureInfo.InvariantCulture)}f);"; });
             }
 
             if (hits > 0 && ++_flareConstPatched <= 8)
             {
-                Logger.Warning?.PrintMsg(LogClass.Gpu, $"flare-const: level {_flareConst}, {hits} replacement(s) in a flare vertex shader ({_flareConstPatched} programs so far)");
+                // The emitted literal must be valid MSL: "16f" is not, and a patch that fails
+                // to compile leaves a null pipeline whose draws are skipped - which removes
+                // the flare and reads as a perfect fix. Log the exact text that was inserted
+                // so the substitution can be eyeballed, and grep the run for "No vertex
+                // function" before believing any number from it.
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"flare-const: level {_flareConst} clamp {_flareClamp.ToString("0.0###", System.Globalization.CultureInfo.InvariantCulture)}f, {hits} replacement(s) in a flare vertex shader ({_flareConstPatched} programs so far)");
             }
             return patched;
         }

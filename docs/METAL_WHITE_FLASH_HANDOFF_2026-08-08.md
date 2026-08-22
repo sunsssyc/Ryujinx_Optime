@@ -6169,3 +6169,39 @@ Textures table read back at GPU time (61,923 tables, **zero** CPU/GPU mismatches
 that was not Fragment, so the first vertex-stage patch added to it silently replaced nothing and
 measured a clean baseline (22.8%) that looked like a real null result. Vertex patches now run
 before that gate. An MSL patch also needs a `CodeGenVersion` bump to retranslate on a warm cache.
+
+### The clamp arms were shader-compilation failures, not clamps (2026-08-22, corrected same day)
+
+`min(x, 16f)` is not valid MSL - a float literal needs a digit after the point. All three
+clamp arms (1, 16, 1000) emitted it, every flare vertex shader failed to compile
+(`No vertex function` x67,700), the pipeline came back null and its draws were skipped. That
+removes the flare exactly like the zero patch does, so all three measured "0.00%" and the
+"white needs an intensity above 1000" reading came from a shader that never ran. It also
+crashed the session with SIGSEGV. Withdrawn.
+
+With `min(x, 16.0f)` and **zero** compilation failures the real number is **9.04%** - a clamp
+at 16 halves the flash but does not remove it. The two arms that always were clean stand:
+`out.outAttr1.x = 0` gives 0.01%, and pinning the factors high gives 87.8%.
+
+`tools/arm_valid.py` now VOIDs any run containing `No vertex function` / `No fragment
+function`, so a patch that fails to compile can never again be read as a perfect fix.
+
+### The read-after-write split costs most of the frame rate - and is load-bearing
+
+With the flare fixed, `RYUJINX_METAL_RAW_SPLIT=0` (hot-switchable through
+`/tmp/ryujinx-metal-raw-split`, which takes precedence over the environment variable) was
+measured in one session by flipping it live:
+
+    split on    617 passes/frame   42.3 ms/frame in BufferModifiedRange waits   16-22 fps
+    split off   228 passes/frame    0.03-0.2 ms/frame                           30.0 fps (the cap)
+
+414 of the 617 passes are the split's own `FragmentDependency` ends. The pass-count work of
+2026-07-26 had taken this frame to 176 passes; the split, added later purely as a flash
+mitigation (45% -> 24%), put it back to 3-5x that and took the frame rate with it. Gated arm
+with both changes: flat 0.73%, fps mean 29.6 / median 30.0.
+
+**But the split is not free to remove.** With it off the user reports Ultrahand can no longer
+grab objects - a gameplay function that reads GPU results back, which is exactly the ordering
+the split enforces. So the split is doing real work beyond the flash, and the next step is to
+narrow its condition to the dependencies that feed readbacks rather than firing 414 times a
+frame. A live A/B of that (the toggle flips per frame) is the way to attribute it.
