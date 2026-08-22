@@ -813,8 +813,10 @@ namespace Ryujinx.Graphics.Metal
         private static readonly int[,] _stageCbBindingAt = new int[StageSlots, StageCbMax];
         private static readonly int[] _stageCbCountAt = new int[StageSlots];
         private static long _cbEqFlat, _cbEqNormal, _cbDiffFlat, _cbDiffNormal, _cbUnknownFlat, _cbUnknownNormal, _cbDiffLogged;
-        private struct CbStat { public long Flat, Normal; public double FMin, FMax, NMin, NMax; }
+        private struct CbStat { public long Flat, Normal; public double FMin, FMax, NMin, NMax, FSum, NSum; }
         private static readonly Dictionary<string, CbStat> _cbStats = new();
+        private static readonly List<string> _sbSamples = new();
+        private static int _sbWhiteSamples, _sbNormalSamples;
 
         private static double Rg11(uint v)
         {
@@ -840,6 +842,21 @@ namespace Ryujinx.Graphics.Metal
                 if (k % 8 == 0) { sb.Append("\n      "); }
                 sb.Append($"{_sceneRing[(start + k) % _sceneRing.Length],-22}");
             }
+            return sb.ToString();
+        }
+
+        private static string TinyPreText()
+        {
+            if (_tinyPreStats.Count == 0) { return ""; }
+            StringBuilder sb = new();
+            sb.Append("\n  EXPOSURE 1x1 at the stage PASS START (before the first flare draw), by outcome:");
+            foreach (KeyValuePair<string, CbStat> kv in System.Linq.Enumerable.OrderBy(_tinyPreStats, x => x.Key))
+            {
+                CbStat v = kv.Value;
+                bool dj = v.Flat > 0 && v.Normal > 0 && (v.FMin > v.NMax || v.FMax < v.NMin);
+                sb.Append($"\n      {kv.Key}: WHITE [{v.FMin:G6} .. {v.FMax:G6}] n={v.Flat}   normal [{v.NMin:G6} .. {v.NMax:G6}] n={v.Normal}{(dj ? "   <<<< DISJOINT" : "")}");
+            }
+            foreach (string l in _tinyPreSamples) { sb.Append("\n      " + l); }
             return sb.ToString();
         }
 
@@ -924,6 +941,11 @@ namespace Ryujinx.Graphics.Metal
         private static string CbStatsText()
         {
             StringBuilder sb = new();
+            if (_sbSamples.Count > 0)
+            {
+                sb.Append("\n  STORAGE word[0] per frame (CPU at bind / GPU at pass end):");
+                foreach (string l in _sbSamples) { sb.Append("\n      " + l); }
+            }
             foreach (KeyValuePair<string, CbStat> kv in System.Linq.Enumerable.OrderBy(_cbStats, x => x.Key))
             {
                 CbStat v = kv.Value;
@@ -1001,8 +1023,277 @@ namespace Ryujinx.Graphics.Metal
             return sb.ToString();
         }
 
+        // Every draw of the stage program in the frame (up to 8), every captured binding, all
+        // 32 words, CPU-side at bind. Classified per outcome; only fields whose white and
+        // normal ranges are DISJOINT are printed. The first-draw-only capture looked at 8
+        // words and the flare's position/scale and its two multipliers live beyond them.
+        private const int PdDraws = 8, PdWords = 32;
+        private static readonly float[,,,] _pdCpu = new float[StageSlots, PdDraws, StageCbMax, PdWords];
+        private static readonly int[,,] _pdBinding = new int[StageSlots, PdDraws, StageCbMax];
+        private static readonly int[,] _pdCount = new int[StageSlots, PdDraws];
+        private static readonly long[] _pdFrame = new long[StageSlots];
+        private static readonly Dictionary<string, CbStat> _pdStats = new();
+        private static int _pdDrawIndex = -1;   // the draw within the frame currently binding
+
+        // ---- sampler registry + per-draw sampler/raster census for the stage program ----
+        private static readonly Dictionary<ulong, string> _samplerDesc = new();
+        public static void NoteSamplerCreated(ulong id, string desc)
+        {
+            if (Enabled) { lock (_samplerDesc) { _samplerDesc[id] = desc; } }
+        }
+
+        private static readonly StringBuilder[] _pdSamplers = new StringBuilder[PdDraws];
+        private static readonly string[,] _pdSamplerAt = new string[StageSlots, PdDraws];
+        private static readonly string[,] _pdRasterAt = new string[StageSlots, PdDraws];
+        private static readonly Dictionary<string, (long Flat, long Normal)> _pdSamplerStats = new();
+        private static readonly Dictionary<string, (long Flat, long Normal)> _pdRasterStats = new();
+
+        public static void NoteStageSampler(int binding, ulong texId, int texW, int texH, ulong samplerId)
+        {
+            if (!Enabled || _pdDrawIndex < 0 || _pdDrawIndex >= PdDraws) { return; }
+            string desc;
+            lock (_samplerDesc) { desc = _samplerDesc.TryGetValue(samplerId, out string d) ? d : "?"; }
+            StringBuilder sb = _pdSamplers[_pdDrawIndex] ??= new StringBuilder();
+            if (sb.Length < 700) { sb.Append($" t{binding}:{texW}x{texH}#{texId:X}/s{samplerId:X}={desc}"); }
+        }
+
+        // The draw arguments themselves. The flare sprites are additive and the vertex
+        // shader indexes by instance: an instance count of 100 instead of 1 is a 100x
+        // brighter sprite with every other input identical - the one shape left.
+        private static readonly string[,] _pdArgsAt = new string[StageSlots, PdDraws];
+        private static readonly Dictionary<string, (long Flat, long Normal)> _pdArgsStats = new();
+        // ---- GPU-time readback of the stage program's fragment Textures table ----
+        private const int ArgWords = 16;
+        private static readonly MTLBuffer[,] _argBuf = new MTLBuffer[StageSlots, PdDraws];
+        private static readonly int[,] _argOff = new int[StageSlots, PdDraws];
+        private static readonly int[,] _argN = new int[StageSlots, PdDraws];
+        private static readonly ulong[,,] _argCpu = new ulong[StageSlots, PdDraws, ArgWords];
+        private static readonly bool[,] _argSampled = new bool[StageSlots, PdDraws];
+        private static long _argEqFlat, _argEqNormal, _argDiffFlat, _argDiffNormal;
+        private static readonly List<string> _argDiffSamples = new();
+        private const int ArgBase = 5 * Slots * Pixels * BytesPerPixel + 4 * Slots * Pixels * 16 + StageSlots * StageCbMax * StageCbFloats * 4 + TraceBytes + TinyBytes + SceneBytes;
+        private const int ArgBytes = StageSlots * PdDraws * ArgWords * 8;
+
+        public static void NoteStageArgTable(MTLBuffer buf, int offset, ReadOnlySpan<ulong> ids)
+        {
+            if (!Enabled || _pdDrawIndex < 0 || _pdDrawIndex >= PdDraws || buf.NativePtr == IntPtr.Zero) { return; }
+            int j = (int)(_frame % StageSlots);
+            if (_pdFrame[j] != _frame) { return; }
+            int n = Math.Min(ids.Length, ArgWords);
+            _argBuf[j, _pdDrawIndex] = buf;
+            _argOff[j, _pdDrawIndex] = offset;
+            _argN[j, _pdDrawIndex] = n;
+            for (int i = 0; i < n; i++) { _argCpu[j, _pdDrawIndex, i] = ids[i]; }
+            _argSampled[j, _pdDrawIndex] = false;
+        }
+
+        private static void BlitStageArgTables(int j, MTLBlitCommandEncoder blit)
+        {
+            for (int d = 0; d < PdDraws; d++)
+            {
+                if (_argN[j, d] == 0 || _argBuf[j, d].NativePtr == IntPtr.Zero || _argSampled[j, d]) { continue; }
+                blit.CopyFromBuffer(_argBuf[j, d], (ulong)_argOff[j, d], _buf, (ulong)(ArgBase + (j * PdDraws + d) * ArgWords * 8), (ulong)(_argN[j, d] * 8));
+                _argSampled[j, d] = true;
+            }
+        }
+
+        private static unsafe void ClassifyStageArgTables(long presentedFrame, bool flat)
+        {
+            long want = presentedFrame - 1;
+            int j = (int)(want % StageSlots);
+            if (_pdFrame[j] != want) { return; }
+            for (int d = 0; d < PdDraws; d++)
+            {
+                if (!_argSampled[j, d]) { continue; }
+                ulong* g = (ulong*)((byte*)_buf.Contents + ArgBase + (j * PdDraws + d) * ArgWords * 8);
+                bool diff = false; StringBuilder sb = null;
+                for (int i = 0; i < _argN[j, d]; i++)
+                {
+                    if (g[i] != _argCpu[j, d, i])
+                    {
+                        diff = true; sb ??= new StringBuilder();
+                        if (sb.Length < 300) { sb.Append($" w{i}: cpu {_argCpu[j, d, i]:X} gpu {g[i]:X};"); }
+                    }
+                }
+                if (diff) { if (flat) { _argDiffFlat++; } else { _argDiffNormal++; } if (_argDiffSamples.Count < 40) { _argDiffSamples.Add($"f{presentedFrame} {(flat ? "WHITE " : "normal")} d{d}:{sb}"); } }
+                else { if (flat) { _argEqFlat++; } else { _argEqNormal++; } }
+                _argSampled[j, d] = false;
+                _argN[j, d] = 0;
+            }
+        }
+
+        private static string ArgTableText()
+        {
+            StringBuilder sb = new();
+            sb.Append($"\n  FRAGMENT TEXTURES TABLE at GPU pass end vs CPU-written ids (per draw): equal flat {_argEqFlat} normal {_argEqNormal} | DIFFER flat {_argDiffFlat} normal {_argDiffNormal}");
+            foreach (string l in _argDiffSamples) { sb.Append("\n      " + l); }
+            return sb.ToString();
+        }
+
+        public static void NoteStageDrawArgs(string desc)
+        {
+            if (!Enabled || _pdDrawIndex < 0 || _pdDrawIndex >= PdDraws) { return; }
+            int j = (int)(_frame % StageSlots);
+            if (_pdFrame[j] == _frame) { _pdArgsAt[j, _pdDrawIndex] = desc; }
+        }
+
+        public static void NoteStageRaster(string desc)
+        {
+            if (!Enabled || _pdDrawIndex < 0 || _pdDrawIndex >= PdDraws) { return; }
+            int j = (int)(_frame % StageSlots);
+            if (_pdFrame[j] == _frame) { _pdRasterAt[j, _pdDrawIndex] = desc; }
+        }
+
+        public static void NoteStageDrawBinding()
+        {
+            if (!Enabled) { return; }
+            int j = (int)(_frame % StageSlots);
+            if (_pdFrame[j] != _frame)
+            {
+                _pdFrame[j] = _frame;
+                for (int d = 0; d < PdDraws; d++) { _pdCount[j, d] = 0; _pdSamplerAt[j, d] = null; _pdRasterAt[j, d] = null; _pdArgsAt[j, d] = null; _pdSamplers[d]?.Clear(); }
+                _pdDrawIndex = -1;
+            }
+            if (_pdDrawIndex >= 0 && _pdDrawIndex < PdDraws && _pdSamplers[_pdDrawIndex] != null)
+            {
+                _pdSamplerAt[j, _pdDrawIndex] = _pdSamplers[_pdDrawIndex].ToString();
+                _pdSamplers[_pdDrawIndex].Clear();
+            }
+            _pdDrawIndex++;
+        }
+
+        public static unsafe void NoteStageUniformAny(int binding, MTLBuffer buf, int offset)
+        {
+            if (!Enabled || buf.NativePtr == IntPtr.Zero || _pdDrawIndex < 0 || _pdDrawIndex >= PdDraws) { return; }
+            int j = (int)(_frame % StageSlots);
+            if (_pdFrame[j] != _frame) { return; }
+            int k = _pdCount[j, _pdDrawIndex];
+            if (k >= StageCbMax) { return; }
+            IntPtr c = buf.Contents;
+            if (c == IntPtr.Zero) { return; }
+            float* f = (float*)((byte*)c + offset);
+            for (int i = 0; i < PdWords; i++) { _pdCpu[j, _pdDrawIndex, k, i] = f[i]; }
+            _pdBinding[j, _pdDrawIndex, k] = binding;
+            _pdCount[j, _pdDrawIndex] = k + 1;
+        }
+
+        private static void ClassifyPerDraw(long presentedFrame, bool flat)
+        {
+            long want = presentedFrame - 1;
+            int j = (int)(want % StageSlots);
+            if (_pdFrame[j] != want) { return; }
+            for (int d = 0; d < PdDraws; d++)
+            {
+                for (int k = 0; k < _pdCount[j, d]; k++)
+                {
+                    int b = _pdBinding[j, d, k];
+                    for (int i = 0; i < PdWords; i++)
+                    {
+                        float cpu = _pdCpu[j, d, k, i];
+                        double v = b >= 1000 ? BitConverter.SingleToInt32Bits(cpu) : cpu;
+                        string key = $"d{d}:{(b >= 1000 ? "s" + (b - 1000) : "b" + b)}[{i:D2}]";
+                        CbStat st = _pdStats.TryGetValue(key, out CbStat e) ? e : new CbStat { FMin = double.MaxValue, FMax = double.MinValue, NMin = double.MaxValue, NMax = double.MinValue };
+                        if (flat) { st.Flat++; st.FMin = Math.Min(st.FMin, v); st.FMax = Math.Max(st.FMax, v); st.FSum += v; }
+                        else { st.Normal++; st.NMin = Math.Min(st.NMin, v); st.NMax = Math.Max(st.NMax, v); st.NSum += v; }
+                        _pdStats[key] = st;
+                    }
+                }
+            }
+        }
+
+        private static void ClassifyPerDrawSamplers(long presentedFrame, bool flat)
+        {
+            long want = presentedFrame - 1;
+            int j = (int)(want % StageSlots);
+            if (_pdFrame[j] != want) { return; }
+            for (int d = 0; d < PdDraws; d++)
+            {
+                if (_pdSamplerAt[j, d] != null)
+                {
+                    string k = $"d{d}:{_pdSamplerAt[j, d]}";
+                    (long Flat, long Normal) v = _pdSamplerStats.TryGetValue(k, out (long Flat, long Normal) e) ? e : (0, 0);
+                    _pdSamplerStats[k] = flat ? (v.Flat + 1, v.Normal) : (v.Flat, v.Normal + 1);
+                }
+                if (_pdRasterAt[j, d] != null)
+                {
+                    string k = $"d{d}:{_pdRasterAt[j, d]}";
+                    (long Flat, long Normal) v = _pdRasterStats.TryGetValue(k, out (long Flat, long Normal) e) ? e : (0, 0);
+                    _pdRasterStats[k] = flat ? (v.Flat + 1, v.Normal) : (v.Flat, v.Normal + 1);
+                }
+                if (_pdArgsAt[j, d] != null)
+                {
+                    string k = $"d{d}:{_pdArgsAt[j, d]}";
+                    (long Flat, long Normal) v = _pdArgsStats.TryGetValue(k, out (long Flat, long Normal) e) ? e : (0, 0);
+                    _pdArgsStats[k] = flat ? (v.Flat + 1, v.Normal) : (v.Flat, v.Normal + 1);
+                }
+            }
+        }
+
+        private static string PerDrawSamplerText()
+        {
+            StringBuilder sb = new();
+            sb.Append("\n  PER-DRAW SAMPLERS (draw:binding:texture/samplerId=descriptor) by outcome, top entries:");
+            foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_pdSamplerStats, x => x.Value.Flat + x.Value.Normal), 16))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            sb.Append("\n  PER-DRAW ARGUMENTS (vertex/instance counts) by outcome, top entries:");
+            foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_pdArgsStats, x => x.Value.Flat + x.Value.Normal), 20))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            sb.Append("\n  PER-DRAW RASTER (viewport/scissor) by outcome, top entries:");
+            foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_pdRasterStats, x => x.Value.Flat + x.Value.Normal), 12))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            return sb.ToString();
+        }
+
+        private static string PerDrawStatsText()
+        {
+            if (_pdStats.Count == 0) { return ""; }
+            StringBuilder sb = new();
+            int disjoint = 0, total = 0;
+            // The flare intensity is exp.x*exp.y*count*vp_c3[6].z*vp_c3[2].w; clamping the
+            // result at 1000 removes the white entirely, so one of those factors is enormous.
+            // Means, not just extrema: a legitimately bright flare overlaps the range.
+            sb.Append("\n  FLARE FACTOR WORDS (vp_c3[2] = words 8-11, vp_c3[6] = words 24-27), mean by outcome:");
+            foreach (KeyValuePair<string, CbStat> kv in System.Linq.Enumerable.OrderBy(_pdStats, x => x.Key))
+            {
+                CbStat v = kv.Value;
+                if (v.Flat == 0 || v.Normal == 0) { continue; }
+                int wi = int.Parse(kv.Key.Substring(kv.Key.IndexOf('[') + 1, 2));
+                if (wi is < 8 or > 27 || (wi > 11 && wi < 24)) { continue; }
+                double fm = v.FSum / v.Flat, nm = v.NSum / v.Normal;
+                double ratio = Math.Abs(nm) > 1e-12 ? fm / nm : (Math.Abs(fm) > 1e-12 ? double.PositiveInfinity : 1);
+                if (Math.Abs(ratio - 1) < 0.05 && Math.Abs(fm) < 1e3) { continue; }
+                sb.Append($"\n      {kv.Key}: WHITE mean {fm:G6} [{v.FMin:G4}..{v.FMax:G4}]   normal mean {nm:G6} [{v.NMin:G4}..{v.NMax:G4}]   ratio {ratio:G4}");
+            }
+            sb.Append("\n  PER-DRAW constants/storage of the stage program, fields whose WHITE and normal ranges are DISJOINT (or white max > 3x normal max):");
+            foreach (KeyValuePair<string, CbStat> kv in System.Linq.Enumerable.OrderBy(_pdStats, x => x.Key))
+            {
+                CbStat v = kv.Value; total++;
+                if (v.Flat == 0 || v.Normal == 0) { continue; }
+                bool dj = v.FMin > v.NMax || v.FMax < v.NMin;
+                bool big = Math.Abs(v.FMax) > 3 * Math.Max(Math.Abs(v.NMax), Math.Abs(v.NMin)) + 1e-6 && Math.Abs(v.FMax) > 1e-6;
+                if (dj || big)
+                {
+                    disjoint++;
+                    sb.Append($"\n      {kv.Key}: WHITE [{v.FMin:G6} .. {v.FMax:G6}] n={v.Flat}   normal [{v.NMin:G6} .. {v.NMax:G6}] n={v.Normal}{(dj ? "  DISJOINT" : "  BIG")}");
+                }
+            }
+            sb.Append($"\n      ({disjoint} of {total} fields flagged)");
+            return sb.ToString();
+        }
+
         public static unsafe void NoteStageUniform(int binding, MTLBuffer buf, int offset, int size)
         {
+            NoteStageUniformAny(binding, buf, offset);
+
             if (!Enabled || !_stageCollect || buf.NativePtr == IntPtr.Zero || _stageCbCount >= StageCbMax)
             {
                 return;
@@ -1054,6 +1345,32 @@ namespace Ryujinx.Graphics.Metal
                             if (diff.Length < 400) { diff.Append($" b{_stageCbBindingAt[j, k]}[{i}] cpu {cpu:G6} gpu {g[i]:G6};"); }
                         }
                         // per-field extrema of the CPU-side values, first 8 floats of each binding
+                        if (i < 8 && _stageCbBindingAt[j, k] >= 1000)
+                        {
+                            // Storage buffer word, as the shader reads it: an integer.
+                            string ikey = $"s{_stageCbBindingAt[j, k] - 1000}[{i}]int";
+                            CbStat iv = _cbStats.TryGetValue(ikey, out CbStat ie) ? ie : new CbStat { FMin = double.MaxValue, FMax = double.MinValue, NMin = double.MaxValue, NMax = double.MinValue };
+                            double id = BitConverter.SingleToInt32Bits(cpu);
+                            if (flat) { iv.Flat++; iv.FMin = Math.Min(iv.FMin, id); iv.FMax = Math.Max(iv.FMax, id); }
+                            else { iv.Normal++; iv.NMin = Math.Min(iv.NMin, id); iv.NMax = Math.Max(iv.NMax, id); }
+                            _cbStats[ikey] = iv;
+                            if (i == 0)
+                            {
+                                int gi = BitConverter.SingleToInt32Bits(g[i]);
+                                string gkey = $"s{_stageCbBindingAt[j, k] - 1000}[0]GPU";
+                                CbStat gv = _cbStats.TryGetValue(gkey, out CbStat ge) ? ge : new CbStat { FMin = double.MaxValue, FMax = double.MinValue, NMin = double.MaxValue, NMax = double.MinValue };
+                                if (flat) { gv.Flat++; gv.FMin = Math.Min(gv.FMin, gi); gv.FMax = Math.Max(gv.FMax, gi); }
+                                else { gv.Normal++; gv.NMin = Math.Min(gv.NMin, gi); gv.NMax = Math.Max(gv.NMax, gi); }
+                                _cbStats[gkey] = gv;
+                                // Separate quotas, so the white frames (a minority that arrives
+                                // later) are not crowded out of the sample list by the normal ones.
+                                if (flat ? _sbWhiteSamples < 40 : _sbNormalSamples < 40)
+                                {
+                                    if (flat) { _sbWhiteSamples++; } else { _sbNormalSamples++; }
+                                    _sbSamples.Add($"f{presentedFrame} {(flat ? "WHITE " : "normal")} s{_stageCbBindingAt[j, k] - 1000}[0] cpu={BitConverter.SingleToInt32Bits(cpu)} gpu={gi}");
+                                }
+                            }
+                        }
                         if (i < 8)
                         {
                             string key = $"b{_stageCbBindingAt[j, k]}[{i}]";
@@ -1279,6 +1596,13 @@ namespace Ryujinx.Graphics.Metal
                         _tinyPtr[ti] = _tinyInput.CanonicalPtr;
                     }
                 }
+            }
+
+            {
+                // Per-frame snapshot that must not stop when the dump quota is reached.
+                int jj = (int)(_frame % StageSlots);
+                MTLBlitCommandEncoder bl = cbs.Encoders.EnsureBlitEncoder();
+                BlitStageArgTables(jj, bl);
             }
 
             if (_stageOut[0].NativePtr == IntPtr.Zero || _stageDumpsWritten >= DumpMaxFiles)
@@ -1600,13 +1924,47 @@ namespace Ryujinx.Graphics.Metal
 
         public static bool PreProbedThisPeriod { get; private set; }
 
+        // The exposure texel (1x1 float) as it stands right BEFORE the first flare draw,
+        // every frame. It is written earlier in the same pass window (889419, a render pass
+        // into the 1x1); the flare vertex shader multiplies its intensity by tex(0.5,0.5).x*.y.
+        // At the pass END it is identical on white and normal frames - this is the START.
+        private const int TinyPreBase = ArgBase + ArgBytes;
+        private const int TinyPreBytes = Slots * 16;
+        private static readonly bool[] _tinyPreSampled = new bool[Slots];
+        private static readonly Dictionary<string, CbStat> _tinyPreStats = new();
+        private static readonly List<string> _tinyPreSamples = new();
+        private static int _tinyPreWhite, _tinyPreNormal;
+
         public static void PreCompositeProbe(CommandBufferScoped cbs, Texture input)
         {
-            if (!Enabled || input == null || _buf.NativePtr == IntPtr.Zero || !SamplerPathProbe.Ready || PreProbedThisPeriod)
+            if (!Enabled || input == null || _buf.NativePtr == IntPtr.Zero || PreProbedThisPeriod)
             {
                 return;
             }
+            // Once per period: the value right before the FIRST flare draw, and one split.
             PreProbedThisPeriod = true;
+
+            if (input.Width <= 8 && input.Height <= 8 &&
+                (input.MtlFormat == MTLPixelFormat.RGBA32Float || input.MtlFormat == MTLPixelFormat.RGBA16Float))
+            {
+                MTLTexture tt = input.GetHandle(cbs);
+                int ti = (int)(_frame % Slots);
+                _tinyPreSampled[ti] = false;
+                if (tt.NativePtr != IntPtr.Zero)
+                {
+                    MTLBlitCommandEncoder tb = cbs.Encoders.EnsureBlitEncoder();
+                    tb.CopyFromTexture(tt, 0, 0, new MTLOrigin { x = 0, y = 0, z = 0 },
+                        new MTLSize { width = 1, height = 1, depth = 1 },
+                        _buf, (ulong)(TinyPreBase + ti * 16), 16, 16);
+                    _tinyPreSampled[ti] = true;
+                }
+                return;
+            }
+
+            if (!SamplerPathProbe.Ready)
+            {
+                return;
+            }
 
             MTLTexture stex = input.GetHandle(cbs);
             if (stex.NativePtr == IntPtr.Zero || input.Width <= GridSide || input.Height <= GridSide)
@@ -2063,7 +2421,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             // + 2 float4 regions for the pre-composite probe (compute read / sampler read).
-            _buf = device.NewBuffer((ulong)(5 * Slots * Pixels * BytesPerPixel + 4 * Slots * Pixels * 16 + StageSlots * StageCbMax * StageCbFloats * 4 + TraceBytes + TinyBytes + SceneBytes), MTLResourceOptions.ResourceStorageModeShared);
+            _buf = device.NewBuffer((ulong)(5 * Slots * Pixels * BytesPerPixel + 4 * Slots * Pixels * 16 + StageSlots * StageCbMax * StageCbFloats * 4 + TraceBytes + TinyBytes + SceneBytes + ArgBytes + TinyPreBytes), MTLResourceOptions.ResourceStorageModeShared);
             SamplerPathProbe.Initialize(device);
 
             if (_stageLabel.Length != 0)
@@ -2610,6 +2968,14 @@ namespace Ryujinx.Graphics.Metal
                 _frameStageBlend = "-";
                 mine.StageDrawCount = _frameStageDrawCount;
                 _frameStageDrawCount = 0;
+                {
+                    int pj = (int)(_frame % StageSlots);
+                    if (_pdFrame[pj] == _frame && _pdDrawIndex >= 0 && _pdDrawIndex < PdDraws && _pdSamplers[_pdDrawIndex] != null)
+                    {
+                        _pdSamplerAt[pj, _pdDrawIndex] = _pdSamplers[_pdDrawIndex].ToString();
+                        _pdSamplers[_pdDrawIndex].Clear();
+                    }
+                }
                 mine.RawSplits = _frameRawSplits;
                 mine.BarrierSkipped = _frameBarrierSkipped;
                 _frameRawSplits = 0;
@@ -3417,6 +3783,26 @@ namespace Ryujinx.Graphics.Metal
                 _sceneRingAt++;
             }
 
+            if (_tinyPreSampled[index])
+            {
+                float* e = (float*)((byte*)_buf.Contents + TinyPreBase + index * 16);
+                for (int c = 0; c < 4; c++)
+                {
+                    string key = $"pre1x1[{c}]";
+                    CbStat v = _tinyPreStats.TryGetValue(key, out CbStat ex) ? ex : new CbStat { FMin = double.MaxValue, FMax = double.MinValue, NMin = double.MaxValue, NMax = double.MinValue };
+                    double d = float.IsFinite(e[c]) ? e[c] : 1e30;
+                    if (flat) { v.Flat++; v.FMin = Math.Min(v.FMin, d); v.FMax = Math.Max(v.FMax, d); }
+                    else { v.Normal++; v.NMin = Math.Min(v.NMin, d); v.NMax = Math.Max(v.NMax, d); }
+                    _tinyPreStats[key] = v;
+                }
+                if (flat ? _tinyPreWhite < 30 : _tinyPreNormal < 30)
+                {
+                    if (flat) { _tinyPreWhite++; } else { _tinyPreNormal++; }
+                    _tinyPreSamples.Add($"f{slot.Frame} {(flat ? "WHITE " : "normal")} pre1x1=({e[0]:G6},{e[1]:G6},{e[2]:G6},{e[3]:G6})");
+                }
+                _tinyPreSampled[index] = false;
+            }
+
             if (_tinySampled[index])
             {
                 float* e = (float*)((byte*)_buf.Contents + TinyBase + index * 16);
@@ -3574,6 +3960,9 @@ namespace Ryujinx.Graphics.Metal
             {
                 ClassifyStageCb(slot.Frame, flat);
                 ClassifyStageVertex(slot.Frame, flat);
+                ClassifyPerDraw(slot.Frame, flat);
+                ClassifyPerDrawSamplers(slot.Frame, flat);
+                ClassifyStageArgTables(slot.Frame, flat);
                 // The normal reference MUST come from the flashing regime. Taking it at frame
                 // ~216 (dark area, exposure 0.13) against white frames at ~1300 (bright area,
                 // exposure 1.0) compared two different scenes and produced a false root cause.
@@ -3838,7 +4227,7 @@ namespace Ryujinx.Graphics.Metal
                     {
                         dsb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal}");
                     }
-                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"  COMPOSITE INPUT writers this frame (program label prefixes, in draw order) by outcome:{wsb}\n  composite input storage:{dsb}\n  stage[{_stageLabel}]: arms {_stageArms} samples {_stageSamples} written white {_stageDumpsWritten} normal {_stageDumpsNormal} lookup misses {_stageMisses}{ConstStatsText()}{VtxStatsText()}{SceneSeriesText()}{TinySeriesText()}{StageDrawStatsText()}\n  stage cb GPU-vs-CPU: equal flat {_cbEqFlat} normal {_cbEqNormal} | DIFFER flat {_cbDiffFlat} normal {_cbDiffNormal} | unknown flat {_cbUnknownFlat} normal {_cbUnknownNormal}{CbStatsText()}");
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"  COMPOSITE INPUT writers this frame (program label prefixes, in draw order) by outcome:{wsb}\n  composite input storage:{dsb}\n  stage[{_stageLabel}]: arms {_stageArms} samples {_stageSamples} written white {_stageDumpsWritten} normal {_stageDumpsNormal} lookup misses {_stageMisses}{ConstStatsText()}{TinyPreText()}{VtxStatsText()}{PerDrawStatsText()}{PerDrawSamplerText()}{ArgTableText()}{SceneSeriesText()}{TinySeriesText()}{StageDrawStatsText()}\n  stage cb GPU-vs-CPU: equal flat {_cbEqFlat} normal {_cbEqNormal} | DIFFER flat {_cbDiffFlat} normal {_cbDiffNormal} | unknown flat {_cbUnknownFlat} normal {_cbUnknownNormal}{CbStatsText()}");
                 }
             sb.Append($"\n  COMPOSITE OUTPUT right after its draw (frame N) vs outcome (N+1): [white@draw] flat {_outWhiteAtDrawFlat} normal {_outWhiteAtDrawNormal} | [picture@draw] flat {_outPicAtDrawFlat} normal {_outPicAtDrawNormal}");
             sb.Append($"\n  TOPOLOGY/frame: replaceView flat {(_topoFlatN > 0 ? _rvFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _rvNormal / _topoNormalN : 0):F3} | newTexture flat {(_topoFlatN > 0 ? _ntFlat / _topoFlatN : 0):F3} normal {(_topoNormalN > 0 ? _ntNormal / _topoNormalN : 0):F3}");

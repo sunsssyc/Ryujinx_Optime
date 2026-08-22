@@ -1917,6 +1917,9 @@ namespace Ryujinx.Graphics.Metal
                 stageLbl.StartsWith(_stageLabel, StringComparison.Ordinal))
             {
                 UploadCorrelator.NoteStageDrawIssued();
+                UploadCorrelator.NoteStageDrawBinding();
+                UploadCorrelator.NoteStageDrawArgs($"Draw v{vertexCount} inst{instanceCount} fv{firstVertex} fi{firstInstance} topo={_encoderStateManager.Topology}");
+                UploadCorrelator.NoteStageRaster(_encoderStateManager.DescribeRaster());
                 UploadCorrelator.ArmStageDump(_encoderStateManager.RenderTargets);
                 // The render target as it stands immediately BEFORE this draw, so the draw's
                 // own contribution is out - before. A blit here ends the pass, which the
@@ -2115,6 +2118,9 @@ namespace Ryujinx.Graphics.Metal
                 stageLbl2.StartsWith(_stageLabel, StringComparison.Ordinal))
             {
                 UploadCorrelator.NoteStageDrawIssued();
+                UploadCorrelator.NoteStageDrawBinding();
+                UploadCorrelator.NoteStageDrawArgs($"DrawIndexed idx{indexCount} inst{instanceCount} fi{firstIndex} fv{firstVertex} finst{firstInstance} topo={_encoderStateManager.Topology}");
+                UploadCorrelator.NoteStageRaster(_encoderStateManager.DescribeRaster());
                 UploadCorrelator.ArmStageDump(_encoderStateManager.RenderTargets);
                 // The render target as it stands immediately BEFORE this draw, so the draw's
                 // own contribution is out - before. A blit here ends the pass, which the

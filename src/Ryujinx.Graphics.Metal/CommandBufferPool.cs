@@ -11,6 +11,9 @@ namespace Ryujinx.Graphics.Metal
     [SupportedOSPlatform("macos")]
     class CommandBufferPool : IDisposable
     {
+        private static readonly bool _waitEveryCommit =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_WAIT_EVERY_COMMIT") == "1";
+
         public const int MaxCommandBuffers = 16;
 
         private readonly int _totalCommandBuffers;
@@ -287,6 +290,16 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 commandBuffer.Commit();
+
+                // The one ordering experiment never run: make the whole GPU synchronous.
+                // Intra-command-buffer serialisation left 17%; this also closes ordering
+                // BETWEEN the ~32 command buffers a frame (and across threads). If the white
+                // survives this, it is not an ordering fault of any kind.
+                // RYUJINX_METAL_WAIT_EVERY_COMMIT=1.
+                if (_waitEveryCommit)
+                {
+                    commandBuffer.WaitUntilCompleted();
+                }
 
                 int ptr = (_queuedIndexesPtr + _queuedCount) % _totalCommandBuffers;
                 _queuedIndexes[ptr] = cbIndex;

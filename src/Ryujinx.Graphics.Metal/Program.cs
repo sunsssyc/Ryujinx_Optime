@@ -558,6 +558,59 @@ namespace Ryujinx.Graphics.Metal
             return code.Substring(0, ret) + sb.ToString() + code.Substring(ret + "return out;".Length);
         }
 
+        // RYUJINX_METAL_FLARE_CONST: 1 = replace the lens-flare vertex shaders' occlusion
+        // count (float(as_type<int>(vp_s0->data[0]))) with a constant; 2 = replace their 1x1
+        // exposure sample with a constant; 3 = both. Every host-visible input of those draws
+        // is identical on white and normal frames; if the white survives with both inputs
+        // pinned, the flare intensity chain cannot be the carrier at all.
+        private static readonly int _flareConst =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_FLARE_CONST"), out int fc) ? fc : 0;
+        private static int _flareConstPatched;
+        private static readonly float _flareClamp =
+            float.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_FLARE_CLAMP"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float fcl) ? fcl : 1f;
+
+        private static string FlareConst(string code, ShaderStage stage)
+        {
+            if (_flareConst == 0 || stage != ShaderStage.Vertex || code == null ||
+                !code.Contains("storage_buffers.vp_s0->data[0]") || !code.Contains("tex_vp_t_tcb_8.sample(") ||
+                !code.Contains("out.outAttr1.x = temp_"))
+            {
+                return code;
+            }
+
+            string patched = code;
+            int hits = 0;
+            if ((_flareConst & 1) != 0)
+            {
+                // temp_N = float(as_type<int>(temp_M));  -> a fixed, typical count
+                patched = Regex.Replace(patched, @"= float\(as_type<int>\((temp_\d+)\)\);", m => { hits++; return "= 20000.0f;"; });
+            }
+            if ((_flareConst & 2) != 0)
+            {
+                // temp_N = textures.tex_vp_t_tcb_8.sample(samp, float2(0.5, 0.5)).xy; -> the usual value
+                patched = Regex.Replace(patched, @"= textures\.tex_vp_t_tcb_8\.sample\([^;]*\)\.xy;", m => { hits++; return "= float2(1.0f, 1.015f);"; });
+            }
+            if ((_flareConst & 4) != 0)
+            {
+                // The final sprite intensity: out.outAttr1.x = temp_N;  -> zero, so the flare
+                // contributes nothing at all. If the white frames vanish with the rest of the
+                // picture intact, this chain is the carrier.
+                patched = Regex.Replace(patched, @"out\.outAttr1\.x = (temp_\d+);", m => { hits++; return "out.outAttr1.x = 0.0f;"; });
+            }
+            if ((_flareConst & 8) != 0)
+            {
+                // Same value, clamped: keeps the flare visible but bounds what it can add.
+                // RYUJINX_METAL_FLARE_CLAMP sets the ceiling (default 1).
+                patched = Regex.Replace(patched, @"out\.outAttr1\.x = (temp_\d+);", m => { hits++; return $"out.outAttr1.x = min({m.Groups[1].Value}, {_flareClamp.ToString(System.Globalization.CultureInfo.InvariantCulture)}f);"; });
+            }
+
+            if (hits > 0 && ++_flareConstPatched <= 8)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"flare-const: level {_flareConst}, {hits} replacement(s) in a flare vertex shader ({_flareConstPatched} programs so far)");
+            }
+            return patched;
+        }
+
         private static string GuardReciprocal(string code)
         {
             // Matched independently rather than as adjacent lines: the emitted MSL carries a
@@ -658,6 +711,15 @@ namespace Ryujinx.Graphics.Metal
 
         private string PatchSourceForDiagnostics(ShaderSource shader)
         {
+            // Vertex-stage patches run before the fragment-only gate below: every patcher in
+            // this method used to be a fragment one, so the early return was free - and it
+            // silently swallowed the first vertex patch added here, which then measured a
+            // clean baseline while replacing nothing.
+            if (shader.Stage == ShaderStage.Vertex)
+            {
+                return FlareConst(shader.Code, shader.Stage);
+            }
+
             if (shader.Stage != ShaderStage.Fragment)
             {
                 return shader.Code;

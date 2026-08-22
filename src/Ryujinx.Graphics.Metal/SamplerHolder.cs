@@ -31,6 +31,12 @@ namespace Ryujinx.Graphics.Metal
             MTLSamplerBorderColor borderColor = GetConstrainedBorderColor(info.BorderColor, out _);
             uint maxAnisotropy = Math.Clamp((uint)MathF.Ceiling(info.MaxAnisotropy), 1, 16);
 
+            // The sampler's parameters keyed by the GPU resource id it ends up with, so a
+            // draw's bound sampler id can be named later. MTLSamplerState exposes no
+            // getters, and sampler ids are recycled - a stale id bound at a draw resolves
+            // here to whatever sampler NOW owns it, which is exactly what the GPU samples with.
+            string samplerDesc = $"min{(int)minFilter}mag{(int)info.MagFilter.Convert()}mip{(int)mipFilter}_S{(int)info.AddressU.Convert()}T{(int)info.AddressV.Convert()}R{(int)info.AddressP.Convert()}_lod[{minLod:G3},{maxLod:G3}]b{info.MipLodBias:G3}_border{(int)borderColor}_cmp{(int)info.CompareOp.Convert()}_aniso{maxAnisotropy}";
+
             using MTLSamplerDescriptor descriptor = new()
             {
                 BorderColor = borderColor,
@@ -50,6 +56,9 @@ namespace Ryujinx.Graphics.Metal
             };
 
             MTLSamplerState sampler = device.NewSamplerState(descriptor);
+
+
+            UploadCorrelator.NoteSamplerCreated(sampler.GpuResourceID._impl, samplerDesc);
 
             _sampler = new Auto<DisposableSampler>(new DisposableSampler(sampler));
         }

@@ -6121,3 +6121,51 @@ back identical. The next instrument should not be another host-side probe: with 
 the pass now known exactly, a GPU capture of a white frame read in Xcode would show the actual
 per-draw contents authoritatively, which is the one thing this ledger has never had for *this*
 buffer.
+
+## 2026-08-22: THE CARRIER, ISOLATED - the lens-flare sprites, and the first intervention that reaches zero
+
+`2b36a7` is not a post-processing blit. It is the game's **lens-flare sprite**: a
+`DrawIndexed idx8 inst1 TriangleStrip` quad drawn seven times a frame into the 1600x896 HDR
+scene buffer with **additive blending** `rgb(SourceAlpha, One, Add)`, whose fragment shader is
+`out.rgb = sample(tex) * fp_c3[0].rgb`, `out.a = sample.a * fp_c3[0].w * attr1.x`. Because the
+blend factor is the source alpha, the sprite's whole contribution scales with `attr1.x`, which
+its vertex shader computes as
+
+    out.outAttr1.x = tex_vp_t_tcb_8.sample(0.5,0.5).x * .y      (the 1x1 exposure texel)
+                   * float(as_type<int>(vp_s0->data[0]))         (an occlusion-query count)
+                   * vp_c3[6].z * vp_c3[2].w
+
+Patched in MSL (`RYUJINX_METAL_FLARE_CONST`, `Program.FlareConst`), gated arms of 10,799
+frames each, same save, same scene (normal-frame luma 138-145 throughout):
+
+| arm | flat rate |
+|---|---|
+| baseline | **22.5%** |
+| `out.outAttr1.x = 0` (level 4) | **0.01%** (1 frame of 10,799) |
+| `out.outAttr1.x = min(x, 1000)` (level 8) | **0.01%** |
+| `out.outAttr1.x = min(x, 16)` | **0.00%** |
+| `out.outAttr1.x = min(x, 1)` | **0.01%** |
+| count and exposure pinned high (level 3) | **87.8%** - the same chain drives it the other way |
+
+**The white flash is these sprites' additive contribution.** Nothing else in the frame has to
+change: the scene's normal luma is unaffected (143-145 with the clamp, 138 at baseline), and the
+flash goes from one frame in four to one frame in ten thousand. Level 3 confirms the direction -
+pinning the same factors *high* makes almost every frame flat.
+
+The intensity on a white frame therefore exceeds 1,000. Which factor supplies that is still
+open: the exposure texel is 1.0/1.015 on both outcomes (measured at the pass start, before the
+first flare draw, 2,259 white vs 6,592 normal frames), the occlusion count is not it either -
+`RYUJINX_METAL_DISABLE_SAMPLES_PASSED=1` forces the compat result and still measures 23.4% - so
+the multiplier is in `vp_c3[6].z * vp_c3[2].w`, vertex constants that the per-draw capture does
+not yet reach (it holds b0/b4/b22 and the storage buffer).
+
+Also eliminated this round, each a gated arm: whole-GPU synchrony
+(`RYUJINX_METAL_WAIT_EVERY_COMMIT=1`, wait after every commit, ~1,900 passes/frame) 18.2%;
+buffer mirrors off 22.7%; the applied-state cache off 22.7%; hardware occlusion counters off
+23.4%; per-draw samplers, raster state, draw arguments (idx8 inst1 on both) and the fragment
+Textures table read back at GPU time (61,923 tables, **zero** CPU/GPU mismatches) - all null.
+
+**Instrument bug worth recording:** `PatchSourceForDiagnostics` returned early for every stage
+that was not Fragment, so the first vertex-stage patch added to it silently replaced nothing and
+measured a clean baseline (22.8%) that looked like a real null result. Vertex patches now run
+before that gate. An MSL patch also needs a `CodeGenVersion` bump to retranslate on a warm cache.

@@ -2292,6 +2292,14 @@ namespace Ryujinx.Graphics.Metal
             return null;
         }
 
+        /// <summary>Viewport 0 and scissor 0, for the draw census.</summary>
+        public readonly string DescribeRaster()
+        {
+            MTLViewport vp = _currentState.Viewports.Length > 0 ? _currentState.Viewports[0] : default;
+            MTLScissorRect sc = _currentState.Scissors.Length > 0 ? _currentState.Scissors[0] : default;
+            return $"vp({vp.originX:F0},{vp.originY:F0},{vp.width:F0}x{vp.height:F0},z{vp.znear:G3}-{vp.zfar:G3}) sc({sc.x},{sc.y},{sc.width}x{sc.height}) cull={_currentState.CullMode} depth={_currentState.DepthStencilUid.DepthCompareFunction}/{(_currentState.DepthStencilUid.DepthWriteEnabled ? "w" : "-")}";
+        }
+
         /// <summary>The blend state of one colour attachment, for the draw census.</summary>
         public readonly string DescribeBlend(int index)
         {
@@ -2641,6 +2649,22 @@ namespace Ryujinx.Graphics.Metal
                             ref BufferRef buffer = ref _currentState.StorageBufferRefs[index];
                             (ulong gpuAddress, IntPtr nativePtr) = AddressForBuffer(ref buffer);
 
+                            // The stage program's storage buffers, resolved as the draw binds
+                            // them. The flare vertex shader reads vp_s0->data[0] as an INTEGER
+                            // COUNT (float(as_type<int>(...))) and multiplies the sprite's
+                            // intensity by it - an occlusion-query style result, and the one
+                            // input of that draw never captured.
+                            if (UploadCorrelator.Enabled && _stageLabel.Length != 0 && buffer.Buffer != null &&
+                                program.DebugLabel != null && program.DebugLabel.StartsWith(_stageLabel, StringComparison.Ordinal))
+                            {
+                                int sOff = buffer.Range?.Offset ?? 0;
+                                int sSize = buffer.Range?.Size ?? 0;
+                                MTLBuffer sb = buffer.Range.HasValue && !buffer.Range.Value.Write
+                                    ? buffer.Buffer.GetMirrorable(_pipeline.Cbs, ref sOff, sSize, out _).Value
+                                    : buffer.Buffer.Get(_pipeline.Cbs, sOff, sSize, buffer.Range?.Write ?? false).Value;
+                                UploadCorrelator.NoteStageUniform(1000 + index, sb, sOff, sSize);
+                            }
+
                             MTLRenderStages renderStages = 0;
 
                             if ((segment.Stages & ResourceStages.Vertex) != 0)
@@ -2793,6 +2817,14 @@ namespace Ryujinx.Graphics.Metal
                                     {
                                         _currentState.DrawRingTexAResourceId = gpuAddress;
                                     }
+                                }
+
+                                if (UploadCorrelator.Enabled && _stageLabel.Length != 0 && hasTexture && hasSampler &&
+                                    program.DebugLabel != null && program.DebugLabel.StartsWith(_stageLabel, StringComparison.Ordinal) &&
+                                    texture.Storage is Texture sampTex)
+                                {
+                                    UploadCorrelator.NoteStageSampler(index, gpuAddress, sampTex.Width, sampTex.Height,
+                                        texture.Sampler != null ? texture.Sampler.Get(_pipeline.Cbs).Value.GpuResourceID._impl : 0);
                                 }
 
                                 ulong samplerId = hasSampler && texture.Sampler != null
@@ -3070,6 +3102,16 @@ namespace Ryujinx.Graphics.Metal
             {
                 fragArgBuffer.Holder.SetDataUnchecked(fragArgBuffer.Offset, MemoryMarshal.AsBytes(fragResourceIds));
                 MTLBuffer mtlFragArgBuffer = _bufferManager.GetBuffer(fragArgBuffer.Handle, false).Get(_pipeline.Cbs).Value;
+
+                // The fragment Textures table of the stage program: the ids the CPU wrote and
+                // the buffer+offset the GPU will read them from, so the table can be read back
+                // at the pass end and compared - every object-level input is identical, so what
+                // the GPU actually dereferences is the next thing to check.
+                if (UploadCorrelator.Enabled && setIndex == Constants.TexturesSetIndex && _stageLabel.Length != 0 &&
+                    program.DebugLabel != null && program.DebugLabel.StartsWith(_stageLabel, StringComparison.Ordinal))
+                {
+                    UploadCorrelator.NoteStageArgTable(mtlFragArgBuffer, fragArgBuffer.Range.Offset, fragResourceIds);
+                }
 
                 if (UploadCorrelator.Enabled && program.IsTexelFetchComposite)
                 {
