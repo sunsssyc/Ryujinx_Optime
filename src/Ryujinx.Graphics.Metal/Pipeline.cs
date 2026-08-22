@@ -846,6 +846,10 @@ namespace Ryujinx.Graphics.Metal
 
             // The in-stream witness: photograph the blit's input the moment its pass ends.
             UploadCorrelator.SampleInputAfterBlit(Cbs);
+
+            // Under the narrowed scope the write set is per pass: what the pass just ending
+            // wrote is now ordered by that boundary, so it no longer forces later splits.
+            _encoderStateManager.ClearWrittenThisPass();
             UploadCorrelator.SampleStageAfterPass(Cbs);
             if (_passTraceOn)
             {

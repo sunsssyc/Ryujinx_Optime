@@ -6205,3 +6205,30 @@ grab objects - a gameplay function that reads GPU results back, which is exactly
 the split enforces. So the split is doing real work beyond the flash, and the next step is to
 narrow its condition to the dependencies that feed readbacks rather than firing 414 times a
 frame. A live A/B of that (the toggle flips per frame) is the way to attribute it.
+
+### The split is load-bearing for gameplay, and the user-paced A/B that showed it
+
+Flipping the toggle while the user played produced nonsense - their camera work moved the
+scene far more than the switch did, and the interleaved run even measured *more* passes with
+the split off (422 vs 331) against 228 vs 617 when the character stands still. That A/B is
+withdrawn; frame rate has to be measured with nobody at the controls, and the correctness
+question has to be asked with the setting held fixed.
+
+Held fixed, one session, same object, the user drove it:
+
+    split off -> Ultrahand cannot grab
+    split on  -> Ultrahand grabs, and the frame rate is visibly lower
+
+So the read-after-write split is ordering a GPU readback the game's grab targeting depends on.
+It cannot simply be removed, and the flash is no longer a reason to keep it either way.
+
+**Where the cost actually comes from.** `_writtenThisCb` is every texture that has been a
+colour attachment *anywhere in the current command buffer* - it is added in
+`CreateRenderCommandEncoder` and cleared once per command buffer. Any draw sampling any of
+them ends the pass, 414 times a frame. But a write that finished in an earlier pass is already
+ordered, both by that pass's own boundary and by Metal's cross-encoder hazard tracking; the
+dependency Metal genuinely cannot express is a fragment write followed by a fragment read
+*inside one encoder*. `RYUJINX_METAL_RAW_SPLIT_SCOPE=pass` (v323) clears the set at every pass
+end so "written" means "written by the current pass", which should keep the ordering Ultrahand
+needs while removing most of the splits. To be measured: frame rate with nobody playing, then
+Ultrahand with the setting fixed.

@@ -2265,6 +2265,27 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        // Scope of the read-after-write split's write set.
+        //   cb   (default, the behaviour measured so far): every texture that has been an
+        //        attachment anywhere in this command buffer. A draw sampling one splits the
+        //        pass - 414 times a frame, and most of those writes finished passes ago and
+        //        are already ordered by those pass boundaries and by Metal's own cross-encoder
+        //        hazard tracking.
+        //   pass: only textures written by the CURRENT pass. That is the dependency Metal
+        //        genuinely cannot express - a fragment write followed by a fragment read
+        //        inside one encoder - and it is what Ultrahand's readback needs ordered.
+        // RYUJINX_METAL_RAW_SPLIT_SCOPE=pass to narrow it.
+        public static readonly bool SplitScopePass =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT_SCOPE") == "pass";
+
+        public readonly void ClearWrittenThisPass()
+        {
+            if (SplitScopePass)
+            {
+                _writtenThisCb.Clear();
+            }
+        }
+
         public readonly void ClearWrittenThisCb()
         {
             _writtenThisCb.Clear();
