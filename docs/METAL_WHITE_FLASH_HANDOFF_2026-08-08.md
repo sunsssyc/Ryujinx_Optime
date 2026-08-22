@@ -6271,3 +6271,28 @@ frame like the split itself.
 Still open: a genuine SIGSEGV inside `drawIndexedPrimitives` after ~4 minutes of play (no
 shader compilation failures in that run), and the pan-time dips to 18 fps, which are neither
 waits nor pass count.
+
+### The narrowing does not darken the picture, and the day/night cycle invalidates every
+### cross-session brightness comparison
+
+Three captures from one session, six seconds apart, camera untouched, only the two hot
+toggles changed:
+
+    cb + all (as shipped)     mean luma 118.68   median 128.61   R123.3 G119.2 B100.2
+    pass + hazard (narrowed)  mean luma 118.67   median 128.37   R123.1 G119.2 B100.3
+
+Identical to two decimal places. The 6.26 mean absolute pixel difference is grass and
+particles moving over those six seconds, not a change in brightness. So the user's report of
+a dark picture is neither the flare patch (that session carried none) nor the narrowing.
+
+The third capture, taken after switching back, came out at mean luma 232 / median 253 - a
+white frame caught in the act, which is what a 22% rate looks like when you photograph three
+frames.
+
+**Why the Metal-vs-Vulkan comparison kept failing.** `drive_in.sh` detected gameplay from the
+Metal backend's own "per frame: N passes, M draws" line, which Vulkan never prints, so the
+Vulkan drive concluded it had failed and reloaded the save twelve times; its in-game clock ran
+to 8:00 PM while the Metal run sat at 12:15 PM. TOTK's lighting between noon and dusk moves
+far more than any backend difference, so those pairs were meaningless. The detector now also
+counts the game's own `Dm_OP_0038` play-report event, which both backends emit when a save
+finishes loading.
