@@ -1309,17 +1309,23 @@ namespace Ryujinx.Graphics.Metal
                 if (Math.Abs(ratio - 1) < 0.05 && Math.Abs(fm) < 1e3) { continue; }
                 sb.Append($"\n      {kv.Key}: WHITE mean {fm:G6} [{v.FMin:G4}..{v.FMax:G4}]   normal mean {nm:G6} [{v.NMin:G4}..{v.NMax:G4}]   ratio {ratio:G4}");
             }
-            sb.Append("\n  PER-DRAW constants/storage of the stage program, fields whose WHITE and normal ranges are DISJOINT (or white max > 3x normal max):");
+            sb.Append("\n  PER-DRAW constants/storage of the stage program, fields whose WHITE and normal MEANS differ by >50% (or whose ranges are disjoint):");
             foreach (KeyValuePair<string, CbStat> kv in System.Linq.Enumerable.OrderBy(_pdStats, x => x.Key))
             {
                 CbStat v = kv.Value; total++;
                 if (v.Flat == 0 || v.Normal == 0) { continue; }
+                // Disjoint ranges are too strict. A factor that is zero on most frames and
+                // large on the rest never separates by range, yet its MEAN can differ by an
+                // order of magnitude - and the flare's intensity is proportional to exactly
+                // such a factor (the occlusion count).
+                double fm = v.Flat > 0 ? v.FSum / v.Flat : 0, nm = v.Normal > 0 ? v.NSum / v.Normal : 0;
                 bool dj = v.FMin > v.NMax || v.FMax < v.NMin;
-                bool big = Math.Abs(v.FMax) > 3 * Math.Max(Math.Abs(v.NMax), Math.Abs(v.NMin)) + 1e-6 && Math.Abs(v.FMax) > 1e-6;
-                if (dj || big)
+                double scale = Math.Max(Math.Abs(fm), Math.Abs(nm));
+                bool meanDiff = scale > 1e-9 && Math.Abs(fm - nm) > 0.5 * scale;
+                if (dj || meanDiff)
                 {
                     disjoint++;
-                    sb.Append($"\n      {kv.Key}: WHITE [{v.FMin:G6} .. {v.FMax:G6}] n={v.Flat}   normal [{v.NMin:G6} .. {v.NMax:G6}] n={v.Normal}{(dj ? "  DISJOINT" : "  BIG")}");
+                    sb.Append($"\n      {kv.Key}: WHITE mean {fm:G6} [{v.FMin:G4}..{v.FMax:G4}] n={v.Flat}   normal mean {nm:G6} [{v.NMin:G4}..{v.NMax:G4}] n={v.Normal}{(dj ? "  DISJOINT" : "  MEAN")}");
                 }
             }
             sb.Append($"\n      ({disjoint} of {total} fields flagged)");

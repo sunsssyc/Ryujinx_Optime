@@ -6296,3 +6296,40 @@ to 8:00 PM while the Metal run sat at 12:15 PM. TOTK's lighting between noon and
 far more than any backend difference, so those pairs were meaningless. The detector now also
 counts the game's own `Dm_OP_0038` play-report event, which both backends emit when a save
 finishes loading.
+
+### Every factor of the flare's intensity is identical between white and normal frames
+
+The vertex shader computes `outAttr1.x = (exp.x * exp.y) * (count * vp_c3[6].z) * vp_c3[2].w`,
+and the fragment stage's additive blend takes that as the source alpha, so it is the whole
+intensity. Measured on the repro save with 1,926 white and 5,634 normal samples:
+
+    exposure (1x1)     white (1, 1.015)              normal (1, 1.015)
+    occlusion count    white [0..41015]              normal [0..64350]     (overlapping)
+    vp_c3[2].w         white 0.9168 [0.813..0.976]   normal 0.9131 [0.181..0.976]
+    vp_c3[6].z         white 0.001 constant          normal 0.001 constant
+    product            white 0.000917                normal 0.000913
+
+And across all eight flare draws, **0 of 1,024 captured constant and storage words separate
+the two outcomes** - nor do the five bound textures (md5-identical), the samplers, the blend
+state, the viewport/scissor, the draw arguments (`DrawIndexed idx8 inst1`, TriangleStrip) or
+the vertex buffer (a static quad, stride 16).
+
+So the intensity is not what differs, yet zeroing that same output takes the flash from 22.5%
+to 0.01% and pinning it high takes it to 87.8%. The remaining candidate is **how much of the
+screen those sprites cover**: same intensity over a hugely larger area is the one shape that
+satisfies both facts, and it would explain a continuum of multipliers from 1.1x to 126x.
+Nothing measured so far constrains the geometry - the quad is built in the vertex shader from
+`vp_c3[1]/[2]/[3]` and the two attributes, and only two of those words have been read.
+
+The flagging criterion has been changed from "ranges disjoint" to "means differ by >50%",
+because a factor that is zero on most frames and large on the rest never separates by range
+while its mean can differ by an order of magnitude - which is exactly the shape of the
+occlusion count.
+
+Harness notes from this round: `drive_in.sh` now focuses the window by pid before driving
+(three runs in a row reported "IN GAMEPLAY at 8,150 draws/frame" from the title screen's own
+demo scene while the player position was still zero, because the presses went to whichever
+application held focus), and gameplay is detected from the player position in the game's own
+play report rather than from a Metal-only log line or the `Dm_OP_0038` event, which also fires
+on the title screen. GUI arms cannot run at all while the screen is locked: Avalonia fails to
+start its render timer with error -6661.
