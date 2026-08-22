@@ -6082,3 +6082,42 @@ write to the buffer through an MRT slot the instrument still misses.
   frame while the trace blamed the first; it now arms once per frame on the first.
 - `RYUJINX_METAL_MASK_UNWRITTEN` (mask fragment outputs the shader does not write, as the GL
   backend and MoltenVK do) engaged 0 pipelines on this title - correct in principle, null here.
+
+### 2026-08-22 continued: eight more discriminator candidates eliminated
+
+All measured with the paired-reference rule (a normal sample is only taken once a white one
+exists, so the two interleave on adjacent frames), gated arms of 10,799 frames each:
+
+| candidate | white | normal | verdict |
+|---|---|---|---|
+| draws of the additive program per frame | 7 (2,508) | 7 (7,486) | identical, 25.1% = base rate |
+| the post chain running twice | 4 draws (2,312) | 4 draws (7,823) | identical, 22.8% = base rate |
+| blend state of that draw | `rgb(SourceAlpha,One,Add) wmF` | same | identical |
+| its five bound textures | md5 x5 | md5 x5 | **bit-identical** |
+| its constant buffers | rgb mult <= 0.09 | same range | overlapping, no disjoint field |
+| its vertex buffers | static quad, stride 16 | same | identical |
+| read-after-write splits per frame | 275-600 | 275-600 | same distribution, ~25% white in every bucket |
+| exposure (1x1 RGBA32Float) | 1.0 | 1.0 | identical in-regime (the retracted "root cause") |
+
+So: identical draw counts, identical inputs, identical state, identical synchronisation - and a
+20-180x brighter result. The discriminator is still not in view.
+
+More instrument bugs found and fixed this round, each of which had produced a wrong answer:
+- the trace's five sample points were all on **one row** (`i / GridSide == 0` for i<5), so a
+  surface whose whole-surface mean was 96 read as 1.03. Now a real 3x3 spread.
+- the trace matched its texture **by size**, taking the first matching attachment of each pass -
+  a different texture in another MRT slot - and reported "it never goes bright". Now by identity.
+- the per-pass draw-label list truncated at 90 chars while a pass can carry 500 draws, so the
+  program of interest never appeared in it. Now deduplicated by run and capped at 300.
+- the stage dump armed on every matching draw and photographed the last of seven; arming once
+  per frame on the first showed that at the *first* draw the buffer is usually still normal
+  (0.944) and only 1 white frame in 4 is bright there - the brightness accumulates across the
+  seven additive draws.
+
+**The one hard fact that survives everything: presented white frame N <=> the 1600x896 HDR scene
+buffer ends period N-1 at 20-180x its normal luma, in isolated single frames, 1:1, with a
+continuum of multipliers.** Every per-draw input measurement of the program that writes it comes
+back identical. The next instrument should not be another host-side probe: with the texture and
+the pass now known exactly, a GPU capture of a white frame read in Xcode would show the actual
+per-draw contents authoritatively, which is the one thing this ledger has never had for *this*
+buffer.

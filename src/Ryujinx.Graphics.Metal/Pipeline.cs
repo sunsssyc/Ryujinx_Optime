@@ -642,6 +642,7 @@ namespace Ryujinx.Graphics.Metal
                 EndCurrentPass(PassEndReason.FragmentDependency);
                 _encoderStateManager.SignalRenderDirty();
                 _rawSplits++;
+                UploadCorrelator.NoteRawSplit();
 
                 if (preInput != null)
                 {
@@ -1915,6 +1916,7 @@ namespace Ryujinx.Graphics.Metal
                 _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string stageLbl &&
                 stageLbl.StartsWith(_stageLabel, StringComparison.Ordinal))
             {
+                UploadCorrelator.NoteStageDrawIssued();
                 UploadCorrelator.ArmStageDump(_encoderStateManager.RenderTargets);
                 // The render target as it stands immediately BEFORE this draw, so the draw's
                 // own contribution is out - before. A blit here ends the pass, which the
@@ -2112,6 +2114,7 @@ namespace Ryujinx.Graphics.Metal
                 _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string stageLbl2 &&
                 stageLbl2.StartsWith(_stageLabel, StringComparison.Ordinal))
             {
+                UploadCorrelator.NoteStageDrawIssued();
                 UploadCorrelator.ArmStageDump(_encoderStateManager.RenderTargets);
                 // The render target as it stands immediately BEFORE this draw, so the draw's
                 // own contribution is out - before. A blit here ends the pass, which the
@@ -2689,6 +2692,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void TextureBarrier()
         {
+            UploadCorrelator.NoteBarrierRequested();
+
             if (CurrentEncoderType != EncoderType.Render)
             {
                 return;
@@ -2702,6 +2707,7 @@ namespace Ryujinx.Graphics.Metal
             if (!_strictBarrier && DrawCount == _drawCountAtPassStart)
             {
                 _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
+                UploadCorrelator.NoteBarrierSkipped();
 
                 return;
             }

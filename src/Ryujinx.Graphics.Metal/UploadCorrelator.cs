@@ -83,6 +83,9 @@ namespace Ryujinx.Graphics.Metal
             public string StageDraw;
             public string StageInputWriters;
             public string StageBlend;
+            public int StageDrawCount;
+            public int RawSplits;
+            public int BarrierSkipped;
             public string StageInputLastWriters;
             public string StageInputId;
             public float[] Const;
@@ -785,6 +788,7 @@ namespace Ryujinx.Graphics.Metal
         private static readonly long[] _stageFrame = new long[StageSlots];
         private static readonly string[] _stageOutDesc = new string[StageSlots];
         private static readonly int[] _stageOutBytes = new int[StageSlots];
+        private static readonly IntPtr[] _stageOutPtr = new IntPtr[StageSlots];
         private static readonly string[,] _stageInDesc = new string[StageSlots, StageMaxInputs];
         private static readonly int[,] _stageInBytes = new int[StageSlots, StageMaxInputs];
         private static readonly List<Texture> _stageInputs = new();
@@ -884,6 +888,24 @@ namespace Ryujinx.Graphics.Metal
                 long tot = kv.Value.Flat + kv.Value.Normal;
                 sb.Append($"\n      [{kv.Key}] flat {kv.Value.Flat} normal {kv.Value.Normal} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
             }
+            sb.Append("\n  READ-AFTER-WRITE SPLITS per frame (bucketed by 25), by outcome:");
+            foreach (KeyValuePair<int, (long Flat, long Normal)> kv in System.Linq.Enumerable.OrderBy(_rawSplitStats, x => x.Key))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      {kv.Key,5}+: flat {kv.Value.Flat,6} normal {kv.Value.Normal,6} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            sb.Append("\n  BARRIERS DROPPED (no draw yet in the pass) per frame (bucketed by 25), by outcome:");
+            foreach (KeyValuePair<int, (long Flat, long Normal)> kv in System.Linq.Enumerable.OrderBy(_barrierSkipStats, x => x.Key))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      {kv.Key,5}+: flat {kv.Value.Flat,6} normal {kv.Value.Normal,6} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
+            sb.Append($"\n  {_stageLabel} DRAWS PER FRAME into the traced target, by outcome:");
+            foreach (KeyValuePair<int, (long Flat, long Normal)> kv in System.Linq.Enumerable.OrderBy(_stageDrawCountStats, x => x.Key))
+            {
+                long tot = kv.Value.Flat + kv.Value.Normal;
+                sb.Append($"\n      {kv.Key,4} draws: flat {kv.Value.Flat,6} normal {kv.Value.Normal,6} ({(tot > 0 ? 100.0 * kv.Value.Flat / tot : 0):F1}% white)");
+            }
             sb.Append("\n  stage draw BLEND state by outcome:");
             foreach (KeyValuePair<string, (long Flat, long Normal)> kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_stageBlendStats, x => x.Value.Flat + x.Value.Normal), 6))
             {
@@ -916,13 +938,17 @@ namespace Ryujinx.Graphics.Metal
         // proportional to a vertex attribute - the one input never measured.
         private static readonly Dictionary<string, CbStat> _vtxStats = new();
         private const int VtxFloats = 24;
-        private static readonly float[,] _vtxCpu = new float[StageSlots, VtxFloats];
+        private static readonly float[,,] _vtxCpuN = new float[StageSlots, 4, VtxFloats];
+        private static readonly bool[,] _vtxSeen = new bool[StageSlots, 4];
+        private static readonly int[,] _vtxStride = new int[StageSlots, 4];
         private static readonly int[] _vtxCount = new int[StageSlots];
         private static readonly string[] _vtxDesc = new string[StageSlots];
 
+        private const int VtxBufs = 4;
+
         public static unsafe void NoteStageVertexBuffer(int index, MTLBuffer buf, int offset, int stride)
         {
-            if (!Enabled || !_stageCollect || index != 1 || buf.NativePtr == IntPtr.Zero)
+            if (!Enabled || !_stageCollect || buf.NativePtr == IntPtr.Zero || (uint)index >= VtxBufs)
             {
                 return;
             }
@@ -932,9 +958,10 @@ namespace Ryujinx.Graphics.Metal
             if (c == IntPtr.Zero) { return; }
 
             float* f = (float*)((byte*)c + offset);
-            for (int i = 0; i < VtxFloats; i++) { _vtxCpu[j, i] = f[i]; }
+            for (int i = 0; i < VtxFloats; i++) { _vtxCpuN[j, index, i] = f[i]; }
+            _vtxSeen[j, index] = true;
+            _vtxStride[j, index] = stride;
             _vtxCount[j] = VtxFloats;
-            _vtxDesc[j] = $"vb1 off{offset} stride{stride}";
         }
 
         private static void ClassifyStageVertex(long presentedFrame, bool flat)
@@ -943,14 +970,18 @@ namespace Ryujinx.Graphics.Metal
             for (int j = 0; j < StageSlots; j++)
             {
                 if (_stageFrame[j] != want || _vtxCount[j] == 0) { continue; }
-                for (int i = 0; i < _vtxCount[j]; i++)
+                for (int b = 0; b < VtxBufs; b++)
                 {
-                    string key = $"vb1[{i:D2}]";
-                    CbStat v = _vtxStats.TryGetValue(key, out CbStat e) ? e : new CbStat { FMin = double.MaxValue, FMax = double.MinValue, NMin = double.MaxValue, NMax = double.MinValue };
-                    double d = _vtxCpu[j, i];
-                    if (flat) { v.Flat++; v.FMin = Math.Min(v.FMin, d); v.FMax = Math.Max(v.FMax, d); }
-                    else { v.Normal++; v.NMin = Math.Min(v.NMin, d); v.NMax = Math.Max(v.NMax, d); }
-                    _vtxStats[key] = v;
+                    if (!_vtxSeen[j, b]) { continue; }
+                    for (int i = 0; i < _vtxCount[j]; i++)
+                    {
+                        string key = $"vb{b}s{_vtxStride[j, b]}[{i:D2}]";
+                        CbStat v = _vtxStats.TryGetValue(key, out CbStat e) ? e : new CbStat { FMin = double.MaxValue, FMax = double.MinValue, NMin = double.MaxValue, NMax = double.MinValue };
+                        double d = _vtxCpuN[j, b, i];
+                        if (flat) { v.Flat++; v.FMin = Math.Min(v.FMin, d); v.FMax = Math.Max(v.FMax, d); }
+                        else { v.Normal++; v.NMin = Math.Min(v.NMin, d); v.NMax = Math.Max(v.NMax, d); }
+                        _vtxStats[key] = v;
+                    }
                 }
                 return;
             }
@@ -960,7 +991,7 @@ namespace Ryujinx.Graphics.Metal
         {
             if (_vtxStats.Count == 0) { return ""; }
             StringBuilder sb = new();
-            sb.Append("\n  stage draw VERTEX BUFFER 1 (attr1 source) by outcome:");
+            sb.Append("\n  stage draw VERTEX BUFFERS (vb<index>s<stride>) by outcome:");
             foreach (KeyValuePair<string, CbStat> kv in System.Linq.Enumerable.OrderBy(_vtxStats, x => x.Key))
             {
                 CbStat v = kv.Value;
@@ -1146,6 +1177,31 @@ namespace Ryujinx.Graphics.Metal
         // Only the draw of the labelled program that targets the composite's input storage
         // (the same program label is reused by the game for many small targets), and only
         // its bindings are collected.
+        // Additive blending accumulates: if this draw is issued more times on a white frame,
+        // the buffer is brighter by exactly that factor. Counted per frame, tallied by
+        // outcome - the multiplier is a continuum from 1.1x to 126x, which is what a varying
+        // repeat count would look like.
+        private static int _frameStageDrawCount;
+        private static readonly Dictionary<int, (long Flat, long Normal)> _stageDrawCountStats = new();
+
+        // Per frame: read-after-write splits actually taken, guest barriers requested, and
+        // barriers dropped because no draw had been encoded in the pass yet. If a white frame
+        // runs the post chain with fewer splits, its stages read each other's output inside
+        // one render pass - undefined on a tiler, and exactly the profile of a continuum of
+        // wrong multipliers.
+        private static int _frameRawSplits, _frameBarrierReq, _frameBarrierSkipped;
+        private static readonly Dictionary<int, (long Flat, long Normal)> _rawSplitStats = new();
+        private static readonly Dictionary<int, (long Flat, long Normal)> _barrierSkipStats = new();
+
+        public static void NoteRawSplit() { if (Enabled) { _frameRawSplits++; } }
+        public static void NoteBarrierRequested() { if (Enabled) { _frameBarrierReq++; } }
+        public static void NoteBarrierSkipped() { if (Enabled) { _frameBarrierSkipped++; } }
+
+        public static void NoteStageDrawIssued()
+        {
+            if (Enabled) { _frameStageDrawCount++; }
+        }
+
         public static void ArmStageDump(Texture[] renderTargets)
         {
             if (!Enabled || _stageLabel.Length == 0 || renderTargets == null)
@@ -1171,6 +1227,10 @@ namespace Ryujinx.Graphics.Metal
             // dumps were photographing the last.
             if (output != null && _stageArmedFrame != _frame)
             {
+                // Trace exactly the texture this program writes, by identity. Matching by
+                // size took the first matching attachment of each pass, which was a different
+                // texture in another MRT slot - it never went bright, while this one did.
+                _traceTexture = output;
                 _stageArmedFrame = _frame;
                 _stageOutput = output;
                 _stageArmed = true;
@@ -1243,6 +1303,7 @@ namespace Ryujinx.Graphics.Metal
                         new MTLSize { width = (ulong)_stageOutput.Width, height = (ulong)_stageOutput.Height, depth = 1 },
                         _stageOut[j], 0, (ulong)(_stageOutput.Width * bpp), (ulong)bytes);
                     _stageOutBytes[j] = bytes;
+                    _stageOutPtr[j] = _stageOutput.CanonicalPtr;
                     _stageOutDesc[j] = $"{_stageOutput.Width}x{_stageOutput.Height}_fmt{(int)_stageOutput.MtlFormat}";
                 }
             }
@@ -1322,7 +1383,7 @@ namespace Ryujinx.Graphics.Metal
                         fi.Write(new ReadOnlySpan<byte>((void*)_stageIn[j, k].Contents, _stageInBytes[j, k]));
                     }
                     if (flat) { _stageDumpsWritten++; } else { _stageDumpsNormal++; }
-                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage {_stageLabel} dumps written for {tag} frame {presentedFrame} (stage frame {want})");
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"uploadcorr: stage {_stageLabel} dumps written for {tag} frame {presentedFrame} (stage frame {want}) out=@{(_stageOutPtr[j].ToInt64() & 0xFFFFFF):X6} traceTex=@{((_traceTexture?.CanonicalPtr ?? IntPtr.Zero).ToInt64() & 0xFFFFFF):X6}");
                 }
                 catch (Exception e)
                 {
@@ -1344,7 +1405,7 @@ namespace Ryujinx.Graphics.Metal
         // white frame prints the exact pass boundary at which that texture first reads white.
         // RYUJINX_METAL_PASS_TRACE=1 (needs RYUJINX_METAL_STAGE_LABEL so the input is known).
         private static readonly bool _passTrace = Environment.GetEnvironmentVariable("RYUJINX_METAL_PASS_TRACE") == "1";
-        private const int TracePasses = 320, TraceTexels = 25;  // ring: the LAST 320 pass ends of the period
+        private const int TracePasses = 384, TraceTexels = 9;   // 3x3 spread; 268 passes/frame touch the buffer once all MRT slots are scanned
         // A dedicated 16-period ring, each entry stamped with its frame: the old code read
         // slot (index-1) of the 8-slot sample ring, which a later frame had already reused by
         // the time classification ran - that is why a normal frame's trace came back with 2
@@ -1378,9 +1439,17 @@ namespace Ryujinx.Graphics.Metal
             _frameDrawsInPass++;
             // Every draw of the pass, not only the last: "last=2b36a7 draws=5" named one of
             // five programs and the jump could belong to any of them.
-            if (_frameDrawLabels.Length < 90) { _frameDrawLabels.Append(_frameDrawLabels.Length > 0 ? ">" : "").Append(label ?? "-"); }
+            // Deduplicate runs (a pass can carry 500 draws of the same program) and cap high
+            // enough that the interesting label is not truncated away.
+            string lb = label ?? "-";
+            if (_frameDrawLabels.Length < 300 && lb != _frameLastAppendedLabel)
+            {
+                _frameDrawLabels.Append(_frameDrawLabels.Length > 0 ? ">" : "").Append(lb);
+                _frameLastAppendedLabel = lb;
+            }
         }
         private static readonly StringBuilder _frameDrawLabels = new();
+        private static string _frameLastAppendedLabel;
         public static string LastPassLastLabel => _frameLastDrawLabel;
         public static int LastPassDraws => _frameDrawsInPass;
 
@@ -1389,6 +1458,8 @@ namespace Ryujinx.Graphics.Metal
         {
             // Any MRT slot, not only slot 0. The traced buffer sits in a non-zero slot for
             // part of the post chain, so every pass that wrote it that way was invisible.
+            // Match by SIZE, not by identity: the traced dimensions are shared by more than
+            // one texture and pinning to one object hid the other's writes entirely.
             Texture t = null;
             if (rts != null)
             {
@@ -1398,6 +1469,10 @@ namespace Ryujinx.Graphics.Metal
                     {
                         if (rt != null && rt.CanonicalPtr == _traceTexture.CanonicalPtr) { t = rt; break; }
                     }
+
+                    // Only that texture: a pass that does not carry it is not interesting and
+                    // sampling some other attachment produced the "it never goes bright" lie.
+                    if (t == null) { return; }
                 }
 
                 if (t == null)
@@ -1439,10 +1514,25 @@ namespace Ryujinx.Graphics.Metal
             // A GridSide x GridSide grid, same layout as the other probes. The old code
             // filled five entries while TraceTexels grew to 25, so twenty coordinates were
             // uninitialised stack.
+            // A GridSide x GridSide grid only when there are GridSide^2 texels; with five the
+            // grid formula put every point on the same row (i / GridSide == 0), so the trace
+            // was reading a single horizontal band near the top and reported 1.03 for a
+            // surface whose whole-surface mean was 50-180.
             Span<(int X, int Y)> pts = stackalloc (int X, int Y)[TraceTexels];
-            for (int i = 0; i < TraceTexels; i++)
+            if (TraceTexels == GridSide * GridSide)
             {
-                pts[i] = (w * (i % GridSide + 1) / (GridSide + 1), h * (i / GridSide + 1) / (GridSide + 1));
+                for (int i = 0; i < TraceTexels; i++)
+                {
+                    pts[i] = (w * (i % GridSide + 1) / (GridSide + 1), h * (i / GridSide + 1) / (GridSide + 1));
+                }
+            }
+            else
+            {
+                for (int i = 0; i < TraceTexels; i++)
+                {
+                    int side = (int)Math.Ceiling(Math.Sqrt(TraceTexels));
+                    pts[i] = (w * (i % side + 1) / (side + 1), h * (i / side + 1) / (side + 1));
+                }
             }
             for (int i = 0; i < TraceTexels; i++)
             {
@@ -1450,8 +1540,11 @@ namespace Ryujinx.Graphics.Metal
                     new MTLSize { width = 1, height = 1, depth = 1 },
                     _buf, (ulong)(TraceBase + ((idx * TracePasses + n) * TraceTexels + i) * 4), 4, 4);
             }
-            _traceDesc[idx, n] = $"{w}x{h}:{(t.MtlFormat == MTLPixelFormat.RGBA16Float ? "16F" : "11B10")} {passDesc} draws={_frameDrawsInPass} [{_frameDrawLabels}]";
+            // The storage pointer, low 6 hex digits: several textures share these dimensions
+            // and the trace was following one of them while another went bright.
+            _traceDesc[idx, n] = $"{w}x{h}@{(t.CanonicalPtr.ToInt64() & 0xFFFFFF):X6}:{(t.MtlFormat == MTLPixelFormat.RGBA16Float ? "16F" : "11B10")} {passDesc} draws={_frameDrawsInPass} [{_frameDrawLabels}]";
             _frameDrawLabels.Clear();
+            _frameLastAppendedLabel = null;
             _traceFmt[idx, n] = t.MtlFormat;
             _traceCount[idx]++;
             _frameDrawsInPass = 0;
@@ -2515,6 +2608,13 @@ namespace Ryujinx.Graphics.Metal
                 _frameStageInputWriters = "-";
                 mine.StageBlend = _frameStageBlend;
                 _frameStageBlend = "-";
+                mine.StageDrawCount = _frameStageDrawCount;
+                _frameStageDrawCount = 0;
+                mine.RawSplits = _frameRawSplits;
+                mine.BarrierSkipped = _frameBarrierSkipped;
+                _frameRawSplits = 0;
+                _frameBarrierReq = 0;
+                _frameBarrierSkipped = 0;
                 mine.StageInputLastWriters = _frameStageInputLastWriters;
                 _frameStageInputLastWriters = "-";
                 mine.StageInputId = _frameStageInputId;
@@ -3363,6 +3463,21 @@ namespace Ryujinx.Graphics.Metal
                 string slk = slot.StageInputLastWriters ?? "-";
                 (long Flat, long Normal) slv = _stageInputLastWriterStats.TryGetValue(slk, out (long Flat, long Normal) sle) ? sle : (0, 0);
                 _stageInputLastWriterStats[slk] = flat ? (slv.Flat + 1, slv.Normal) : (slv.Flat, slv.Normal + 1);
+            }
+
+            {
+                int rs = slot.RawSplits / 25 * 25;   // bucketed
+                (long Flat, long Normal) rv = _rawSplitStats.TryGetValue(rs, out (long Flat, long Normal) re) ? re : (0, 0);
+                _rawSplitStats[rs] = flat ? (rv.Flat + 1, rv.Normal) : (rv.Flat, rv.Normal + 1);
+                int bs = slot.BarrierSkipped / 25 * 25;
+                (long Flat, long Normal) bv2 = _barrierSkipStats.TryGetValue(bs, out (long Flat, long Normal) be2) ? be2 : (0, 0);
+                _barrierSkipStats[bs] = flat ? (bv2.Flat + 1, bv2.Normal) : (bv2.Flat, bv2.Normal + 1);
+            }
+
+            {
+                int dc = slot.StageDrawCount;
+                (long Flat, long Normal) dv = _stageDrawCountStats.TryGetValue(dc, out (long Flat, long Normal) de) ? de : (0, 0);
+                _stageDrawCountStats[dc] = flat ? (dv.Flat + 1, dv.Normal) : (dv.Flat, dv.Normal + 1);
             }
 
             {
