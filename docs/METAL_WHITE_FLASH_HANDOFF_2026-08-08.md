@@ -6232,3 +6232,42 @@ dependency Metal genuinely cannot express is a fragment write followed by a frag
 end so "written" means "written by the current pass", which should keep the ordering Ultrahand
 needs while removing most of the splits. To be measured: frame rate with nobody playing, then
 Ultrahand with the setting fixed.
+
+### Clamping the flare is dead: it is a real light source
+
+With a valid literal, the clamp darkens the whole picture. `arm_valid.py` rejects both arms
+on their own luma:
+
+    clamp 16   normal luma 136   flat 9.04%   (gate OK)
+    clamp 4    normal luma  68   "a picture that went dark"
+    clamp 1    normal luma  68   same
+
+So the sprites carry a large part of the scene's legitimate light - the sun's glow - and
+`out.outAttr1.x = 0` removes it: the user's report of the picture looking dark against Vulkan
+is exactly that. A static threshold cannot separate the flash from the glow, because clamping
+low enough to catch the spike also cuts the daylight. Both the zero patch and the clamp are
+diagnostics, not fixes; what remains is to find why the intensity spikes on 22% of frames.
+
+### Performance: two narrowings, and the scene-variance trap
+
+    stationary, same save, nobody playing        passes/frame   fps        waits/frame
+    split on, scope=cb (the shipped behaviour)        617       16-22      42.3 ms
+    split on, scope=pass                              477-499   26.6       10.5 ms
+    split on, scope=pass + barriers hazard-only       252       30.0       3.15 ms
+    split off (breaks Ultrahand)                      228       30.0       0.1 ms
+
+The second narrowing skips a guest `TextureBarrier` whose bound textures were not written by
+the pass now running - a barrier that orders nothing. Together they reach the split-off pass
+count while keeping the ordering.
+
+**But none of these numbers survive a change of scene.** The same build in the view the drive
+happens to land in reported 1,018 passes and 8,964 draws a frame against 252 and 2,528 in
+another - a 3.5x difference in the guest's own workload, far larger than any of these
+settings. Frame rate must be compared inside one session with nobody at the controls, so
+`RAW_SPLIT_SCOPE` and `BARRIER_SCOPE` are now hot-switchable through
+`/tmp/ryujinx-metal-split-scope` and `/tmp/ryujinx-metal-barrier-scope` (v325), re-read once a
+frame like the split itself.
+
+Still open: a genuine SIGSEGV inside `drawIndexedPrimitives` after ~4 minutes of play (no
+shader compilation failures in that run), and the pan-time dips to 18 fps, which are neither
+waits nor pass count.

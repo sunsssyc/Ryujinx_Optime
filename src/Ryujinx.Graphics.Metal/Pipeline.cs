@@ -118,6 +118,24 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _dumpAllShaders = Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_SHADERS") == "1";
         private static readonly bool _drawTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_DRAW_TRACE") == "1";
         private static readonly bool _passTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_PASS_TRACE") == "1";
+        // /tmp/ryujinx-metal-barrier-scope holds "hazard" or "all", re-read once a frame.
+        private static bool _barrierHazardOnly =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") == "hazard";
+        private static readonly bool _barrierHazardDefault = _barrierHazardOnly;
+
+        private static void RefreshBarrierScope()
+        {
+            try
+            {
+                _barrierHazardOnly = System.IO.File.Exists("/tmp/ryujinx-metal-barrier-scope")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-barrier-scope").Trim() == "hazard"
+                    : _barrierHazardDefault;
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; the next frame picks it up.
+            }
+        }
         private static readonly string _stageLabel = Environment.GetEnvironmentVariable("RYUJINX_METAL_STAGE_LABEL") ?? "";
         // The program whose input is read by the compute engine right before its pass, at the
         // read-after-write split point (UploadCorrelator.PreCompositeProbe). Default: the
@@ -1034,6 +1052,8 @@ namespace Ryujinx.Graphics.Metal
             RefreshSkipDraws();
             RefreshSkipProgram();
             RefreshRawSplit();
+            RefreshBarrierScope();
+            EncoderStateManager.RefreshSplitScope();
             RefreshRawFence();
             _passIndexInFrame = 0;
             RefreshBarrierToggle();
@@ -2715,6 +2735,20 @@ namespace Ryujinx.Graphics.Metal
             // for it to order - and splitting anyway costs a full attachment store
             // and reload. The guest issues these in the hundreds per frame.
             if (!_strictBarrier && DrawCount == _drawCountAtPassStart)
+            {
+                _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
+                UploadCorrelator.NoteBarrierSkipped();
+
+                return;
+            }
+
+            // A barrier that orders nothing can be skipped. The guest issues these in the
+            // hundreds per frame; ending the pass for one whose bound textures were not
+            // written by the pass now running costs a full attachment store and reload and
+            // orders a dependency that does not exist. RYUJINX_METAL_BARRIER_SCOPE=hazard,
+            // and only meaningful together with RAW_SPLIT_SCOPE=pass, which makes the write
+            // set per pass rather than per command buffer.
+            if (_barrierHazardOnly && !_encoderStateManager.SamplesEarlierWrite())
             {
                 _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
                 UploadCorrelator.NoteBarrierSkipped();

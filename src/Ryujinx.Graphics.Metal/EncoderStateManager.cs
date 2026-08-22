@@ -2275,8 +2275,28 @@ namespace Ryujinx.Graphics.Metal
         //        genuinely cannot express - a fragment write followed by a fragment read
         //        inside one encoder - and it is what Ultrahand's readback needs ordered.
         // RYUJINX_METAL_RAW_SPLIT_SCOPE=pass to narrow it.
-        public static readonly bool SplitScopePass =
+        // Hot-switchable like the split itself: /tmp/ryujinx-metal-split-scope holds "pass"
+        // or "cb", re-read once a frame. Static env vars cannot be A/B'd inside one session,
+        // and cross-session comparison on this machine is worthless - the scene varies more
+        // than the setting does (8,964 draws a frame in one view against 2,528 in another).
+        private static bool _splitScopePass =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT_SCOPE") == "pass";
+        private static readonly bool _splitScopeDefault = _splitScopePass;
+        public static bool SplitScopePass => _splitScopePass;
+
+        public static void RefreshSplitScope()
+        {
+            try
+            {
+                _splitScopePass = File.Exists("/tmp/ryujinx-metal-split-scope")
+                    ? File.ReadAllText("/tmp/ryujinx-metal-split-scope").Trim() == "pass"
+                    : _splitScopeDefault;
+            }
+            catch (IOException)
+            {
+                // Raced with the writer; the next frame picks it up.
+            }
+        }
 
         public readonly void ClearWrittenThisPass()
         {
