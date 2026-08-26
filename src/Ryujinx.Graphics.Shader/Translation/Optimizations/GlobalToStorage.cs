@@ -478,7 +478,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 }
             }
 
-            bool returnsValue = operation.Dest != null;
+            // A guest reduction (RED) discards the atomic's result: the decoded
+            // operation still carries a destination local, but nothing uses it.
+            // Treat it like the no-destination case so we don't emit a copy of
+            // the helper's return value that is dead on arrival.
+            bool returnsValue = operation.Dest != null &&
+                !(operation.Dest.Type == OperandType.LocalVariable && operation.Dest.UseOps.Count == 0);
             Operand returnValue = returnsValue ? Local() : null;
 
             Operation callOp = new(Instruction.Call, returnValue, sources);
