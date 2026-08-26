@@ -14,11 +14,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 XmadOptimizer.RunPass(context.Blocks[blkIndex]);
             }
 
+            IrDump.Dump("after-bindless-and-d2f", context.Blocks);
+
             RunOptimizationPasses(context.Blocks, context.ResourceManager);
 
             // TODO: Some of those are not optimizations and shouldn't be here.
 
             GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage);
+            IrDump.Dump("after-global-to-storage", context.Blocks);
 
             bool hostSupportsShaderFloat64 = context.GpuAccessor.QueryHostSupportsShaderFloat64();
 
@@ -127,6 +130,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         modified = true;
                     }
                 }
+                IrDump.Dump("dce-iteration", blocks);
             }
             while (modified);
         }
@@ -384,7 +388,18 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     if (src.UseOps.Remove(node) && src.UseOps.Count == 0)
                     {
                         Debug.Assert(src.AsgOp != null);
-                        nodes.Enqueue(src.AsgOp);
+
+                        // Only follow into a producer that will itself be removed. An
+                        // operation with side effects (a call, an atomic) stays in the
+                        // block even when its result is unused, so its sources are still
+                        // live: stripping their use lists here made the next pass delete
+                        // the whole chain feeding a global-memory atomic turned into a
+                        // helper call, which then read an uninitialised value (TOTK's
+                        // sun-visibility kernel, RED.MIN of a wave-reduced texel).
+                        if (!HasSideEffects(src.AsgOp))
+                        {
+                            nodes.Enqueue(src.AsgOp);
+                        }
                     }
                 }
             }
