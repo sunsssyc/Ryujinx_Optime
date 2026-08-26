@@ -6333,3 +6333,435 @@ application held focus), and gameplay is detected from the player position in th
 play report rather than from a Metal-only log line or the `Dm_OP_0038` event, which also fires
 on the title screen. GUI arms cannot run at all while the screen is locked: Avalonia fails to
 start its render timer with error -6661.
+
+## 2026-08-23: the discriminator is the flare's occlusion count, read on the GPU
+
+Two GPU-side dumps written by the flare shaders themselves (no pass boundary, no CPU-side
+guessing): `RYUJINX_METAL_FLARE_CONST` bit 16 makes the flare *vertex* shaders append
+{position, vertex_id, intensity, c3[1..3], attr0, attr1} per vertex to a ring at vertex buffer
+index 30; bit 32 makes the flare *fragment* shaders append {pixel, intensity, sampled texel,
+fp_c3[0], output} for one fragment in 1024 (a 32x32 lattice) to the same buffer at fragment
+index 30. `UploadCorrelator.ClassifyVsDump/ClassifyFsDump` attribute the records appended
+since the previous classification to that presented frame's outcome and log the windows
+around every white frame (`vsd f…` / `fsd f…` lines). Gated arm on the Great Sky Island
+save (v331, 12,599 frames, 21.05% white, `/tmp/fsd_gsi.log`):
+
+- **Geometry is identical.** 198 vertices per frame, max|pos| 2.19 (the bottom sprite,
+  half off-screen) on white and normal windows alike, constants c3[1..3] and the static
+  octagon attributes identical. No giant quad exists - the "coverage" hypothesis of the
+  previous section is dead.
+- **Per-fragment output is identical.** Covered area (cells/window) white 1464 vs normal
+  1254; max additive contribution 165 vs 167; max fp_c3[0] 1.03e4 vs 1.11e4; sampled texel
+  max 1 on both. The sun-glare veil is a full-screen sprite on normal frames too.
+- **What differs is the intensity I on that veil**, which is the vertex shader's
+  `exposure * count * c3[6].z * c3[2].w`: the vertex dump's max I per window is **0 on
+  almost every frame and 26-40 on the frames adjacent to each white frame** (f1740 27.7,
+  f1746 26.4, f1754 34.3, f1758 40.5, f1784 7.0, f1788 34.3 against whites f1739, f1746,
+  f1753, f1760, f1783, f1789 - the window attribution is one frame loose). The fragment
+  side confirms it: those windows carry 5,000-9,600 cells at alpha 475-730 = 18 x I and
+  contribution 68-104 per pixel, which is the whole-screen field the stage dumps showed.
+  I = 27-40 is count ≈ 28,000-43,000; I = 0 is count 0.
+- **The count is not Ryujinx's hardware query.** `RYUJINX_METAL_DISABLE_SAMPLES_PASSED=1`
+  (compat result = 1 sample) still flashed at 23.4% (`/tmp/nsp1.log`, "compatibility result"
+  logged). The game computes sun visibility itself: the only texture the background readback
+  path ever carries is the **260x260 R8G8Unorm** probe, every frame (the ledger logged it on
+  08-1x and wrote it off as "not the composite's input" - it is the composite's input by way
+  of the CPU). The game counts its visible texels and feeds the count to the flare vertex
+  shader through vp_s0. A white frame is a frame on which that readback returned the probe
+  in its cleared ("all visible") state, before the occluders were drawn over it.
+
+So the fault is in how the Metal backend times a guest readback against the GPU work that
+produces the texture - the same family as the gloom-damage bug (a GPU-produced value the
+CPU reads back wrong), which is what the user predicted. Candidate under test: Metal's
+`SyncManager` marks every handle of the same flush epoch signalled when one of them is
+waited (`MarkCoveredHandlesSignalled`, "coalesced signals", ~1,900 per 120 frames); the
+Vulkan backend never does this. `RYUJINX_METAL_SYNC_STRICT=1` disables it, `=2` also
+attaches new handles to already-committed command buffers.
+
+Harness facts from today (each cost a run): the game's save-list cursor defaults to the
+newest autosave, and the arms themselves create autosaves, so `SAVE_INDEX=0` drifted onto
+"Bridge of Hylia" (position Y 145) instead of Great Sky Island (Y 1482.8); `drive_in.sh`
+now presses down 12x (the list does not wrap at the bottom) and verifies the loaded save by
+player position, aborting the arm (exit 2, `VOID wrong save`) otherwise. A single
+screenshot of a flashing build is a coin toss - `shot_backend.sh` now takes eight and
+`shot_luma.py` reports the non-white median. With that, the brightness gap is measured:
+Great Sky Island at the save's clock, rollback ab451955 **164.5** (±0.6) vs current **121.5**
+(±0.3) sRGB luma; `MASK_UNWRITTEN=0` 120.8 (excluded). The rest of the sweep (mirrors,
+state cache, split, colour-mask pass end, codegen toggles in v328 via
+`RYUJINX_MSL_FETCH_OFFSET=0` / `RYUJINX_MSL_WRAP_INT=0` with `RYUJINX_CODEGEN_SALT`) is not
+yet run. `RYUJINX_METAL_FORCE_DEFERRED=1` (never write a buffer directly while a command
+buffer is in play) crashes at boot (SIGSEGV, 47 s) - the arm is void.
+
+Result: `RYUJINX_METAL_SYNC_STRICT=1` (no coalesced signals - "0 coalesced signals" in the
+stats) **19.7% white** (`/tmp/sync1.log`, 3,599 frames classified; the gate voided it on
+luma 101 but the rate is the baseline). The coalescing shortcut is not the hole. Next
+instrument: `UploadCorrelator.NoteProbeReadback` summarises every readback of the 260x260
+R8G8 probe (mean/0/255 fractions per channel, raw dumps to `/tmp/probe_*.raw`) and
+`ClassifyProbeReadback` attributes the most recent readbacks to each presented frame's
+outcome (`probe260:` line, `prb f…` lines).
+
+Correction (v333, `/tmp/probe2.log`): the 260x260 R8G8 probe (9 mip levels) is read back by
+the guest only **every ~10 frames** (rb@f1752, f1753, f1763, f1772 …), and its content does
+not differ before white frames (mean R 126.3 vs 126.7, no 0/255 plateaus). The count the
+flare reads flips 0 ↔ ~30,000 between consecutive frames, so that CPU readback cannot be its
+source. What remains: Ryujinx's own SamplesPassed report (v334 logs every value the guest
+receives, `counters:` / `cnt f…` lines) or a GPU-side write; the counters-disabled arm is
+being repeated on this save (the 23.4% of `nsp1` was measured on the old repro save).
+
+### The count is fragment atomics, and the barrier that should order them orders nothing
+
+`/tmp/ryujinx-metal-shaders/2fb37dcfed4bcc4e-fragment.metal` is the sun-occlusion counter:
+every fragment that survives the depth test adds `popcount(simd_ballot(true))` into
+`fp_s0->data[(int(fp_c4[3].x * 255) << 5) >> 2]` - one 32-byte slot per light, the wave's
+highest lane doing the atomic. The flare vertex shader reads slot 0 (`vp_s0->data[0]`). On
+a tile-based GPU the vertex stages of a whole render pass run before any fragment work in
+that pass, so a vertex read of a value produced by fragment atomics earlier in the *same*
+pass sees the pre-pass value - 0, the game's reset - and only sees the real count when a
+pass boundary happens to fall between the probe draw and the flare draw. That is the white
+frame: count 28,000-43,000 ("sun fully visible") on the frames where the boundary fell
+there, 0 otherwise; which frames get the boundary depends on the backend's pass-splitting
+decisions of the moment, hence 22% (and 45% before the read-after-write split reshuffled
+them, 18% with a wait after every commit, unchanged by mirrors, state cache, hardware
+counters on or off, or the compat counter result).
+
+The guest orders the two with a barrier (GPFifo WFI -> `Pipeline.Barrier()`). The Metal
+backend's `Barrier()` in a render encoder issues `memoryBarrier(scope: buffers|textures,
+after: vertex, before: vertex|fragment)` - the fragment stage cannot be named in
+`afterStages` on Apple GPUs, so fragment writes are simply not ordered by it. Ryujinx's own
+SamplesPassed reports are not involved: v334 logged every value the guest received (5,180
+reports in the first 90 s, values in the hundreds, **0 of 432 white frames** preceded by a
+report above 1,000).
+
+Fix under test (v335, `RYUJINX_METAL_BARRIER_ENDS_PASS`): 1 = a guest barrier inside a
+render pass ends the pass; 2 = only when the pass has drawn with a fragment program that
+stores to a storage buffer (`Program.FragmentWritesStorage`, from the MSL). Ending the pass
+is the one construct on Apple GPUs that orders fragment writes before later vertex reads -
+the same reasoning `TextureBarrier` already applies to fragment-then-fragment.
+
+Result: `RYUJINX_METAL_BARRIER_ENDS_PASS=1` (every guest barrier inside a render pass ends the
+pass) **23.8% white** (`/tmp/bep1.log`, 4,799 frames) - the probe-to-flare ordering is not
+carried by `Pipeline.Barrier()`, or the two draws are not in one pass at all. v336 records
+the per-frame event sequence (pass begin with target size, pass end with reason, `B`/`TB`
+barriers, and the draws of interest: `Dw:` = a program whose fragment stage stores to a
+storage buffer, `D:` = the flare family) and logs it for white frames and their
+predecessors (`seq f…` lines).
+
+v337 sequences (`/tmp/seq1.log`, 10,799 frames, 22.9% white): the frame's event order around
+the atomic-counter draw `2fb37d` is **identical** on white and normal frames (`… P-Counter
+Dw:51d9fc x3 … b b P+80x44 P-RT P+none P-F Dw:2fb37d P+80x44 TB Dw:2b3843 …`), and that
+draw renders into an **80x44** target - 3,520 pixels, which cannot yield the 28,000-43,000
+the flare reads. So `2fb37d` is not the sun probe, the same-pass TBDR reading was wrong, and
+the writer of `vp_s0->data[0]` is still unidentified. v338 traces it directly: the flare
+draw reports the buffer/offset it reads and the CPU-visible count there (`D:flare cnt=N`),
+and every writable storage binding, SetData, FillBuffer and CopyBuffer overlapping that slot
+is logged in the same sequence (`W:label@off/size`, `SD@…`, `FILL@…`, `COPY@…`).
+
+v338 (`/tmp/wr1.log`): at the moment the flare draw is encoded, the CPU-visible value of
+`vp_s0->data[0]` is **0 on every normal frame and 51153 / 57290 / 3324 / 1000 on the white
+frames** (`D:flare cnt=…`), already in the buffer before the draw. The `Dw:` labels of v337
+were meaningless (the regex matched the `RyujinxAtomicCompareExchange` helper every shader
+carries); the real storage writers in the dump are two vertex shaders - `7afd8ea6` (atomic
+add into vp_s1) and **`9af99ec9`**: a dummy point draw in the 80x44 pass, once a frame, right
+after the per-light occlusion draws `2fb37d` (atomic fragment counts into 32-byte per-light
+slots) and `2b3843` (samples the 80x44 target, writes slot words 0/4/5); its vertex shader
+samples one texel of `tcb_8` at `vp_c3[0].xy` and stores the four channels' raw bits into
+`vp_s0->data[vertex_id*8 + 0..3]` - the slot the flare reads. So the flare's "count" is the
+R channel of that texel, bit-cast; 51153 as float is a denormal, so that texture is an
+integer format sampled through `texture2d<float>`. On normal frames the texel is 0. Next:
+stage dumps of `9af99e`'s inputs (STAGE_LABEL=9af99e, STAGE_RT=80x44) on white vs normal.
+
+### The missing line: the depth attachment is not in the read-after-write write set
+
+v339's stage-mismatch detector found **0** texture slots consumed by a stage other than the
+one they were set for, so the binding path is sound. v340 polled the CPU-visible value of the
+flare's count slot at every draw: it changes exactly once per frame, right after the frame's
+final flush (`… P+1920x1080 P-F CNT->14400`), i.e. when the GPU's work for that frame lands;
+the values alternate - 14400, 0, 30048, 0, 42036, 0 - and **the white frame is the one after
+a nonzero value**: its flare reads the previous frame's count. The count itself is the game's
+sun-visibility result: `e650ba` (8 taps of the scene depth around the projected sun, each
+linearised and compared against the sun's depth, weights summed) writes it as an RGBA8 texel
+(R,G,0,0) into the 8x1 per-light target, `9af99e` copies that texel's raw 32 bits into the
+flare's storage slot (hence 51153 = 0x0000C7D1 = (R 209, G 199)), and the flare multiplies
+its veil by it. So on 22% of frames the depth taps say "unoccluded".
+
+The code: `CreateRenderCommandEncoder` calls `NoteAttachmentWritten(tex.CanonicalPtr)` for
+every **colour** attachment and never for the depth/stencil attachment. The read-after-write
+split (`EarlierWrittenSampledTexture`, and `SamplesEarlierWrite` behind the hazard-only
+TextureBarrier) therefore never fires for a draw that samples the depth buffer the open pass
+is writing; on a tile-based GPU that sample reads whatever the texture last stored - a pass
+boundary earlier in the frame, before the occluders were drawn, or the clear - and the sun
+is "visible". Which frames get a fresh store depends on the other pass splits of the moment,
+which is why every pass-structure knob moved the rate (45% → 22% with the split, 18% with
+a wait per commit) and nothing else did. Vulkan's backend detects a sampled attachment and
+ends its render pass regardless of attachment type. Fix (v341): add the depth/stencil
+attachment's canonical pointer to the write set when the pass is created
+(`RYUJINX_METAL_DEPTH_RAW=0` restores the old behaviour).
+
+Result (v341, `/tmp/fix1.log`): with the depth attachment in the write set the pass count
+goes 566 → 1,025-1,669 per frame (every depth-sampling post draw now splits), the
+classifier only reached 2,999 frames in six minutes, and the white rate was still **14.1%**
+(422/2,999). Not the fix; the knob is now opt-in (`RYUJINX_METAL_DEPTH_RAW=1`). So
+`e650ba`'s taps are not reading the live depth attachment through an unsplit pass - what it
+actually samples is being dumped (STAGE_LABEL=e650ba, STAGE_RT=8x1).
+
+### What the visibility pass really reads, and where the order breaks
+
+e650ba's input is the **1600x896 Depth32Float scene depth** (#378, sampler mip2 lod[0,15]) and
+its 8x1 output is **RGBA32Float**; dumped on four white and two normal frames the depth is
+**identical** (mean 0.9095, 21.7% == 1.0, same 8x8 grid) and light 0's texel is
+**(1.0, 1.015, 0, 1) on every frame** - it is the exposure pair the flare samples, not a count.
+So e650ba is not the producer, and the depth it reads is not stale. What the v340 poller
+shows is the per-frame final value of the count slot alternating between an accumulated sum
+and 0; the writers of that slot are `2fb37d` (fragment atomics into word 0) and `2b3843`
+(fragment stores/atomics) in the first 80x44 passes, and `9af99e` (a **vertex-stage** store of
+a texel's raw bits - 0 here) three passes later. In guest order the vertex store is last, so
+the final value is 0 and the flare never glows (Vulkan). On ~22% of frames the fragment
+atomics land *after* the vertex store, or the vertex store is lost: the accumulated sum
+survives, the flare multiplies by it, white. Apple GPUs overlap a render encoder's vertex
+stage with the previous encoder's fragment stage unless a dependency holds it; the ledger's
+`RAW_FENCE` experiment fenced fragment → *fragment* only (waitForFence before the fragment
+stage), which cannot hold a vertex-stage store. v342 adds `RYUJINX_METAL_ENCODER_FENCE=1`:
+updateFence after every render encoder's fragment stage, waitForFence **before the next
+encoder's vertex stage**.
+
+Result (v342, `/tmp/encf1.log`): `RYUJINX_METAL_ENCODER_FENCE=1` (update after every render
+encoder's fragment stage, wait before the next encoder's vertex stage) **21.7% white**
+(1,822/8,399), 534 passes/frame. Cross-encoder vertex/fragment overlap is not it either. No
+pipeline-state failures and no skipped draws in any of today's runs, so the reset store is
+issued. v343 logs every storage binding that overlaps the flare's slot (render and compute,
+read or write, with stage letters) into the per-frame sequence, to name the writers by
+elimination instead of by the Write flag.
+
+v343 (`/tmp/sb1.log`, 25.8% white): the only storage bindings that overlap the flare's count
+slot are **readers** - the flare family's vertex stages (`2b36a7v`, `4e8cadv`, `1997e8v`,
+offset 0 size 64) and `2398cb`'s vertex stage. Neither `2fb37d`, `2b3843` nor `9af99e` binds
+that range: their per-light slots are a different buffer, and the chain guessed from the slot
+layout was wrong. No SetData, FillBuffer or CopyBuffer touches it either. The writer is
+therefore a texture-to-buffer copy or a compute dispatch; v344 hooks `Texture.CopyTo(BufferRange)`
+(`T2B:WxH/fmt`) and the compute storage bindings (`C:label`).
+
+v344 (`/tmp/t2b1.log`, 23.5% white): the count slot's **writers are two compute dispatches**,
+`ae434b` (after the 100x56 passes, before the 200x112 ones) and `1f6a89` (after the 800x448
+passes, ~80 events before the flare draws), each binding the slot [0,64) for write once a
+frame; no texture-to-buffer copy touches it. The CPU-visible count at the flare draw is
+nonzero exactly on the white frames (29223, 45091, 17519). So the game computes the sun's
+visibility on the GPU in compute, and on Metal the kernel's result is nonzero on ~22% of
+frames. v345 dumps both kernels' sources (`RYUJINX_METAL_DUMP_SHADERS=1` now covers
+dispatches) and logs their bound textures/images (`CT:`/`CI:` events) per frame.
+
+### The kernel that writes the count is mistranslated: its operand is never computed
+
+`RYUJINX_METAL_DUMP_SHADERS=1` now dumps dispatches too. `ae434b8ef71075bb-compute.metal`
+is a 1x1x1 reset: `cp_s0->data[0] = 0x3E8 (1000)`, words 1-3 = 0 (the "cnt=1000" frames).
+`1f6a8975d7a6ae8a-compute.metal` is the sun-visibility kernel: by its guest-instruction
+comments it queries the texture size (Txq), computes a texel coordinate from the thread ids,
+fetches (Tlds), converts, and reduces across the wave with five Shfl/Imnmx pairs before a
+`Red` atomic min into the slot. The MSL contains **none of that**: the main function declares
+`float temp_5; bool temp_6; int temp_7; int temp_8;`, sets `temp_6 = (lane == 0)` and calls
+`AtomicMinS32_c0o196(…, 0, temp_7)` with `temp_7` **never assigned**. The whole fetch-and-
+reduce chain is absent from the structured IR, so the value written to the slot is whatever
+the register happened to hold: 0 on most frames, 29223 / 45091 / 17519 / 51153 on the rest -
+the white frames. This matches every earlier observation (mirrors, sync, fences, pass
+splits, hardware counters all irrelevant; the rate moved only with things that perturb GPU
+register reuse). Pending: the GLSL twin from `RYUJINX_SHADER_DIFF` - if it lacks the chain
+too, the bug is in the shared decoder/IR and Vulkan is only saved by SPIR-V undefined values
+reading as 0; if it has the chain, the MSL path drops it.
+
+### ROOT CAUSE: the shader translator's dead-code elimination strips the sources of a live call
+
+The GLSL twin (`RYUJINX_SHADER_DIFF`, forced by `RYUJINX_CODEGEN_SALT`) has the same hole as
+the MSL: `temp_7` undefined. So the bug is in the shared translator, not the Metal backend.
+`Ryujinx.ShaderTools` on the dumped guest binary (`/tmp/shaderdiff/5E127FA8FB325300-Compute.bin`,
+512 bytes) with a new `RYUJINX_IR_DUMP=1` (`Translation/IrDump.cs`, dumps at every pipeline
+point) shows:
+
+- decode and SSA: the chain is complete - `TextureQuerySize`, the thread-id coordinate math,
+  `TextureSample.i8` (Tlds), `F2I`, five `ShuffleXor`/`Minimum` pairs, `BranchIfFalse`,
+  and in block 1 `AtomicMinS32[GlobalMemory] … <- addrLo addrHi R7`;
+- after `GlobalToStorage`: the atomic becomes `Call AtomicMinS32_c0o196(#0, %63)` with
+  `%63` = the last `Minimum` (use count 1) and, because the atomic had a destination, the
+  old node is turned into `Copy[GlobalMemory] %68 <- %67` (use count 0);
+- DCE iteration 1: the unused `Copy` is removed through `Optimizer.RemoveNode`, whose cascade
+  follows every operand whose use count reaches zero into its producer: `%67` → the **Call**
+  (its result is now unused) → it strips the Call's sources' use lists → `%63` and the whole
+  chain behind it drop to use count 0 - while the Call itself stays in the block, because
+  `HasSideEffects(Call)` keeps it;
+- DCE iteration 2: the chain is "unused" and deleted; the Call keeps a reference to an operand
+  with no definition; the code generators emit `int temp_7;` and pass it uninitialised.
+
+On Metal that uninitialised local holds whatever the register file holds: 0 on most frames,
+14400 / 29223 / 51153 … on the rest - the count the flare multiplies into the sun veil. On
+Vulkan the same undefined value reads as 0 through MoltenVK, which is why Vulkan never flashes
+(and, presumably, why TOTK's sun glare never appears there either).
+
+**Fix** (`Optimizer.RemoveNode`): only follow the cascade into a producer that will itself be
+removed - `if (!HasSideEffects(src.AsgOp)) nodes.Enqueue(src.AsgOp);`. Offline, the kernel
+now translates with the full chain (GLSL: ~80 temporaries; MSL: six `simd_shuffle_xor`, the
+atomic's argument computed). `CodeGenVersion` 7389 so the cache retranslates. In-game arm:
+v347 `dcefix1`.
+
+Everything measured in the previous three weeks is consistent with this: the carrier is the
+flare veil; every factor of its intensity equals CPU-side; the count is GPU-written once a
+frame; mirrors, sync, fences, pass splits, hardware counters, depth attachments, stage
+bindings - none of them touch an uninitialised register read, and the only things that moved
+the rate were the ones that reshuffle GPU work (and so the register contents) between frames.
+
+**Confirmed in-game (v347 `dcefix1`, `/tmp/dcefix1.log`): 13,199 frames, 1 flat frame =
+0.01%** (that one at luma 202, a bright frame rather than a white-out), 527 passes/frame,
+normal-frame luma 141 - brighter than the 115-131 of the unfixed arms, because the sun veil
+now draws at its correct, gentle intensity (count 948-950 every frame instead of 0/garbage).
+The fix is one condition in `Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs`
+(`RemoveNode`), ported to `codex/metal-good-display` as the build
+`artifacts/terminal/Ryujinx-metal-good-display-fix` (CodeGenVersion 7355 there).
+
+**User-facing build validated**: `artifacts/terminal/Ryujinx-metal-good-display-fix`
+(branch `codex/metal-good-display` = ab451955 + the one-line translator fix, CodeGenVersion
+7355): Great Sky Island save (position verified), 40 screenshots 0.5 s apart - **0 white**,
+non-white median luma **166.8** (the unfixed rollback measured 164.5 with 3 of 8 white; the
+current main branch 121.5). This is the build to play on. The perf commits (buffer mirrors,
+state cache, pass-scope split) can now be cherry-picked onto it one at a time with a
+brightness check after each.
+
+### 8-24: Defense-in-depth: GlobalToStorage no longer manufactures the dead copy (fix2)
+
+The RemoveNode guard (fix1) cures the disease; a second, independent change now removes the
+trigger. `GlobalToStorage.GenerateCallStorageOp` rewrote every global atomic into
+`Call + TurnIntoCopy(returnValue)`; for a guest RED (reduction, result discarded) the decoded
+atomic still carries a destination local with zero uses, so the copy was born dead - the exact
+bait the buggy cascade needed. Change (GlobalToStorage.cs): treat "dest exists but has no
+uses" like the existing no-dest path - `returnsValue` now also requires
+`Dest.UseOps.Count > 0`; the original node is deleted via `Utils.DeleteNode`, which maintains
+use lists (verified: `SetSource(null)` removes the op from the old source's `UseOps`).
+
+**Corpus equivalence proof** (the instrument for "this changes nothing else"): one v348 run
+(`redfix1`, drove into the verified save, played 40 s) with `RYUJINX_SHADER_DIFF=/tmp/bins_fix2`
++ `RYUJINX_CODEGEN_SALT=91` dumped 4,011 guest binaries (76 compute). Both ShaderTools builds
+(fix1-only vs fix1+fix2) translated all 4,011 to MSL: 0 failures on either side, **4,010
+byte-identical**, exactly one file differs - the sun-visibility kernel itself (here named by
+guest-code hash `5E127FA8FB325300-Compute`; the `1f6a89` name elsewhere is the Metal-side
+instrumentation's hash). Its diff is precisely the intent: `int temp_98;` +
+`temp_98 = AtomicMinS32_c0o196(..., temp_97)` becomes a bare call; `temp_97` (the reduced
+value) is intact on both sides. RED-with-unused-result occurs once in 4,011 real shaders -
+which is why the landmine sat unstepped-on for years.
+
+No CodeGenVersion bump needed: the old cached text (unused `temp_98 = ...` capture) and the
+new text are both correct; mixed caches are harmless. The corpus is preserved as a regression
+fixture in `artifacts/shader-corpus/` (4,011 .bin, 26 MB): any future translator change can be
+checked with tools in `scratchpad`-style: two ShaderTools builds + per-file MSL diff.
+Build with both fixes: `artifacts/terminal/Ryujinx-metal-v348-redfix` (booted, drove in,
+kernel translated with the full chain - smoke-tested, not flash-measured).
+
+## 8-25: The Depths "teal sheet" is the dropped texelFetch offset (a good-display-only defect)
+
+User report, two screenshots at the same Depths spot (map -1146/-2356/-540): on
+`good-display-fix` a large hard-edged teal sheet lies over the terrain; on stock upstream
+Ryujinx (Vulkan) the same spot shows soft ground mist. A manual save was left there; the
+drive-in now selects row 0 and verifies `SAVE_EXPECT_Y=-434.9` (`SAVE_ROW=first` plus an
+explicit expected Y verifies any row, not just the bottom one).
+
+Arms (12 stills each, `tools/depths_shots.sh`):
+
+| arm | build / toggle | teal sheet |
+|-----|----------------|-----------|
+| A | v348 default | none |
+| C | v348 `RAW_SPLIT=0` | none - **pass splitting is not involved** |
+| D | v348 `MSL_FETCH_OFFSET=0` + salt | **present** (darker, same facets) |
+| B | good-display-fix (7355) | **present**, bright and obvious |
+| E | good-display-fix2 (7356, both MSL codegen fixes ported) | none |
+| F2 | fix2 `MSL_FETCH_OFFSET=0` + salt | **present** |
+
+E vs F2 is the decisive same-build A/B: one toggle, same brightness, same camera. **Root
+cause: `InstGenMemory` dropped the constant offset on `read()` (texelFetch), so the fog
+layer's soft-particle depth neighbourhood collapsed onto one texel and the fade never
+happened, leaving the mesh's raw facets.** Main fixed this at CodeGenVersion 7378 while
+chasing the white flash (measured then as *not* the flash's cause - this is what it actually
+cured). Port: `InstGenMemory.cs` + `InstGen.cs` copied wholesale from main (their entire
+inter-branch diff is these two codegen fixes, 5 hunks + the integer-wrap fix), CodeGenVersion
+7355 -> 7356. Build: `artifacts/terminal/Ryujinx-metal-good-display-fix2`.
+
+**Harness trap that voided one arm**: good-display had `CodeGenVersion` as a `const`, so
+`RYUJINX_CODEGEN_SALT` did nothing there and the first A/B (run F) silently loaded run E's
+*fixed* cached shaders - it looked like the offset fix was irrelevant. The branch now mirrors
+main's `static readonly ... + salt`. **Any A/B of a translation-affecting toggle must first
+prove the salt is live on that build.**
+
+Two null results from the same session: 4,011 scene shaders + 280 map/Depths-only shaders
+(4,291 total, corpus in `artifacts/shader-corpus/`) scanned for declared-read-never-assigned
+locals - **zero hits** (scanner calibrated: it flags `temp_7` in the pre-fix sun kernel and
+no longer false-positives `ShuffleXor`'s `thread int &` out-params). And 1,499 shots over a
+4-minute map dwell on v348 showed no flicker event above 0.2% frame change (p99 = 0.09%),
+i.e. the map flicker the user sees does not reproduce on main.
+
+### 8-25: the map flicker, and the darkness is shared-layer with a gamma signature
+
+**Map flicker reproduced and captured** (`tools/depths_map.sh`, 4-minute dwell, ~6 shots/s,
+frame differencing in `scratchpad/flick_scan.py`): on `good-display-fix2` two events 64 s
+apart - the map's terrain layer vanishes for one or two frames leaving black plus a blue
+mist layer, UI intact (40% and 4.5% of the frame changed). On v348 the same dwell gives
+**zero events** (1,499 shots, max change 0.14%, which is the cursor blink and JPEG noise).
+So the map flicker is another good-display-only defect that something in main already cures -
+and *not* the two MSL codegen fixes, since fix2 still flickers.
+
+**Darkness: not the Metal backend.** At the Depths save, median scene luma is 4.3 on v348
+Metal, **4.3 on v348 Vulkan**, and 27.9 on good-display. Both backends equally dark ⇒ the
+cause is in the shared layers (Gpu / Shader), whose inter-branch diff is only 17 files.
+
+**The difference is a gamma curve, not a scale.** Percentile-matched transfer from v348 to
+good-display fits `y = 1.13 x^0.563`; applying a textbook sRGB encode to v348's percentiles
+predicts good-display's within a point or two at both ends (p5 10.2 vs 10.4, p95 98.5 vs
+99.1), overshooting mid-range. A linear factor cannot produce this shape; a missing/extra
+sRGB transfer can. Concretely: main's `Window.Present` swaps the Unorm "shadow" texture for
+the sRGB "rendered sibling" (`FindRenderedSibling`, from 69635f7b), and presenting through an
+sRGB view adds a decode the display then does not re-encode. Opt-out already exists:
+`RYUJINX_GPU_PRESENT_KEEP_SHADOW=1` - the next arm.
+
+Null result: `RYUJINX_METAL_GUARD_RCP=0` does not change the darkness (4.3 -> 4.4). That
+guard is a leftover symptom-patch from the (since-retracted) divide-by-zero theory and is
+still on by default, but it is not what darkens the picture.
+
+Ground truth pending: stock upstream Ryujinx 1.2 at the same save (`runJ`) decides whether
+4.3 or 27.9 is correct - i.e. whether main darkens or good-display brightens.
+
+### 8-26: ROOT CAUSE of main's darkness - the present sibling swap; v349 delivered
+
+**Ground truth first.** Stock upstream Ryujinx 1.2 (Vulkan) at the Depths save gives scene-luma
+percentiles p25/p50/p75/p90 = **16.8 / 27.7 / 55.5 / 69.8**, which good-display-fix2 matches
+(16.8 / 27.7 / 60.4 / 82.9) and v348 does not (1.6 / 4.4 / 16.6 / 24.0). So good-display is
+correct and **main regressed**; the darkness is a real defect, not a taste difference.
+
+**Root cause**: `Window.Present` swapped the Unorm shadow texture for the sRGB "rendered
+sibling" (`FindRenderedSibling`, added in 69635f7b as a white-flash mitigation - present could
+upload stale guest memory before the sRGB target was flushed). Presenting through the sRGB
+view decodes to linear once more than the display re-encodes, so the picture loses a whole
+transfer function: darkest where the scene is darkest (Depths 6.5x, Great Sky Island 1.37x).
+The percentile transfer fit `y = 1.13 x^0.563` and the textbook sRGB-encode prediction had
+already pointed here before the toggle confirmed it.
+
+**Fix**: the swap is off by default (`_presentKeepShadow` now defaults true;
+`RYUJINX_GPU_PRESENT_SIBLING=1` restores it for diagnosis). Upstream never had the swap, so
+this is a return to upstream behaviour. Build **`artifacts/terminal/Ryujinx-metal-v349-bright`**.
+
+Verification (v349, Depths save):
+- brightness p25/p50/p75/p90 = **16.9 / 26.5 / 55.6 / 69.6** - aligned with stock at every
+  percentile (was 1.6 / 4.4 / 16.6 / 24.0).
+- 3-minute dense gameplay capture, 1,165 shots: **zero** frames above a 2% frame-to-frame
+  change (max 0.67%) - no stale or blown-out present frames, i.e. the mitigation the swap
+  provided is not missed.
+- 3-minute map dwell, 1,182 shots: **zero** flicker events (max 0.07%). The map flicker
+  reproduced on good-display-fix2 (two events in four minutes, 40% and 4.5%) does not occur
+  on main.
+
+**Not re-validated**: the daylight white-flash rate. The Great Sky Island repro save is gone -
+the save list holds six entries and a play session's autosaves pushed the 08/08 manual save
+out (confirmed by screenshotting the list with the cursor driven to the bottom). The flash was
+measured at 0.01% over 13,199 frames on v347 with the same translator fix, and the swap being
+removed is a fork-only addition upstream does not have, but a fresh daylight surface save is
+needed to re-run the gate.
+
+**Harness fixes this session**: `SAVE_DOWNS` (default 30) replaces the hardcoded twelve downs,
+which no longer reached the bottom of a grown list and silently loaded a surface autosave -
+the flash gate caught it by scene luma (55 vs the repro's 138), which is exactly what that
+gate exists for. `SAVE_SHOT_BOTTOM=1` screenshots the row the cursor actually lands on.
+`drive_in.sh` now propagates the Python driver's exit status (a trailing `echo "WINID"` had
+been swallowing the WRONG-SAVE exit 2, so that protection had never once fired).
+New: `tools/depths_shots.sh`, `tools/depths_map.sh`, `tools/depths_soak.sh`.
