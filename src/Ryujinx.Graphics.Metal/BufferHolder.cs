@@ -32,6 +32,7 @@ namespace Ryujinx.Graphics.Metal
         private BufferMirrorRangeList _pendingDataRanges;
         private Dictionary<ulong, StagingBufferReserved> _mirrors;
         private readonly bool _useMirrors = Environment.GetEnvironmentVariable("RYUJINX_METAL_BUFFER_MIRRORS") != "0";
+        private static readonly bool _forceDeferred = Environment.GetEnvironmentVariable("RYUJINX_METAL_FORCE_DEFERRED") == "1";
 
         private readonly ReaderWriterLockSlim _flushLock;
         private FenceHolder _flushFence;
@@ -425,6 +426,10 @@ namespace Ryujinx.Graphics.Metal
         public unsafe void SetData(int offset, ReadOnlySpan<byte> data, CommandBufferScoped? cbs = null, bool allowCbsWait = true)
         {
             int dataSize = Math.Min(data.Length, Size - offset);
+            if (UploadCorrelator.Enabled && dataSize > 0)
+            {
+                UploadCorrelator.NoteWriteTo(_buffer.GetUnsafe().Value.NativePtr, offset, dataSize, "SD");
+            }
             if (dataSize == 0)
             {
                 return;
@@ -441,7 +446,13 @@ namespace Ryujinx.Graphics.Metal
                 bool isRented = _buffer.HasRentedCommandBufferDependency(_renderer.CommandBufferPool);
 
                 // If the buffer is rented, take a little more time and check if the use overlaps this handle.
-                bool needsFlush = isRented && _waitable.IsBufferRangeInUse(offset, dataSize, false);
+                // RYUJINX_METAL_FORCE_DEFERRED=1: never write straight into the buffer while
+                // a command buffer is in play, whatever the range tracking says. If a white
+                // frame is a direct write landing in a range the GPU has not read yet, this
+                // arm removes it; if the tracking is right, only the upload path changes.
+                bool needsFlush = _forceDeferred
+                    ? (cbs != null || isRented)
+                    : (isRented && _waitable.IsBufferRangeInUse(offset, dataSize, false));
 
                 if (_uploadTrace)
                 {

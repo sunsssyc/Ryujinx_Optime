@@ -2464,6 +2464,11 @@ namespace Ryujinx.Graphics.Metal
 
             // + 2 float4 regions for the pre-composite probe (compute read / sampler read).
             _buf = device.NewBuffer((ulong)(5 * Slots * Pixels * BytesPerPixel + 4 * Slots * Pixels * 16 + StageSlots * StageCbMax * StageCbFloats * 4 + TraceBytes + TinyBytes + SceneBytes + ArgBytes + TinyPreBytes), MTLResourceOptions.ResourceStorageModeShared);
+            if (VsDumpEnabled)
+            {
+                VsDumpBuffer = device.NewBuffer((ulong)(16 + VsdRecords * 80 + FsdRecords * 64), MTLResourceOptions.ResourceStorageModeShared);
+                unsafe { *(uint*)VsDumpBuffer.Contents = 0; *((uint*)VsDumpBuffer.Contents + 1) = 0; }
+            }
             SamplerPathProbe.Initialize(device);
 
             if (_stageLabel.Length != 0)
@@ -3998,6 +4003,11 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
+            ClassifyVsDump(slot.Frame, flat);
+            ClassifySeq(slot.Frame, flat);
+            ClassifyCounterReport(slot.Frame, flat);
+            ClassifyProbeReadback(slot.Frame, flat);
+
             if (_stageLabel.Length != 0 && slot.Frame > 1)
             {
                 ClassifyStageCb(slot.Frame, flat);
@@ -4175,9 +4185,417 @@ namespace Ryujinx.Graphics.Metal
             slot.Valid = false;
         }
 
+        // ---- GPU-side dump written by the flare vertex shader (RYUJINX_METAL_FLARE_CONST bit 16) ----
+        // Header: uint counter; then VsdRecords records of 5 x float4 (layout in Program.FlareConst).
+        // Read per classification window: the records appended since the previous window are
+        // attributed to this presented frame's outcome. Alignment is at most a frame off, and
+        // white frames are isolated singles, so the windows around each white frame are logged
+        // verbatim to show where the records actually land.
+        public static readonly bool VsDumpEnabled =
+            ((int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_FLARE_CONST"), out int vfc) ? vfc : 0) & 48) != 0;
+        public static MTLBuffer VsDumpBuffer;
+        private const int VsdRecords = 4096;
+        private static uint _vsdLast;
+        private static long _vsdWinWhite, _vsdWinNormal, _vsdBigWinWhite, _vsdBigWinNormal, _vsdRecWhite, _vsdRecNormal;
+        private static long _vsdBigRecWhite, _vsdBigRecNormal, _vsdOverflow, _vsdEmptyWhite, _vsdEmptyNormal;
+        private static double _vsdMaxWhite, _vsdMaxNormal;
+        private static long _vsdLogUntil = -1;
+        private static readonly List<string> _vsdLines = new();
+
+        // ---- texture slot set for one stage, consumed by another ----
+        private static long _mismatchCount;
+        private static readonly Dictionary<string, long> _mismatchByProgram = new();
+        private static readonly List<string> _mismatchSamples = new();
+
+        public static void NoteStageMismatch(string label, int binding, ResourceStages needed, ShaderStage found, string tex)
+        {
+            lock (_mismatchByProgram)
+            {
+                _mismatchCount++;
+                string key = (label != null && label.Length > 6 ? label[..6] : label ?? "?") + $" b{binding} need={needed} got={found}";
+                _mismatchByProgram[key] = _mismatchByProgram.TryGetValue(key, out long c) ? c + 1 : 1;
+                if (_mismatchSamples.Count < 12) { _mismatchSamples.Add($"{key} tex={tex} f{System.Threading.Interlocked.Read(ref _frame)}"); }
+            }
+            Seq($"MM:{(label != null && label.Length > 6 ? label[..6] : label)}b{binding}");
+        }
+
+        private static string MismatchReport()
+        {
+            lock (_mismatchByProgram)
+            {
+                StringBuilder sb = new();
+                sb.Append($"texref stage mismatches: {_mismatchCount}");
+                int n = 0;
+                foreach (KeyValuePair<string, long> kv in _mismatchByProgram) { if (n++ < 16) { sb.Append("\n  mm ").Append(kv.Key).Append(" x").Append(kv.Value); } }
+                foreach (string s in _mismatchSamples) { sb.Append("\n  mm-sample ").Append(s); }
+                return sb.ToString();
+            }
+        }
+
+        // ---- who writes the flare's count slot ----
+        private static IntPtr _flareCountPtr; private static int _flareCountOff = -1;
+
+        public static unsafe void NoteFlareCountBinding(IntPtr ptr, int off, MTLBuffer readBuf, int readOff, bool mirrored)
+        {
+            if (!Enabled) { return; }
+            _flareCountPtr = ptr; _flareCountOff = off;
+            if (!mirrored) { _flareCountBuf = readBuf; _flareCountReadOff = readOff; }
+            int cpu = 0;
+            try { if (readBuf.NativePtr != IntPtr.Zero && readBuf.Contents != IntPtr.Zero) { cpu = *(int*)((byte*)readBuf.Contents + readOff); } } catch (Exception) { }
+            Seq($"D:flare cnt={cpu}{(mirrored ? "m" : "")}");
+        }
+
+        // Poll the CPU-visible value of the flare's count slot at every draw; a change between
+        // two draws is a GPU write landing (the CPU never writes it), and its position in the
+        // sequence says which pass of which frame produced it.
+        private static MTLBuffer _flareCountBuf; private static int _flareCountReadOff; private static int _cntLast = int.MinValue;
+        public static unsafe void PollCount()
+        {
+            if (!Enabled || _flareCountBuf.NativePtr == IntPtr.Zero) { return; }
+            try
+            {
+                IntPtr c = _flareCountBuf.Contents;
+                if (c == IntPtr.Zero) { return; }
+                int v = *(int*)((byte*)c + _flareCountReadOff);
+                if (v != _cntLast) { _cntLast = v; Seq($"CNT->{v}"); }
+            }
+            catch (Exception) { }
+        }
+
+        public static void NoteWriteTo(IntPtr ptr, int off, int size, string what)
+        {
+            if (!Enabled || _flareCountOff < 0 || ptr != _flareCountPtr) { return; }
+            if (off < _flareCountOff + 32 && off + size > _flareCountOff)
+            {
+                Seq($"{what}@{off - _flareCountOff}/{size}");
+            }
+        }
+
+        // ---- per-frame event sequence: pass boundaries, barriers, and the draws of interest ----
+        // Kept for the last SeqRing frames; the sequences of a white frame and its predecessor
+        // are logged when it is classified, plus two normal frames after the first white, so
+        // the order of probe draw / barrier / pass end / flare draw can be read off directly.
+        private const int SeqRing = 16;
+        private static readonly StringBuilder[] _seq = new StringBuilder[SeqRing];
+        private static readonly long[] _seqFrame = new long[SeqRing];
+        private static readonly object _seqLock = new();
+        private static int _seqDumpsWhite, _seqDumpsNormal;
+        private static readonly List<string> _seqLines = new();
+
+        public static void Seq(string ev)
+        {
+            if (!Enabled) { return; }
+            lock (_seqLock)
+            {
+                long f = System.Threading.Interlocked.Read(ref _frame);
+                int k = (int)(f % SeqRing);
+                if (_seqFrame[k] != f || _seq[k] == null) { _seqFrame[k] = f; _seq[k] = new StringBuilder(); }
+                if (_seq[k].Length < 48000) { _seq[k].Append(ev).Append(' '); }
+            }
+        }
+
+        private static void ClassifySeq(long presentedFrame, bool flat)
+        {
+            if (!Enabled) { return; }
+            bool dump = flat ? _seqDumpsWhite < 4 : (_seqDumpsNormal < 2 && _seqDumpsWhite > 0);
+            if (!dump) { return; }
+            lock (_seqLock)
+            {
+                for (long f = presentedFrame - 2; f <= presentedFrame; f++)
+                {
+                    int k = (int)(f % SeqRing);
+                    if (_seqFrame[k] == f && _seq[k] != null && _seqLines.Count < 40)
+                    {
+                        _seqLines.Add($"f{presentedFrame} {(flat ? "WHITE" : "normal")} seq of f{f}: {_seq[k]}");
+                    }
+                }
+                if (flat) { _seqDumpsWhite++; } else { _seqDumpsNormal++; }
+            }
+        }
+
+        // ---- Ryujinx's own SamplesPassed reports (the occlusion-query results the guest reads) ----
+        private const int CntRing = 256;
+        private static readonly object _cntLock = new();
+        private static readonly long[] _cntFrame = new long[CntRing];
+        private static readonly ulong[] _cntValue = new ulong[CntRing];
+        private static long _cntTotal, _cntNonZero, _cntBig;
+        private static long _cntWhiteN, _cntNormalN; private static double _cntWhiteMaxSum, _cntNormalMaxSum; private static long _cntWhiteBig, _cntNormalBig;
+        private static readonly List<string> _cntLines = new();
+
+        public static void NoteCounterReport(ulong value)
+        {
+            if (!Enabled) { return; }
+            lock (_cntLock)
+            {
+                int k = (int)(_cntTotal % CntRing);
+                _cntFrame[k] = System.Threading.Interlocked.Read(ref _frame);
+                _cntValue[k] = value;
+                _cntTotal++;
+                if (value != 0) { _cntNonZero++; }
+                if (value > 1000) { _cntBig++; }
+            }
+        }
+
+        private static void ClassifyCounterReport(long presentedFrame, bool flat)
+        {
+            if (!Enabled) { return; }
+            lock (_cntLock)
+            {
+                ulong max = 0; int n = 0; StringBuilder vals = null;
+                long avail = Math.Min(_cntTotal, CntRing);
+                for (long t = _cntTotal - 1; t >= _cntTotal - avail; t--)
+                {
+                    int k = (int)(t % CntRing);
+                    if (_cntFrame[k] > presentedFrame) { continue; }
+                    if (_cntFrame[k] < presentedFrame - 3) { break; }
+                    n++; if (_cntValue[k] > max) { max = _cntValue[k]; }
+                    if (presentedFrame <= _vsdLogUntil) { vals ??= new StringBuilder(); if (vals.Length < 160) { vals.Append($" f{_cntFrame[k]}:{_cntValue[k]}"); } }
+                }
+                if (flat) { _cntWhiteN++; _cntWhiteMaxSum += max; if (max > 1000) { _cntWhiteBig++; } _vsdLogUntil = Math.Max(_vsdLogUntil, presentedFrame + 2); }
+                else { _cntNormalN++; _cntNormalMaxSum += max; if (max > 1000) { _cntNormalBig++; } }
+                if (presentedFrame <= _vsdLogUntil && _cntLines.Count < 120)
+                {
+                    _cntLines.Add($"f{presentedFrame} {(flat ? "WHITE " : "normal")} reports(3f)={n} max={max}{(vals != null ? " [" + vals + " ]" : "")}");
+                }
+            }
+        }
+
+        // ---- the game's 260x260 R8G8 sun-occlusion probe, as the guest reads it back ----
+        // Every readback of that texture (either path) is summarised here with the presented
+        // frame it happened in; at classification the most recent readbacks before the frame
+        // are attributed to its outcome. If white frames follow readbacks that look like the
+        // cleared probe, the readback is the carrier of the bogus count.
+        private const int PrbRing = 64;
+        private static readonly object _prbLock = new();
+        private static readonly long[] _prbFrame = new long[PrbRing];
+        private static readonly float[] _prbMeanR = new float[PrbRing], _prbMeanG = new float[PrbRing];
+        private static readonly float[] _prbR255 = new float[PrbRing], _prbR0 = new float[PrbRing], _prbG255 = new float[PrbRing], _prbG0 = new float[PrbRing];
+        private static readonly bool[] _prbBg = new bool[PrbRing];
+        private static readonly byte[][] _prbRaw = new byte[PrbRing][];
+        private static long _prbTotal, _prbFgCount, _prbBgCount;
+        private static long _prbWhiteN, _prbNormalN, _prbWhiteNoRb, _prbNormalNoRb;
+        private static double _prbWhiteMeanR, _prbNormalMeanR, _prbWhiteR255, _prbNormalR255, _prbWhiteR0, _prbNormalR0;
+        private static int _prbDumpsWhite, _prbDumpsNormal;
+        private static readonly List<string> _prbLines = new();
+
+        private static readonly int[] _prbW = new int[PrbRing], _prbH = new int[PrbRing], _prbBpp = new int[PrbRing];
+        private static readonly Dictionary<string, long> _prbKinds = new();
+
+        // Any small 2D texture the guest reads back (<= 512 on a side, 1-4 bytes per texel):
+        // the sun probe's size on this save is not known in advance. Channel 0 and 1 are
+        // the first two bytes of each texel.
+        public static void NoteProbeReadback(int width, int height, int bpp, ReadOnlySpan<byte> data, bool background)
+        {
+            if (!Enabled || width > 512 || height > 512 || bpp < 1 || bpp > 4 || data.Length < width * height * bpp) { return; }
+            int n = width * height;
+            long sumR = 0, sumG = 0, r255 = 0, r0 = 0, g255 = 0, g0 = 0;
+            for (int i = 0; i < n; i++)
+            {
+                byte r = data[i * bpp], g = bpp > 1 ? data[i * bpp + 1] : (byte)0;
+                sumR += r; sumG += g;
+                if (r == 255) { r255++; } else if (r == 0) { r0++; }
+                if (g == 255) { g255++; } else if (g == 0) { g0++; }
+            }
+            lock (_prbLock)
+            {
+                string kind = $"{width}x{height}x{bpp}B";
+                _prbKinds[kind] = _prbKinds.TryGetValue(kind, out long kc) ? kc + 1 : 1;
+                int k = (int)(_prbTotal % PrbRing);
+                _prbW[k] = width; _prbH[k] = height; _prbBpp[k] = bpp;
+                _prbFrame[k] = System.Threading.Interlocked.Read(ref _frame);
+                _prbMeanR[k] = sumR / (float)n; _prbMeanG[k] = sumG / (float)n;
+                _prbR255[k] = r255 / (float)n; _prbR0[k] = r0 / (float)n; _prbG255[k] = g255 / (float)n; _prbG0[k] = g0 / (float)n;
+                _prbBg[k] = background;
+                if (_prbRaw[k] == null || _prbRaw[k].Length != n * bpp) { _prbRaw[k] = new byte[n * bpp]; }
+                data[..(n * bpp)].CopyTo(_prbRaw[k]);
+                _prbTotal++;
+                if (background) { _prbBgCount++; } else { _prbFgCount++; }
+            }
+        }
+
+        private static string PrbKinds()
+        {
+            StringBuilder k = new();
+            foreach (KeyValuePair<string, long> kv in _prbKinds) { if (k.Length > 0) { k.Append(", "); } k.Append(kv.Key).Append(':').Append(kv.Value); }
+            return k.ToString();
+        }
+
+        private static string PrbDescribe(int k)
+        {
+            return $"rb@f{_prbFrame[k]}{(_prbBg[k] ? "bg" : "fg")} {_prbW[k]}x{_prbH[k]}x{_prbBpp[k]}B meanR {_prbMeanR[k]:F1} R255 {_prbR255[k]:P0} R0 {_prbR0[k]:P0} meanG {_prbMeanG[k]:F1} G255 {_prbG255[k]:P0} G0 {_prbG0[k]:P0}";
+        }
+
+        private static void ClassifyProbeReadback(long presentedFrame, bool flat)
+        {
+            if (!Enabled) { return; }
+            lock (_prbLock)
+            {
+                int k1 = -1, k2 = -1;
+                long avail = Math.Min(_prbTotal, PrbRing);
+                for (long t = _prbTotal - 1; t >= _prbTotal - avail; t--)
+                {
+                    int k = (int)(t % PrbRing);
+                    if (_prbFrame[k] <= presentedFrame)
+                    {
+                        if (k1 < 0) { k1 = k; } else { k2 = k; break; }
+                    }
+                }
+                if (k1 < 0)
+                {
+                    if (flat) { _prbWhiteNoRb++; } else { _prbNormalNoRb++; }
+                    return;
+                }
+                if (flat)
+                {
+                    _prbWhiteN++; _prbWhiteMeanR += _prbMeanR[k1]; _prbWhiteR255 += _prbR255[k1]; _prbWhiteR0 += _prbR0[k1];
+                }
+                else
+                {
+                    _prbNormalN++; _prbNormalMeanR += _prbMeanR[k1]; _prbNormalR255 += _prbR255[k1]; _prbNormalR0 += _prbR0[k1];
+                }
+                if (flat) { _vsdLogUntil = Math.Max(_vsdLogUntil, presentedFrame + 2); }
+                if (presentedFrame <= _vsdLogUntil && _prbLines.Count < 120)
+                {
+                    _prbLines.Add($"f{presentedFrame} {(flat ? "WHITE " : "normal")} last {PrbDescribe(k1)}{(k2 >= 0 ? " | prev " + PrbDescribe(k2) : "")}");
+                }
+                bool dump = flat ? _prbDumpsWhite < 3 : (_prbDumpsNormal < 3 && _prbDumpsWhite > 0);
+                if (dump && _prbRaw[k1] != null)
+                {
+                    try
+                    {
+                        System.IO.File.WriteAllBytes($"/tmp/probe_{(flat ? "white" : "normal")}_f{presentedFrame}_rb{_prbFrame[k1]}_{_prbW[k1]}x{_prbH[k1]}x{_prbBpp[k1]}B.raw", _prbRaw[k1]);
+                        if (flat) { _prbDumpsWhite++; } else { _prbDumpsNormal++; }
+                    }
+                    catch (Exception) { }
+                }
+            }
+        }
+
+        // Fragment side (bit 32). Per window: record count = covered area in 32x32 cells,
+        // and the maxima of each factor of the additive contribution.
+        public static readonly bool FsDumpEnabled =
+            ((int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_FLARE_CONST"), out int ffc) ? ffc : 0) & 32) != 0;
+        private const int FsdRecords = 16384;
+        private static uint _fsdLast;
+        private static long _fsdWinWhite, _fsdWinNormal, _fsdRecWhite, _fsdRecNormal, _fsdOverflow;
+        private static long _fsdMaxRecWinWhite, _fsdMaxRecWinNormal;
+        private static double _fsdMaxOutWhite, _fsdMaxOutNormal, _fsdMaxIWhite, _fsdMaxINormal, _fsdMaxC3White, _fsdMaxC3Normal, _fsdMaxTexWhite, _fsdMaxTexNormal;
+        private static readonly List<string> _fsdLines = new();
+
+        private static unsafe void ClassifyFsDump(long presentedFrame, bool flat)
+        {
+            if (!FsDumpEnabled || VsDumpBuffer.NativePtr == IntPtr.Zero) { return; }
+            uint now = *((uint*)VsDumpBuffer.Contents + 1);
+            uint n = now - _fsdLast;
+            if (n > FsdRecords) { _fsdOverflow++; _fsdLast = now; return; }
+            float* recs = (float*)((byte*)VsDumpBuffer.Contents + 16 + VsdRecords * 80);
+            double maxOut = -1, maxI = -1, maxC3 = -1, maxTex = -1; string worst = null;
+            for (uint i = _fsdLast; i != now; i++)
+            {
+                float* r = recs + (i & (FsdRecords - 1)) * 16;
+                double o = Math.Max(r[12], Math.Max(r[13], r[14])) * r[11];   // out.rgb * out.a = the additive contribution
+                if (double.IsNaN(o)) { o = double.PositiveInfinity; }
+                maxI = Math.Max(maxI, r[2]); maxC3 = Math.Max(maxC3, Math.Max(r[8], Math.Max(r[9], r[10]))); maxTex = Math.Max(maxTex, Math.Max(r[4], Math.Max(r[5], r[6])));
+                if (o > maxOut)
+                {
+                    maxOut = o;
+                    worst = $"px=({r[0]:F0},{r[1]:F0}) I={r[2]:G4} tex=({r[4]:G3},{r[5]:G3},{r[6]:G3},{r[3]:G3}) c3=({r[8]:G3},{r[9]:G3},{r[10]:G3},{r[7]:G3}) out=({r[12]:G3},{r[13]:G3},{r[14]:G3}) a={r[11]:G4} contrib={o:G4}";
+                }
+            }
+            _fsdLast = now;
+            if (flat)
+            {
+                _fsdWinWhite++; _fsdRecWhite += n; _fsdMaxRecWinWhite = Math.Max(_fsdMaxRecWinWhite, n);
+                _fsdMaxOutWhite = Math.Max(_fsdMaxOutWhite, maxOut); _fsdMaxIWhite = Math.Max(_fsdMaxIWhite, maxI); _fsdMaxC3White = Math.Max(_fsdMaxC3White, maxC3); _fsdMaxTexWhite = Math.Max(_fsdMaxTexWhite, maxTex);
+            }
+            else
+            {
+                _fsdWinNormal++; _fsdRecNormal += n; _fsdMaxRecWinNormal = Math.Max(_fsdMaxRecWinNormal, n);
+                _fsdMaxOutNormal = Math.Max(_fsdMaxOutNormal, maxOut); _fsdMaxINormal = Math.Max(_fsdMaxINormal, maxI); _fsdMaxC3Normal = Math.Max(_fsdMaxC3Normal, maxC3); _fsdMaxTexNormal = Math.Max(_fsdMaxTexNormal, maxTex);
+            }
+            if (presentedFrame <= _vsdLogUntil && _fsdLines.Count < 150)
+            {
+                _fsdLines.Add($"f{presentedFrame} {(flat ? "WHITE " : "normal")} cells={n} maxI={maxI:G4} maxC3={maxC3:G4} maxTex={maxTex:G4} worst: {worst}");
+            }
+        }
+
+        private static unsafe void ClassifyVsDump(long presentedFrame, bool flat)
+        {
+            if (!VsDumpEnabled || VsDumpBuffer.NativePtr == IntPtr.Zero) { ClassifyFsDump(presentedFrame, flat); return; }
+            uint now = *(uint*)VsDumpBuffer.Contents;
+            uint n = now - _vsdLast;
+            if (n > VsdRecords) { _vsdOverflow++; _vsdLast = now; return; }
+            float* recs = (float*)((byte*)VsDumpBuffer.Contents + 16);
+            double maxAbs = -1, maxI = -1; long big = 0; string worst = null;
+            for (uint i = _vsdLast; i != now; i++)
+            {
+                float* r = recs + (i & (VsdRecords - 1)) * 20;
+                maxI = Math.Max(maxI, r[3]);
+                double a = Math.Max(Math.Abs(r[0]), Math.Abs(r[1]));
+                if (double.IsNaN(a)) { a = double.PositiveInfinity; }
+                if (a > 1.5) { big++; }
+                if (a > maxAbs)
+                {
+                    maxAbs = a;
+                    worst = $"pos=({r[0]:G5},{r[1]:G5}) vid={*(uint*)(r + 2)} I={r[3]:G4} c3[1]=({r[4]:G4},{r[5]:G4},{r[6]:G4},{r[7]:G4}) c3[2]=({r[8]:G4},{r[9]:G4},{r[10]:G4},{r[11]:G4}) c3[3]=({r[12]:G4},{r[13]:G4},{r[14]:G4},{r[15]:G4}) attr0=({r[16]:G4},{r[17]:G4}) uv=({r[18]:G4},{r[19]:G4})";
+                }
+            }
+            _vsdLast = now;
+            if (flat)
+            {
+                _vsdWinWhite++; _vsdRecWhite += n; _vsdBigRecWhite += big;
+                if (big > 0) { _vsdBigWinWhite++; }
+                if (n == 0) { _vsdEmptyWhite++; }
+                if (maxAbs > _vsdMaxWhite) { _vsdMaxWhite = maxAbs; }
+                _vsdLogUntil = presentedFrame + 2;
+            }
+            else
+            {
+                _vsdWinNormal++; _vsdRecNormal += n; _vsdBigRecNormal += big;
+                if (big > 0) { _vsdBigWinNormal++; }
+                if (n == 0) { _vsdEmptyNormal++; }
+                if (maxAbs > _vsdMaxNormal) { _vsdMaxNormal = maxAbs; }
+            }
+            if (presentedFrame <= _vsdLogUntil && _vsdLines.Count < 150)
+            {
+                _vsdLines.Add($"f{presentedFrame} {(flat ? "WHITE " : "normal")} records={n} big={big} maxI={maxI:G4} max|pos|={maxAbs:G4} worst: {worst}");
+            }
+            ClassifyFsDump(presentedFrame, flat);
+        }
+
         private static void Report()
         {
             StringBuilder sb = new();
+
+            if (_mismatchCount != 0)
+            {
+                sb.Append(MismatchReport()).Append('\n');
+            }
+            if (_seqLines.Count != 0)
+            {
+                foreach (string l in _seqLines) { sb.Append("  seq ").Append(l).Append('\n'); }
+            }
+            if (_cntTotal != 0)
+            {
+                sb.Append($"counters: reports {_cntTotal} nonzero {_cntNonZero} big(>1000) {_cntBig}; max-in-3-frames mean white {(_cntWhiteN > 0 ? _cntWhiteMaxSum / _cntWhiteN : 0):F0} (big {_cntWhiteBig}/{_cntWhiteN}) normal {(_cntNormalN > 0 ? _cntNormalMaxSum / _cntNormalN : 0):F0} (big {_cntNormalBig}/{_cntNormalN})\n");
+                foreach (string l in _cntLines) { sb.Append("  cnt ").Append(l).Append('\n'); }
+            }
+            if (_prbTotal != 0 || _prbWhiteNoRb + _prbNormalNoRb != 0)
+            {
+                sb.Append($"probe260: kinds [{PrbKinds()}] readbacks {_prbTotal} (bg {_prbBgCount} fg {_prbFgCount}); frames white {_prbWhiteN} (no readback yet {_prbWhiteNoRb}) normal {_prbNormalN} (no rb {_prbNormalNoRb}); last-readback meanR white {(_prbWhiteN > 0 ? _prbWhiteMeanR / _prbWhiteN : 0):F1} normal {(_prbNormalN > 0 ? _prbNormalMeanR / _prbNormalN : 0):F1}; R255 white {(_prbWhiteN > 0 ? _prbWhiteR255 / _prbWhiteN : 0):P1} normal {(_prbNormalN > 0 ? _prbNormalR255 / _prbNormalN : 0):P1}; R0 white {(_prbWhiteN > 0 ? _prbWhiteR0 / _prbWhiteN : 0):P1} normal {(_prbNormalN > 0 ? _prbNormalR0 / _prbNormalN : 0):P1}\n");
+                foreach (string l in _prbLines) { sb.Append("  prb ").Append(l).Append('\n'); }
+            }
+            if (VsDumpEnabled)
+            {
+                sb.Append($"vsdump: windows white {_vsdWinWhite} (with |pos|>1.5: {_vsdBigWinWhite}, empty {_vsdEmptyWhite}) normal {_vsdWinNormal} (big {_vsdBigWinNormal}, empty {_vsdEmptyNormal}); records white {_vsdRecWhite} (big {_vsdBigRecWhite}) normal {_vsdRecNormal} (big {_vsdBigRecNormal}); max|pos| white {_vsdMaxWhite:G4} normal {_vsdMaxNormal:G4}; overflow {_vsdOverflow}");
+                foreach (string l in _vsdLines) { sb.Append("\n  vsd ").Append(l); }
+                if (FsDumpEnabled)
+                {
+                    sb.Append($"\nfsdump: windows white {_fsdWinWhite} normal {_fsdWinNormal}; cells/window white {(_fsdWinWhite > 0 ? (double)_fsdRecWhite / _fsdWinWhite : 0):F1} (max {_fsdMaxRecWinWhite}) normal {(_fsdWinNormal > 0 ? (double)_fsdRecNormal / _fsdWinNormal : 0):F1} (max {_fsdMaxRecWinNormal}); max contrib white {_fsdMaxOutWhite:G4} normal {_fsdMaxOutNormal:G4}; max I white {_fsdMaxIWhite:G4} normal {_fsdMaxINormal:G4}; max fp_c3 white {_fsdMaxC3White:G4} normal {_fsdMaxC3Normal:G4}; max tex white {_fsdMaxTexWhite:G4} normal {_fsdMaxTexNormal:G4}; overflow {_fsdOverflow}");
+                    foreach (string l in _fsdLines) { sb.Append("\n  fsd ").Append(l); }
+                }
+                sb.Append('\n');
+            }
 
             sb.Append($"uploadcorr: classified={_flatFrames + _normalFrames} flat={_flatFrames} normal={_normalFrames} dropped={_dropped}");
             sb.Append($" | luma flat {(_flatFrames > 0 ? _lumaFlatSum / _flatFrames : 0):F0}, normal {(_normalFrames > 0 ? _lumaNormalSum / _normalFrames : 0):F0}");

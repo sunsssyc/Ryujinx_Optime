@@ -696,6 +696,7 @@ namespace Ryujinx.Graphics.Metal
 
             Auto<DisposableBuffer> autoBuffer = Renderer.BufferManager.GetBuffer(range.Handle, true);
             MTLBuffer mtlBuffer = autoBuffer.Get(cbs, range.Offset, outSize).Value;
+            UploadCorrelator.NoteWriteTo(mtlBuffer.NativePtr, range.Offset, outSize, $"T2B:{Info.Width}x{Info.Height}/{MtlFormat}L{level}");
 
             if (PrepareOutputBuffer(cbs, hostSize, mtlBuffer, out MTLBuffer copyToBuffer, out BufferHolder tempCopyHolder))
             {
@@ -916,7 +917,9 @@ namespace Ryujinx.Graphics.Metal
 
                 Renderer.FlushAllCommands();
 
-                return PinnedSpan<byte>.UnsafeFromSpan(GetData(Renderer.CommandBufferPool, resources.GetFlushBuffer()));
+                ReadOnlySpan<byte> fg = GetData(Renderer.CommandBufferPool, resources.GetFlushBuffer());
+                UploadCorrelator.NoteProbeReadback(Info.Width, Info.Height, Info.BytesPerPixel, fg, false);
+                return PinnedSpan<byte>.UnsafeFromSpan(fg);
             }
 
             if (_logTexReadback)
@@ -924,7 +927,9 @@ namespace Ryujinx.Graphics.Metal
                 LogReadback(true);
             }
 
-            return PinnedSpan<byte>.UnsafeFromSpan(GetData(resources.GetPool(), resources.GetFlushBuffer()));
+            ReadOnlySpan<byte> bg = GetData(resources.GetPool(), resources.GetFlushBuffer());
+            UploadCorrelator.NoteProbeReadback(Info.Width, Info.Height, Info.BytesPerPixel, bg, true);
+            return PinnedSpan<byte>.UnsafeFromSpan(bg);
         }
 
         public PinnedSpan<byte> GetData(int layer, int level)
@@ -940,7 +945,9 @@ namespace Ryujinx.Graphics.Metal
 
                 Renderer.FlushAllCommands();
 
-                return PinnedSpan<byte>.UnsafeFromSpan(GetData(Renderer.CommandBufferPool, resources.GetFlushBuffer(), layer, level));
+                ReadOnlySpan<byte> fgl = GetData(Renderer.CommandBufferPool, resources.GetFlushBuffer(), layer, level);
+                UploadCorrelator.NoteProbeReadback(Info.Width, Info.Height, Info.BytesPerPixel, fgl, false);
+                return PinnedSpan<byte>.UnsafeFromSpan(fgl);
             }
 
             if (_logTexReadback)
@@ -948,7 +955,9 @@ namespace Ryujinx.Graphics.Metal
                 LogReadback(true);
             }
 
-            return PinnedSpan<byte>.UnsafeFromSpan(GetData(resources.GetPool(), resources.GetFlushBuffer(), layer, level));
+            ReadOnlySpan<byte> bgl = GetData(resources.GetPool(), resources.GetFlushBuffer(), layer, level);
+            UploadCorrelator.NoteProbeReadback(Info.Width, Info.Height, Info.BytesPerPixel, bgl, true);
+            return PinnedSpan<byte>.UnsafeFromSpan(bgl);
         }
 
         /// <summary>

@@ -29,6 +29,7 @@ namespace Ryujinx.Graphics.Metal
         ColorMask,
         RenderTargets,
         Counter,
+        Barrier,
         BlitEncoder,
         ComputeEncoder,
         Dispose,
@@ -186,6 +187,15 @@ namespace Ryujinx.Graphics.Metal
 
         private static readonly bool _rawFenceDefault = _rawFence;
         private MTLFence _fence;
+        // RYUJINX_METAL_ENCODER_FENCE=1: every render encoder updates a fence after its
+        // fragment stage and the next render encoder waits on it BEFORE ITS VERTEX STAGE.
+        // The earlier RAW_FENCE experiment waited before the fragment stage only, which
+        // leaves a later encoder's vertex shader free to run ahead of the previous
+        // encoder's fragment writes - the flare's count slot is written by fragment
+        // atomics and then reset by a vertex-stage store a few encoders later.
+        private static readonly bool _encoderFence = Environment.GetEnvironmentVariable("RYUJINX_METAL_ENCODER_FENCE") == "1";
+        private MTLFence _encFence;
+        private bool _encFencePending;
         private bool _fenceWaitPending;
         private static long _fenceWaits;
 
@@ -766,6 +776,12 @@ namespace Ryujinx.Graphics.Metal
 
             MTLRenderCommandEncoder renderCommandEncoder = Cbs.Encoders.EnsureRenderEncoder();
 
+            if (_encoderFence && _encFencePending)
+            {
+                renderCommandEncoder.WaitForFence(_encFence, MTLRenderStages.RenderStageVertex);
+                _encFencePending = false;
+            }
+
             if (_fenceWaitPending)
             {
                 renderCommandEncoder.WaitForFence(_fence, MTLRenderStages.RenderStageFragment);
@@ -854,6 +870,17 @@ namespace Ryujinx.Graphics.Metal
 
         public void EndCurrentPass(PassEndReason reason = PassEndReason.Unspecified)
         {
+            if (_encoderFence && CurrentEncoderType == EncoderType.Render)
+            {
+                if (_encFence.NativePtr == IntPtr.Zero)
+                {
+                    _encFence = _device.NewFence;
+                }
+                Cbs.Encoders.RenderEncoder.UpdateFence(_encFence, MTLRenderStages.RenderStageFragment);
+                _encFencePending = true;
+            }
+            _passHasFragmentStore = false;
+            if (CurrentEncoderType == EncoderType.Render) { UploadCorrelator.Seq(reason == PassEndReason.RenderTargets ? "P-RT" : reason == PassEndReason.FragmentDependency ? "P-FD" : reason == PassEndReason.Flush ? "P-F" : "P-" + reason); }
             _pendingPassEndReason = reason;
 
             Cbs.Encoders.EndCurrentPass();
@@ -1397,12 +1424,29 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        // RYUJINX_METAL_BARRIER_ENDS_PASS: 1 = a guest barrier inside a render pass ends
+        // the pass; 2 = only when the pass has drawn with a fragment shader that stores to
+        // a storage buffer (the lens-flare occlusion counter is fragment atomics read by a
+        // later vertex shader - unordered within one pass on a tile-based GPU, and the
+        // render-encoder memory barrier cannot name the fragment stage).
+        private static readonly int _barrierEndsPass =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_ENDS_PASS"), out int bep) ? bep : 0;
+        private bool _passHasFragmentStore;
+        private long _barrierPassEnds;
+
         public void Barrier()
         {
+            UploadCorrelator.Seq(CurrentEncoderType == EncoderType.Render ? "B" : "b");
             switch (CurrentEncoderType)
             {
                 case EncoderType.Render:
                     {
+                        if (_barrierEndsPass == 1 || (_barrierEndsPass == 2 && _passHasFragmentStore))
+                        {
+                            _barrierPassEnds++;
+                            EndCurrentPass(PassEndReason.Barrier);
+                            break;
+                        }
                         // afterStages may only name stages that can be waited on, which
                         // on Apple GPUs excludes fragment and tile: passing them makes
                         // the barrier illegal and its behaviour undefined, so writes it
@@ -1437,6 +1481,7 @@ namespace Ryujinx.Graphics.Metal
             MTLBlitCommandEncoder blitCommandEncoder = GetOrCreateBlitEncoder();
 
             MTLBuffer mtlBuffer = _renderer.BufferManager.GetBuffer(destination, offset, size, true).Get(Cbs, offset, size, true).Value;
+            UploadCorrelator.NoteWriteTo(mtlBuffer.NativePtr, offset, size, "FILL");
 
             // Might need a closer look, range's count, lower, and upper bound
             // must be a multiple of 4
@@ -1522,6 +1567,7 @@ namespace Ryujinx.Graphics.Metal
         {
             Auto<DisposableBuffer> srcBuffer = _renderer.BufferManager.GetBuffer(src, srcOffset, size, false);
             Auto<DisposableBuffer> dstBuffer = _renderer.BufferManager.GetBuffer(dst, dstOffset, size, true);
+            UploadCorrelator.NoteWriteTo(dstBuffer.GetUnsafe().Value.NativePtr, dstOffset, size, "COPY");
 
             BufferHolder.Copy(Cbs, srcBuffer, dstBuffer, srcOffset, dstOffset, size);
         }
@@ -1596,6 +1642,14 @@ namespace Ryujinx.Graphics.Metal
         {
             _encoderStateManager.NoteComputeImageWriters();
             string computeLabel = _encoderStateManager.ComputeProgram?.DebugLabel;
+            if (_dumpAllShaders)
+            {
+                _encoderStateManager.ComputeProgram?.DumpSources(FrameCapture.ShaderDumpDir);
+            }
+            if (UploadCorrelator.Enabled && computeLabel != null)
+            {
+                UploadCorrelator.Seq("CD:" + (computeLabel.Length > 6 ? computeLabel[..6] : computeLabel) + $"({groupsX}x{groupsY}x{groupsZ})");
+            }
 
             if (_skipDispatchLabels.Length != 0 && computeLabel != null)
             {
@@ -1936,6 +1990,18 @@ namespace Ryujinx.Graphics.Metal
 
             NoteAttachmentWriter();
 
+            if (_encoderStateManager.RenderProgram?.FragmentWritesStorage == true) { _passHasFragmentStore = true; }
+            UploadCorrelator.PollCount();
+            if (UploadCorrelator.Enabled)
+            {
+                Program sp = _encoderStateManager.RenderProgram;
+                string sl = sp?.DebugLabel;
+                if (sp != null && sl != null && (sp.FragmentWritesStorage || sl.StartsWith("2b36a7") || sl.StartsWith("4e8cad") || sl.StartsWith("1997e8")))
+                {
+                    UploadCorrelator.Seq((sp.FragmentWritesStorage ? "Dw:" : "D:") + (sl.Length > 6 ? sl[..6] : sl));
+                }
+            }
+
             if (_stageLabel.Length != 0 && UploadCorrelator.Enabled &&
                 _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string stageLbl &&
                 stageLbl.StartsWith(_stageLabel, StringComparison.Ordinal))
@@ -2135,6 +2201,18 @@ namespace Ryujinx.Graphics.Metal
             if (indexCount == 0)
             {
                 return;
+            }
+
+            if (_encoderStateManager.RenderProgram?.FragmentWritesStorage == true) { _passHasFragmentStore = true; }
+            UploadCorrelator.PollCount();
+            if (UploadCorrelator.Enabled)
+            {
+                Program sp = _encoderStateManager.RenderProgram;
+                string sl = sp?.DebugLabel;
+                if (sp != null && sl != null && (sp.FragmentWritesStorage || sl.StartsWith("2b36a7") || sl.StartsWith("4e8cad") || sl.StartsWith("1997e8")))
+                {
+                    UploadCorrelator.Seq((sp.FragmentWritesStorage ? "Dw:" : "D:") + (sl.Length > 6 ? sl[..6] : sl));
+                }
             }
 
             if (_stageLabel.Length != 0 && UploadCorrelator.Enabled &&
@@ -2723,6 +2801,7 @@ namespace Ryujinx.Graphics.Metal
         public void TextureBarrier()
         {
             UploadCorrelator.NoteBarrierRequested();
+            UploadCorrelator.Seq("TB");
 
             if (CurrentEncoderType != EncoderType.Render)
             {

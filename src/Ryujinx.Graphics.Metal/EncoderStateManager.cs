@@ -570,6 +570,17 @@ namespace Ryujinx.Graphics.Metal
 
             if (_currentState.DepthStencil != null)
             {
+                // The depth/stencil attachment is written by this pass too. Until now only the
+                // colour attachments entered the read-after-write write set, so a draw that
+                // samples the scene depth while the pass writing it is still open - TOTK's
+                // sun-visibility pass takes eight depth taps around the sun - never split the
+                // pass and read whatever the texture last stored: on a tile-based GPU the
+                // live depth sits in tile memory until the pass ends. RYUJINX_METAL_DEPTH_RAW=0
+                // restores the old behaviour for A/B.
+                if (_depthInWriteSet)
+                {
+                    NoteAttachmentWritten(_currentState.DepthStencil.CanonicalPtr);
+                }
                 switch (_currentState.DepthStencil.GetHandle().PixelFormat)
                 {
                     // Depth Only Attachment
@@ -693,6 +704,19 @@ namespace Ryujinx.Graphics.Metal
 
             // Initialise Encoder
             MTLRenderCommandEncoder renderCommandEncoder = _pipeline.CommandBuffer.RenderCommandEncoder(renderPassDescriptor);
+            if (UploadCorrelator.Enabled)
+            {
+                Texture rt0 = _currentState.RenderTargets[0] as Texture;
+                UploadCorrelator.Seq(rt0 != null ? $"P+{rt0.Width}x{rt0.Height}" : "P+none");
+            }
+            if (UploadCorrelator.VsDumpEnabled && UploadCorrelator.VsDumpBuffer.NativePtr != IntPtr.Zero)
+            {
+                // Vertex index 30 is outside every index the backend uses (vertex buffers
+                // 0-15, zero buffer 16, argument tables 17-20), so the state cache never
+                // touches it and the patched flare vertex shader finds its ring here.
+                renderCommandEncoder.SetVertexBuffer(UploadCorrelator.VsDumpBuffer, 0, 30);
+                renderCommandEncoder.SetFragmentBuffer(UploadCorrelator.VsDumpBuffer, 0, 30);
+            }
 
             if (countSamples || measureCoverage)
             {
@@ -2256,6 +2280,7 @@ namespace Ryujinx.Graphics.Metal
         /// this game issues rarely; this keys on the hazard actually occurring.
         /// </summary>
         private readonly HashSet<IntPtr> _writtenThisCb = new();
+        private static readonly bool _depthInWriteSet = Environment.GetEnvironmentVariable("RYUJINX_METAL_DEPTH_RAW") == "1";
 
         public readonly void NoteAttachmentWritten(IntPtr root)
         {
@@ -2699,6 +2724,25 @@ namespace Ryujinx.Graphics.Metal
                             // COUNT (float(as_type<int>(...))) and multiplies the sprite's
                             // intensity by it - an occlusion-query style result, and the one
                             // input of that draw never captured.
+                            if (UploadCorrelator.Enabled && buffer.Buffer != null && buffer.Range.HasValue)
+                            {
+                                // Who touches the flare's count slot: every writable storage
+                                // binding is reported against it, and the flare draw itself
+                                // reports where it reads from and what the CPU side holds there.
+                                int wOff = buffer.Range.Value.Offset;
+                                int wSize = buffer.Range.Value.Size;
+                                IntPtr wPtr = buffer.Buffer.GetUnsafe().Value.NativePtr;
+                                // Every storage binding overlapping the flare's count slot, read or
+                                // write, with the stage and the Write flag: the writer is found by
+                                // elimination, not by trusting the flag.
+                                UploadCorrelator.NoteWriteTo(wPtr, wOff, wSize, (buffer.Range.Value.Write ? "W:" : "S:") + (program.DebugLabel is string wl && wl.Length > 6 ? wl[..6] : program.DebugLabel) + ((segment.Stages & ResourceStages.Vertex) != 0 ? "v" : "") + ((segment.Stages & ResourceStages.Fragment) != 0 ? "f" : ""));
+                                if (index == 0 && program.IsFlareVertex)
+                                {
+                                    int rOff = wOff;
+                                    MTLBuffer rb = buffer.Buffer.GetMirrorable(_pipeline.Cbs, ref rOff, wSize, out bool rMir).Value;
+                                    UploadCorrelator.NoteFlareCountBinding(wPtr, wOff, rb, rOff, rMir);
+                                }
+                            }
                             if (UploadCorrelator.Enabled && _stageLabel.Length != 0 && buffer.Buffer != null &&
                                 program.DebugLabel != null && program.DebugLabel.StartsWith(_stageLabel, StringComparison.Ordinal))
                             {
@@ -2747,6 +2791,15 @@ namespace Ryujinx.Graphics.Metal
                                 int index = binding + i;
 
                                 ref TextureRef texture = ref _currentState.TextureRefs[index];
+                                // TextureRefs is one array for every stage. If the texture in
+                                // this slot was set for another stage than the one this
+                                // program's segment needs, the shader samples the wrong one.
+                                if (UploadCorrelator.Enabled && hasTexture && texture.Storage != null &&
+                                    (segment.Stages & (ResourceStages)(1 << (int)texture.Stage)) == 0)
+                                {
+                                    UploadCorrelator.NoteStageMismatch(program.DebugLabel, index, segment.Stages, texture.Stage,
+                                        texture.Storage is Texture mt ? $"{mt.Width}x{mt.Height}/{mt.MtlFormat}" : "?");
+                                }
                                 (ulong gpuAddress, IntPtr nativePtr) = hasTexture
                                     ? AddressForTexture(ref texture)
                                     : (0, IntPtr.Zero);
@@ -3218,6 +3271,10 @@ namespace Ryujinx.Graphics.Metal
                             ref BufferRef buffer = ref _currentState.StorageBufferRefs[index];
                             (ulong gpuAddress, IntPtr nativePtr) = AddressForBuffer(ref buffer);
 
+                            if (UploadCorrelator.Enabled && buffer.Buffer != null && buffer.Range.HasValue)
+                            {
+                                UploadCorrelator.NoteWriteTo(buffer.Buffer.GetUnsafe().Value.NativePtr, buffer.Range.Value.Offset, buffer.Range.Value.Size, "C:" + (program.DebugLabel is string cl && cl.Length > 6 ? cl[..6] : program.DebugLabel) + (buffer.Range.Value.Write ? "w" : "r"));
+                            }
                             if ((segment.Stages & ResourceStages.Compute) != 0)
                             {
                                 AddResource(nativePtr, MTLResourceUsage.Read | MTLResourceUsage.Write, in bindings);
@@ -3237,10 +3294,24 @@ namespace Ryujinx.Graphics.Metal
                                 int index = binding + i;
 
                                 ref TextureRef texture = ref _currentState.TextureRefs[index];
+                                // TextureRefs is one array for every stage. If the texture in
+                                // this slot was set for another stage than the one this
+                                // program's segment needs, the shader samples the wrong one.
+                                if (UploadCorrelator.Enabled && hasTexture && texture.Storage != null &&
+                                    (segment.Stages & (ResourceStages)(1 << (int)texture.Stage)) == 0)
+                                {
+                                    UploadCorrelator.NoteStageMismatch(program.DebugLabel, index, segment.Stages, texture.Stage,
+                                        texture.Storage is Texture mt ? $"{mt.Width}x{mt.Height}/{mt.MtlFormat}" : "?");
+                                }
                                 (ulong gpuAddress, IntPtr nativePtr) = hasTexture
                                     ? AddressForTexture(ref texture)
                                     : (0, IntPtr.Zero);
 
+                                if (UploadCorrelator.Enabled && hasTexture && texture.Storage is Texture ctex && program.DebugLabel is string cpl &&
+                                    (cpl.StartsWith("ae434b") || cpl.StartsWith("1f6a89")))
+                                {
+                                    UploadCorrelator.Seq($"CT:{cpl[..6]}:b{index}:{ctex.Width}x{ctex.Height}/{ctex.MtlFormat}#{(ctex.CanonicalPtr.ToInt64() & 0xFFFFFF):X}");
+                                }
                                 if ((segment.Stages & ResourceStages.Compute) != 0)
                                 {
                                     if (hasTexture)
@@ -3327,6 +3398,11 @@ namespace Ryujinx.Graphics.Metal
                                 int index = binding + i;
 
                                 ref ImageRef image = ref _currentState.ImageRefs[index];
+                                if (UploadCorrelator.Enabled && image.Storage is Texture cimg && program.DebugLabel is string cil &&
+                                    (cil.StartsWith("ae434b") || cil.StartsWith("1f6a89")))
+                                {
+                                    UploadCorrelator.Seq($"CI:{cil[..6]}:b{index}:{cimg.Width}x{cimg.Height}/{cimg.MtlFormat}#{(cimg.CanonicalPtr.ToInt64() & 0xFFFFFF):X}");
+                                }
                                 (ulong gpuAddress, IntPtr nativePtr) = AddressForImage(ref image);
 
                                 // A storage-image binding of the presented surface: the one

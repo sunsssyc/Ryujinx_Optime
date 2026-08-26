@@ -569,6 +569,40 @@ namespace Ryujinx.Graphics.Metal
         private static readonly float _flareClamp =
             float.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_FLARE_CLAMP"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float fcl) ? fcl : 1f;
 
+        private static int _flareFragPatched;
+
+        // Bit 32: the fragment side of the same GPU-side dump. One fragment in 1024 (a 32x32
+        // lattice of the target) of every flare sprite fragment appends what it actually
+        // sampled, the fragment constants it actually read, and what it wrote, to a ring in
+        // the fragment buffer at index 30. The record count per window is the sprites' real
+        // covered area; the values say which factor of the additive contribution moved.
+        // Record = 4 x float4: {pos.x, pos.y, I (attr1.x), sample.a}, {sample.rgb, fp_c3[0].w},
+        // {fp_c3[0].rgb, out.a}, {out.rgb, 0}.
+        private static string FlareFragDump(string code)
+        {
+            if ((_flareConst & 32) == 0 || code == null ||
+                !code.Contains("tex_fp_t_tcb_8.sample(") || !code.Contains("fp_c3->data[0].w") ||
+                !code.Contains("out.color0.w = temp_"))
+            {
+                return code;
+            }
+            int sig = 0, hits = 0;
+            string patched = Regex.Replace(code, @"constant Textures &textures \[\[buffer\(19\)\]\]\)", m => { sig++; return "constant Textures &textures [[buffer(19)]], device uint* fsdump [[buffer(30)]])"; });
+            if (sig == 1)
+            {
+                patched = Regex.Replace(patched, @"out\.color0\.w = (temp_\d+);", m => { hits++; return m.Value + " if (((uint(in.position.x) | uint(in.position.y)) & 31u) == 0u) { uint fsd_s = atomic_fetch_add_explicit((device atomic_uint*)fsdump + 1, 1u, memory_order_relaxed) & 16383u; device float4* fsd_r = (device float4*)(fsdump + 4) + 20480 + fsd_s * 4; fsd_r[0] = float4(in.position.x, in.position.y, in.inAttr1.x, textures.tex_fp_t_tcb_8.sample(textures.samp_fp_t_tcb_8, float2(in.inAttr0.x, in.inAttr0.y)).w); fsd_r[1] = float4(textures.tex_fp_t_tcb_8.sample(textures.samp_fp_t_tcb_8, float2(in.inAttr0.x, in.inAttr0.y)).xyz, constant_buffers.fp_c3->data[0].w); fsd_r[2] = float4(constant_buffers.fp_c3->data[0].xyz, out.color0.w); fsd_r[3] = float4(out.color0.xyz, 0.0f); }"; });
+            }
+            if (hits > 0 && ++_flareFragPatched <= 8)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"flare-const: fragment dump installed in a flare fragment shader ({_flareFragPatched} programs so far)");
+            }
+            else if (sig != 1)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"flare-const: fragment dump signature anchor matched {sig} times, not installed");
+            }
+            return patched;
+        }
+
         private static string FlareConst(string code, ShaderStage stage)
         {
             if (_flareConst == 0 || stage != ShaderStage.Vertex || code == null ||
@@ -604,6 +638,25 @@ namespace Ryujinx.Graphics.Metal
                 patched = Regex.Replace(patched, @"out\.outAttr1\.x = (temp_\d+);", m => { hits++; return $"out.outAttr1.x = min({m.Groups[1].Value}, {_flareClamp.ToString("0.0###", System.Globalization.CultureInfo.InvariantCulture)}f);"; });
             }
 
+            if ((_flareConst & 16) != 0)
+            {
+                // GPU-side dump. The vertex function appends what it actually computed and
+                // the constants it actually read to a ring in the buffer at vertex index 30,
+                // which EncoderStateManager binds once per render encoder while this is on.
+                // Record = 5 x float4: {pos.x, pos.y, vertex_id bits, intensity}, c3[1],
+                // c3[2], c3[3], {attr0.xy (corner), attr1.xy (uv)}. Anchored on the compare that follows the intensity store, so
+                // the position is final and the prologue's zero-init of outAttr1 is not matched.
+                int sig = 0;
+                patched = Regex.Replace(patched, @"constant Textures &textures \[\[buffer\(19\)\]\]\)", m => { sig++; return "constant Textures &textures [[buffer(19)]], device uint* vsdump [[buffer(30)]])"; });
+                if (sig == 1)
+                {
+                    patched = Regex.Replace(patched, @"(temp_\d+) = (temp_\d+) <= 0\.0f;", m => { hits++; return m.Value + " { uint vsd_s = atomic_fetch_add_explicit((device atomic_uint*)vsdump, 1u, memory_order_relaxed) & 4095u; device float4* vsd_r = (device float4*)(vsdump + 4) + vsd_s * 5; vsd_r[0] = float4(out.position.x, out.position.y, as_type<float>(vertex_id), out.outAttr1.x); vsd_r[1] = constant_buffers.vp_c3->data[1]; vsd_r[2] = constant_buffers.vp_c3->data[2]; vsd_r[3] = constant_buffers.vp_c3->data[3]; vsd_r[4] = float4(in.inAttr0.x, in.inAttr0.y, in.inAttr1.x, in.inAttr1.y); }"; });
+                }
+                else
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu, $"flare-const: vsdump signature anchor matched {sig} times, dump not installed");
+                }
+            }
             if (hits > 0 && ++_flareConstPatched <= 8)
             {
                 // The emitted literal must be valid MSL: "16f" is not, and a patch that fails
@@ -730,7 +783,9 @@ namespace Ryujinx.Graphics.Metal
                 return shader.Code;
             }
 
-            string code = shader.Code;
+            // The fragment half of the flare GPU dump (bit 32) - installed here, not via
+            // FlareConst, which the vertex branch above returns from before this point.
+            string code = FlareFragDump(shader.Code);
 
             if (_noDiscardLabels.Length != 0 &&
                 Array.IndexOf(_noDiscardLabels, DebugLabel) >= 0 &&
@@ -1150,6 +1205,13 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         public int FragmentOutputMap { get; }
 
+        public bool FragmentWritesStorage { get; }
+
+        // The lens-flare sprite family: a vertex stage that samples the 1x1 exposure texel and
+        // reads the occlusion count from vp_s0->data[0]. Matched on the source so no label
+        // assumption is needed.
+        public bool IsFlareVertex { get; }
+
         public Program(
             MetalRenderer renderer,
             MTLDevice device,
@@ -1165,6 +1227,23 @@ namespace Ryujinx.Graphics.Metal
             ComputeLocalSize = computeLocalSize;
             _shaders = shaders;
             _handles = new GCHandle[_shaders.Length];
+            // A fragment stage that stores to or atomically updates a storage buffer. On a
+            // tile-based GPU every vertex stage of a render pass runs before any of its
+            // fragment work, so a later draw's vertex shader in the same pass cannot see
+            // these writes; a guest barrier after such a draw has to end the pass.
+            for (int i = 0; i < _shaders.Length; i++)
+            {
+                if (_shaders[i].Stage == ShaderStage.Fragment && _shaders[i].Code != null &&
+                    Regex.IsMatch(_shaders[i].Code, @"storage_buffers\.[a-z_0-9]+->data\[[^\]]+\] = |atomic_[a-z_]+_explicit\(\(device atomic_uint\*\)&storage_buffers"))
+                {
+                    FragmentWritesStorage = true;
+                }
+                if (_shaders[i].Stage == ShaderStage.Vertex && _shaders[i].Code != null &&
+                    _shaders[i].Code.Contains("storage_buffers.vp_s0->data[0]") && _shaders[i].Code.Contains("tex_vp_t_tcb_8.sample("))
+                {
+                    IsFlareVertex = true;
+                }
+            }
 
             _status = ProgramLinkStatus.Incomplete;
 

@@ -38,6 +38,12 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        // RYUJINX_METAL_SYNC_STRICT: bit 1 = never mark a handle signalled off another
+        // handle's wait (no coalescing - what the Vulkan backend does); bit 2 = a new handle
+        // also waits on command buffers already committed but not yet completed, not only
+        // the ones still being recorded. Diagnostic arms for the flare count readback.
+        private static readonly int _strict =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_SYNC_STRICT"), out int st) ? st : 0;
         private ulong _firstHandle;
 
         private readonly MetalRenderer _renderer;
@@ -92,6 +98,10 @@ namespace Ryujinx.Graphics.Metal
         {
             ulong flushId = _flushId;
             MultiFenceHolder waitable = new();
+            if ((_strict & 2) != 0)
+            {
+                _renderer.CommandBufferPool.AddWaitable(waitable);
+            }
             if (strict || _renderer.InterruptAction == null)
             {
                 // Attach the sync to the command buffers that form this exact boundary
@@ -263,7 +273,7 @@ namespace Ryujinx.Graphics.Metal
                     }
                 }
 
-                if (signaled)
+                if (signaled && (_strict & 1) == 0)
                 {
                     int coalescedSignals = MarkCoveredHandlesSignalled(result.FlushId);
 

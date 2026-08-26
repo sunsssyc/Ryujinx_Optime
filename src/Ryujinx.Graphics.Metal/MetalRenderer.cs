@@ -332,10 +332,14 @@ namespace Ryujinx.Graphics.Metal
                 // old counter and subsequent draws use the new counter's result buffer.
                 _pipeline.EndCurrentPass(PassEndReason.Counter);
 
-                return Counters.Report(resultHandler, divisor);
+                // The value the guest will read for this SamplesPassed report, stamped with
+                // the presented frame, so it can be set beside the flare intensity it feeds.
+                EventHandler<ulong> wrapped = resultHandler == null ? null : (s, v) => { UploadCorrelator.NoteCounterReport(v); resultHandler(s, v); };
+                return Counters.Report(wrapped, divisor);
             }
 
             CounterEvent counterEvent = new(null);
+            if (type == CounterType.SamplesPassed) { UploadCorrelator.NoteCounterReport(1); }
             resultHandler?.Invoke(counterEvent, type == CounterType.SamplesPassed ? (ulong)1 : 0);
             return counterEvent;
         }
