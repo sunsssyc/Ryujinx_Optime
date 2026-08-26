@@ -18,8 +18,16 @@ namespace Ryujinx.Graphics.Gpu
             System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_TRACE") == "1";
         private static int _presentTraceCount;
 
+        // Presenting the sRGB render target instead of the Unorm shadow was a white-flash
+        // mitigation (present could upload stale guest memory before the sRGB target was
+        // flushed). The flash has since been fixed at its source in the shader translator,
+        // and the swap costs a whole transfer function: presenting through the sRGB view
+        // decodes to linear once more than the display re-encodes, so the picture darkens
+        // along a gamma curve - worst where the scene is darkest. Measured at the Depths
+        // save, median scene luma 4.4 with the swap against 27.7 for stock upstream and
+        // 28.3 with it off. Off by default; RYUJINX_GPU_PRESENT_SIBLING=1 restores it.
         private static readonly bool _presentKeepShadow =
-            System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_KEEP_SHADOW") == "1";
+            System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_SIBLING") != "1";
         private static int _siblingLogs;
         private static int _gameRtShapeLogs;
 
