@@ -11,6 +11,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
 {
     static class InstGenMemory
     {
+        private static readonly bool FetchOffsetEnabled = Environment.GetEnvironmentVariable("RYUJINX_MSL_FETCH_OFFSET") != "0";
+
         public static string GenerateLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)
         {
             StorageKind storageKind = operation.StorageKind;
@@ -543,7 +545,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                 // negative offset near the left or top edge wraps the same way the other
                 // backends' texelFetchOffset does rather than becoming a huge unsigned
                 // coordinate.
-                coords = offset != null
+                // RYUJINX_MSL_FETCH_OFFSET=0 restores the pre-7378 behaviour (offset dropped)
+                // for A/B of the picture's brightness; pair it with RYUJINX_CODEGEN_SALT so the
+                // two translations do not share one host cache.
+                coords = offset != null && FetchOffsetEnabled
                     ? $"uint{vecSuffix}(int{vecSuffix}({coords}) + {offset})"
                     : $"uint{vecSuffix}({coords})";
 

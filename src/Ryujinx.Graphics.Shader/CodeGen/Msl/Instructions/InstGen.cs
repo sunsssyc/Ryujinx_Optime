@@ -15,6 +15,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
 {
     static class InstGen
     {
+        // RYUJINX_MSL_WRAP_INT=0 restores the pre-wrap translation for brightness A/B.
+        private static readonly bool WrapIntEnabled = Environment.GetEnvironmentVariable("RYUJINX_MSL_WRAP_INT") != "0";
+
         public static string GetExpression(CodeGenContext context, IAstNode node)
         {
             if (node is AstOperation operation)
@@ -127,7 +130,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Msl.Instructions
                 // Language, so the compiler may assume it never happens and fold the
                 // surrounding arithmetic accordingly. Unsigned arithmetic wraps by
                 // definition, so doing the maths there reproduces the hardware exactly.
-                bool wrapsAsInteger =
+                bool wrapsAsInteger = WrapIntEnabled &&
                     (inst & Instruction.FP32) == 0 &&
                     (inst & Instruction.FP64) == 0 &&
                     (inst & Instruction.Mask) is Instruction.Add or Instruction.Subtract or
