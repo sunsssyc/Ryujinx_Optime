@@ -287,7 +287,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                     Dominance.FindDominators(cfg);
                     Dominance.FindDominanceFrontiers(cfg.Blocks);
 
+                    IrDump.Dump($"fun{i} before-ssa", cfg.Blocks);
                     Ssa.Rename(cfg.Blocks);
+                    IrDump.Dump($"fun{i} after-ssa", cfg.Blocks);
 
                     TransformContext context = new(
                         hfm,
@@ -301,7 +303,9 @@ namespace Ryujinx.Graphics.Shader.Translation
                         ref usedFeatures);
 
                     Optimizer.RunPass(context);
+                    IrDump.Dump($"fun{i} after-optimizer", cfg.Blocks);
                     TransformPasses.RunPass(context);
+                    IrDump.Dump($"fun{i} after-transforms", cfg.Blocks);
                 }
 
                 funcs[i] = new Function(cfg.Blocks, $"fun{i}", false, inArgumentsCount, outArgumentsCount);

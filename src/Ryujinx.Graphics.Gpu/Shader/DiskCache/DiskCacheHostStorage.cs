@@ -22,7 +22,11 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
         private const ushort FileFormatVersionMajor = 1;
         private const ushort FileFormatVersionMinor = 2;
         private const uint FileFormatVersionPacked = ((uint)FileFormatVersionMajor << 16) | FileFormatVersionMinor;
-        private const uint CodeGenVersion = 7387;
+        // RYUJINX_CODEGEN_SALT=N keeps translation-affecting A/B toggles (RYUJINX_MSL_*) from
+        // sharing one host cache: a toggle that changes the emitted MSL without a new version
+        // would silently load the other configuration's cached shaders.
+        private static readonly uint CodeGenVersion = 7389 +
+            (uint.TryParse(Environment.GetEnvironmentVariable("RYUJINX_CODEGEN_SALT"), out uint salt) ? salt : 0);
 
         private const string SharedTocFileName = "shared.toc";
         private const string SharedDataFileName = "shared.data";

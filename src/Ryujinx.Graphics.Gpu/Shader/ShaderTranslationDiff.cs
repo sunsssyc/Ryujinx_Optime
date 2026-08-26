@@ -53,6 +53,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
                 }
 
                 File.WriteAllText(stem + ".seen", string.Empty);
+                File.WriteAllBytes(stem + ".bin", code);
 
                 // The primary artifact: whatever the backend running right now actually
                 // compiles, written with no re-translation at all. Under Metal that is
