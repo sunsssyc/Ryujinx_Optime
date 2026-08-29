@@ -18,6 +18,18 @@ namespace Ryujinx.Graphics.Gpu.Image
     class TexturePool : Pool<Texture, TextureDescriptor>, IPool<TexturePool>
     {
         /// <summary>
+        /// Whether to re-check a pool slot's descriptor against the texture cached for it.
+        /// 1 (default) detects and repairs, 0 disables entirely, 2 detects and counts without
+        /// repairing - which leaves the defect on screen while marking the frames it lands on,
+        /// so a recording can be correlated against the counter within a single run.
+        /// RYUJINX_POOL_DESC_CHECK.
+        /// </summary>
+        private static readonly int _poolDescCheck =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_POOL_DESC_CHECK"), out int pdc) ? pdc : 1;
+
+        private static int _staleHits;
+
+        /// <summary>
         /// A request to dereference a texture from a pool.
         /// </summary>
         private readonly struct DereferenceRequest
@@ -193,6 +205,53 @@ namespace Ryujinx.Graphics.Gpu.Image
             texture = Items[id];
 
             ref readonly TextureDescriptor descriptor = ref GetDescriptorRef(id);
+
+            // The guest can rewrite a pool slot after the pool's last synchronization for the
+            // frame - GetForBinding assumes the pool is already synchronized and never looks
+            // again. The descriptor read above is then the new one while Items[id] still holds
+            // the texture the slot used to point at, and nothing compares the two, so the draw
+            // samples an unrelated texture. That is the Depths map layer vanishing for exactly
+            // one frame: the descriptor said 2250x1080 R10G10B10A2 while the texture handed
+            // back was a 174x57 R8G8B8A8 at another address. The game cycles through thousands
+            // of pool slots, so a slot is always being reused and the window is always open.
+            // This is the same comparison InvalidateRangeImpl already makes, done at read time.
+            // RYUJINX_POOL_DESC_CHECK=0 restores the old behaviour for A/B.
+            if (texture != null && _poolDescCheck != 0)
+            {
+                ref TextureDescriptor cachedDescriptor = ref DescriptorCache[id];
+
+                if (!descriptor.Equals(ref cachedDescriptor))
+                {
+                    if (_staleHits < 40)
+                    {
+                        _staleHits++;
+                        Logger.Warning?.Print(LogClass.Gpu,
+                            $"poolstale id={id} desc[a={descriptor.UnpackAddress():X} " +
+                            $"w={descriptor.UnpackWidth()} h={descriptor.UnpackHeight()} " +
+                            $"fmt={descriptor.UnpackFormat():X}] stale[a={texture.Info.GpuAddress:X} " +
+                            $"w={texture.Info.Width} h={texture.Info.Height} fmt={texture.Info.FormatInfo.Format}]");
+                    }
+
+                    Ryujinx.Common.SyncMemDiag.IncrementPoolStale();
+
+                    if (_poolDescCheck != 2)
+                    {
+                        if (texture.HasOneReference())
+                        {
+                            _channel.MemoryManager.Physical.TextureCache.AddShortCache(texture, ref cachedDescriptor);
+                        }
+
+                        if (Interlocked.Exchange(ref Items[id], null) != null)
+                        {
+                            texture.DecrementReferenceCount(this, id);
+                            RemoveAliasList(texture);
+                        }
+
+                        _invalidMap.Clear(id);
+                        texture = null;
+                    }
+                }
+            }
 
             if (texture == null)
             {
@@ -502,6 +561,7 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <param name="size">Size of the range being invalidated</param>
         protected override void InvalidateRangeImpl(ulong address, ulong size)
         {
+            Ryujinx.Common.SyncMemDiag.IncrementPoolInvalidate();
             ProcessDereferenceQueue();
 
             ulong endAddress = address + size;
