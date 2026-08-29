@@ -6765,3 +6765,258 @@ gate exists for. `SAVE_SHOT_BOTTOM=1` screenshots the row the cursor actually la
 `drive_in.sh` now propagates the Python driver's exit status (a trailing `echo "WINID"` had
 been swallowing the WRONG-SAVE exit 2, so that protection had never once fired).
 New: `tools/depths_shots.sh`, `tools/depths_map.sh`, `tools/depths_soak.sh`.
+
+### 8-28 RETRACTION: everything this session concluded about the map flicker is void
+
+The Depths map flicker (the terrain layer vanishing for ~150 ms, UI intact) is **not
+diagnosed**. Three conclusions reported during the investigation are withdrawn:
+
+- ~~root cause is the format-alias textures (TexturePool)~~
+- ~~`RYUJINX_DISABLE_FORMAT_ALIASES=1` eliminates it~~
+- ~~flushing the parent before the alias lookup fixes it (v352/v353)~~
+
+**Why they were wrong.** Unconditional logging inside the alias block shows it **never
+executes** in this title - zero pairs over 5-minute map dwells on both backends. The toggle
+was a no-op and the two "fixes" changed code that never runs. The arms that read as success
+were measuring nothing.
+
+**What the measurement actually is.** Eight functionally identical arms (v350, v351, v352,
+v353, the toggle arm, and three deliberate repeats), rates in events/minute:
+
+  0.67, 0.00, 0.20, 0.00, 0.00, 0.00, 0.20, 0.00   (14 events over 112 minutes)
+
+Five of eight are zero; one is 5x the mean. The events are **clustered**, not Poisson: within
+a burst they land 39-52 s apart, between bursts 274-282 s. A single 10-20 minute arm therefore
+cannot distinguish any intervention from none, and stock upstream's "0 in 12 min" carries no
+information either - so the claim that this is an upstream regression is withdrawn as well.
+
+Two tell-tales were visible before the retraction and were misread: v350 and v351 are
+functionally identical yet measured 0.67 and 0.20 (read as "the fix helped a bit"), and the
+per-minute rates were computed from shot counts times an assumed 0.24 s interval when the real
+interval drifts between 0.15 and 0.5 s under load - the timestamps in the filenames were there
+all along.
+
+**What still stands** (within-run measurements, immune to this variance): during a flicker the
+per-frame draw and pass counts are flat - 422-424 draws and 199-207 passes across the 90 frames
+spanning the event, `skipped` zero throughout. The draws are issued and produce nothing visible,
+so the pipeline is not failing to create or the geometry to reach the rasteriser; the content
+they read is wrong. The symptom shape is also documented: the terrain and grid layers vanish
+while the mist layer, labels, cursor and frame survive, and the small 3-6% events that appear
+in every build including stock are the mist's own animation, not a defect.
+
+**How to resume.** Not with screenshot sampling and cross-run counts. Detect the black frame
+**in process** so every occurrence is caught with full state attached (bound textures, which
+were recreated or synchronized that frame, sync waits), then compare the flicker frames against
+their neighbours inside one run. The per-frame line added to `Pipeline.Present`
+(`RYUJINX_METAL_FRAME_LINE=1`, kept) is the start of that instrument and is what produced the
+one surviving result above.
+
+### 8-29: the map flicker, narrowed by carrier-first to "the sampled texture is empty"
+
+Counting per-frame totals got nowhere across seven rounds because the thing that goes
+missing is **one draw out of four hundred**. Switching to the method that cracked the white
+flash - find the carrier first, then work backwards - located it in ten minutes.
+
+**The carrier.** `/tmp/ryujinx-skip-progs` (hot-reloaded every 256 draws) skips programs by
+label, so a live bisection over the 32 programs the map screen uses found
+**`8d06536778297b8b`**: skipping it drops the map region's luma from 50.5 to 11.3, which is
+what a flicker frame looks like. It is **one fullscreen quad per frame** (`count=6`,
+Triangles) into `R11G11B10Float 1920x1080` - 37 draws in a 15,000-draw trace. Losing it moves
+the per-frame draw total from 412 to 411, inside the 408-412 jitter every earlier round was
+comparing.
+
+**What it does.** Its fragment shader (guest hash `C268689DC8E8EA28`, 336 bytes) is
+`out.rgb = (texA.rgb * texB.rgb) * fp_c3.data[0] + fp_c3.data[1]`, UVs from the vertex stage
+(`92694E4ADA42377F`) via `vp_c3.data[33]`. So a black frame from this draw has exactly four
+possible causes: either texture empty, the scale constant zero, or the UVs collapsed.
+
+**Eliminated, all within-run** (`RYUJINX_WATCH_PROG=<label>` counts that program's draws per
+presented frame; the frame line also carries the bound texture hashes, their
+`ModifiedSequence`, and the shader constants):
+
+| claim | evidence |
+|---|---|
+| the draw is skipped | `watched=1` on every frame of both flicker windows |
+| it binds a different texture | hashes identical to neighbours (`011EDDD5`/`026976FA`) |
+| the texture was recreated | texadd/texrem 0; identity stable |
+| a texture-switch event causes it | 14 shots taken during switches are all normal; the two dark frames are 845 ms from any switch |
+| shader code reads an undefined value | zero `OpUndef` in either stage's SPIR-V |
+| the shader constants are wrong | steady state holds `scale=1 offset=0 uv=2250` for 59,746 consecutive frames; the `scale=0` and `uv=72/780` values are single contiguous runs at map-open |
+| a barrier before the draw fixes it | 2 dark frames in 40 min with and without (weak test: `Pipeline.Barrier` is a memory barrier, not a render-pass dependency) |
+| Metal load actions | `SetClearLoadAction` is only reached from HelperShader, and it is Metal-only while the flicker is cross-backend |
+
+By elimination: **the textures it samples are empty at read time**. `ModifiedSequence` on the
+first one increments every frame (+84) while the second stays 0 - so the map layer is
+re-rendered every frame and read every frame, a per-frame read-after-write dependency.
+
+**Instrument note.** Screenshot sampling turned out to be far weaker than assumed: intervals
+drift from 0.15 s to 1.6 s under load, so 2-13% of frames are seen. The per-arm "rate"
+numbers in the 8-28 retraction are undercounts, and the burstiness they showed is partly
+sampling luck. Absolute-luma detection on the shots agrees with frame differencing, so the
+counts are consistent - they are just low.
+
+### 8-29: the map flicker is upstream and predates the fork - measured with full frame coverage
+
+Screenshot sampling was the reason every arm had to be long and every negative was
+ambiguous: `screencapture` intervals drift from 0.15 s to 1.6 s, so 2-13% of a 30 fps game's
+frames were ever seen, and a 1-5 frame event was mostly missed. Recording the display with
+`screencapture -v` and walking every frame with ffmpeg raised coverage to 100%: ten minutes
+now carries more than three hours of the old method, and "not observed" finally means "did
+not happen". `tools/depths_video.sh` records (with a guard that refuses unless the emulator
+is the active application on the recorded display, after one run captured the user's own
+screen), `/tmp/vidluma.py` counts luma drops in the map region.
+
+**Measured the same way, ten minutes each, same save, same map screen:**
+
+| build | events |
+|---|---|
+| fork, Metal | 16 |
+| fork, Vulkan | 10 |
+| **stock upstream 1.2, Vulkan** | **10** |
+
+Same magnitude in all three (map region luma ~55 dropping to ~20 for 2-4 recorded frames).
+**The flicker is not a fork regression and not backend-specific: stock Ryujinx 1.2 has it
+too.** The earlier "stock is clean" (8-28) was screenshot sampling and is withdrawn, as is
+the reasoning built on it.
+
+**What the fork-side hunt established before that** (all within-run, still valid): the carrier
+is one fullscreen-quad draw per frame, program `8d06536778297b8b`, compositing the map into
+`R11G11B10Float 1920x1080`; on a flicker frame that draw is issued (`watched=1`), encoded with
+an identical pipeline, render target, viewport, scissor and depth state, and **produces no
+pixels at all** - a canary forced into its fragment shader writes a constant colour that is
+also missing, so it is not "the samples came back black". Four Metal pass/sync switches
+(read-after-write split off, split every draw, encoder fence off, barrier ends pass) each
+measured 14-20 events against a baseline of 17: no effect. Texture lifecycle, pool
+invalidation, buffer uploads, uniform binds, clears, scissor degeneracy and the shader
+constants are all identical on flicker frames.
+
+**Where this leaves it**: an upstream behaviour reproduced on a two-year-old stock build,
+where a draw that is correctly issued and encoded contributes nothing for a couple of frames.
+Nothing on the CPU side distinguishes those frames. Going further needs a GPU capture of a
+flicker frame, and the fix - if it is a fix at all rather than how the title behaves under
+emulation - belongs upstream.
+
+## 2026-08-29 地图闪：载体锁定为 binding 128 的纹理换绑
+
+**结论：闪的那一帧，地图合成着色器的第一张输入纹理被换成了另一张。**
+
+### 证据链
+
+先看画面，不看数字。把闪帧和相邻帧做像素差（`/tmp/diffmask.py`）：
+
+- 丢失的是**整张地图图层**——地形、蓝色网格、外框光晕，改变区域 61% 像素、95% 变暗、
+  区域平均亮度 47.8 → 10.2
+- **幸存的是上层全部 UI**：文字、图标、光标、地名标签、底部按键栏、左侧柱状装饰
+- 持续 3–4 个录制帧（120fps）= 精确**一个游戏帧**
+
+也就是说不是"全屏变暗"，是合成层这一帧没产出。
+
+### 对齐方法：让数据自己找偏移
+
+地图在录制开始前就已打开，没有跳变可做锚点；靠进程时间推算的误差有 ±1.5s（45 个游戏帧），
+不足以做逐帧对应。改用**互相关**：对每个逐帧计数器，取"与局部众数（±25 帧）不符"的帧作为
+异常集，然后在 115–155s 的偏移范围内搜索，看哪个偏移能让异常集与视频闪烁集重合最多。
+
+这个做法自带验证——如果某计数器真是载体，它会在**某一个**偏移上突然全中，而那个偏移必须
+和物理估算吻合。
+
+结果（16 次视频闪烁）：
+
+| 计数器 | 命中 | 偏移 | 异常数 | 每偏移随机期望 |
+|---|---|---|---|---|
+| **wtex0** | **16/16** | **134.02s** | **17** | 0.06 |
+| ws0 | 16/16 | 134.02s | 48 | 0.18 |
+| clean | 4/16 | 134.02s | 74 | 0.28 |
+| texrem / uploads / texadd / flushes / dispatch / watched | 0–1/16 | — | 109–266 | 0.4–1.0 |
+
+`wtex0` 在 20514 帧里只偏离过 **17 次**，其中 16 次命中；第 17 次在 t=129.5s，
+**录制起点 134.0s 之前**——不是漏检，是根本没录到。等于 17/17。
+`ws0` 是同一信号（该纹理 group 的 `ModifiedSequence`），非独立证据。
+
+偏移 134.02s 与按进程存活时间独立估算的 ~132s 吻合，对齐本身因此也被证明。
+
+### 换绑的样子
+
+```
+prev  wtex0=012FB0C2  watched=1  texadd=0 texrem=0
+DEV   wtex0=001E97EE  watched=1  texadd=0 texrem=0    <- 闪
+next  wtex0=012FB0C2  watched=1  texadd=0 texrem=0
+```
+
+正常帧恒为 `012FB0C2`；异常帧 16 次为 `001E97EE`、1 次为 `01138414`。
+**`texadd=0`——没有新建纹理**，缓存把一张已存在的另一张纹理返回给了这次绑定。
+
+### 同时被排除的
+
+- **双缓冲调度无辜**：`ptex`（present 选中的纹理）20514 帧完美 ABAB，0 次连续重复；
+  `rthash` 同样 0 次重复，且与 `ptex` **一一配对**（9176/9175 次），相位从未错开。
+- CPU 侧其余计数器在闪帧上全部正常：draws、rtupd、clears、poolinv、bufup、dispatch、
+  texcopy、flushes 均无对应。
+- 早先"强制常量蓝也消失"的读数（mode 5）与本结论冲突，应视为可疑仪器：
+  蓝色占比判据在整层消失时同样会掉，无法区分"这次绘制没落地"和"这次绘制读错纹理"。
+
+### 下一步（v382 已构建）
+
+`RYUJINX_WATCH_BINDING=128` 在 `TextureBindingsManager.CommitTextureBindings` 里，
+当该 binding 的纹理对象变化时立刻打印：新旧 handle、guest 的 `textureId`/`packedId`、
+绕过快路径的**具体原因**（poolModified / id 变化 / CachedTexture 为空 / InvalidatedSequence
+不符 / sampler 已释放）、以及描述符与实际纹理的 address/format/尺寸/层级。
+
+这能直接分开两种可能：
+
+- `idChg=True` → **guest 索要的纹理句柄变了**。句柄来自常量缓冲，
+  嫌疑转向常量缓冲被读到了撕裂/过期的值。
+- `idChg=False` → **描述符没变而缓存返回了不同对象**，问题在纹理缓存的重叠解析。
+
+## 2026-08-29 地图闪：根因 = 纹理池槽位复用缺少读取时校验
+
+### 探针如何指到这里
+
+第一版探针把 `texswap` 打在 `CommitTextureBindings` 里，**一分钟 54 万行**——
+binding 128 被几百个程序共用。改成：绑定管理器只把"如何解析出来的"记进静态数组，
+由 `DrawManager` 在**被观察程序的那次绘制**上打印变化。地图停留期一共 20 行 = 10 次来回。
+
+### 直接证据
+
+每一次事件，同一行里的描述符与实际纹理**互相矛盾**：
+
+```
+desc[a=210A10000 w=2250 h=1080 fmt=24909(R10G10B10A2Unorm)]   <- 槽位当前内容
+tex [a=211590000 w=174  h=57   fmt=R8G8B8A8Unorm          ]   <- 返回给着色器的
+why[poolMod=False idChg=True cachedNull=False invSeqBad=False smpGone=False fastPath=False]
+```
+
+换回来那一帧则一致（`tex[a=210A10000 w=2250 h=1080 R10G10B10A2Unorm]`）。
+`id` 每帧都变（2809 / 5354 / 11680 / 22508 / 31383 …遍布 32k 槽位）⇒ 游戏用**滚动复用槽位**。
+`srgb=False` ⇒ 没走格式别名分支（那条 8-28 已证明与地图无关），走的是 `GetInternal`。
+
+### 机制
+
+`TexturePool.GetInternal`：
+
+```csharp
+texture = Items[id];
+ref readonly TextureDescriptor descriptor = ref GetDescriptorRef(id);
+
+if (texture == null) { ...按描述符解析...; DescriptorCache[id] = descriptor; }
+else { texture.SynchronizeMemory(); }   // 直接返回旧对象，从不比对描述符
+
+return ref descriptor;
+```
+
+`Items[id]` 只由 `InvalidateRangeImpl` 清空，而它靠 CPU 写入跟踪、**每帧同步一次**；
+`GetForBinding` 的注释明写"assume the pool has already been synchronized"。
+
+⇒ **游戏在本帧同步点之后改写槽位**时：描述符内存直通，读到的是新的；
+`Items[id]` 还是该槽位上一轮指向的纹理；两者无人比对 ⇒ 交给着色器一张无关纹理。
+
+因为槽位在几千个之间滚动复用，这个窗口一直开着，撞上就是一帧。
+`TexturePool` 是三后端共用层 ⇒ Metal / Vulkan / 原版同病，与本 fork 无关。
+
+### 修复
+
+把 `InvalidateRangeImpl` 已有的那次比对补到读取路径（`GetInternal`）：
+`Items[id]` 非空时先与 `DescriptorCache[id]` 比对，不符就按失效处理
+（进短缓存、递减引用、清 `_invalidMap`、置空）再走正常解析路径。
+`RYUJINX_POOL_DESC_CHECK=0` 关闭以便同构建 A/B；命中计入 `gpuframe … poolstale=`，
+并打印前 40 次 `poolstale id=… desc[…] stale[…]` 以自证补丁真的在跑。
