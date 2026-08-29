@@ -803,6 +803,13 @@ namespace Ryujinx.Graphics.Metal
             if (forDraw)
             {
                 _encoderStateManager.RebindRenderState(renderCommandEncoder);
+
+                // Only now is the pass genuinely writing its attachments. The split
+                // decision for this draw is already made above, so this marks them for
+                // the draws that follow - which is what makes a split worth anything:
+                // the pass it opens starts with an empty write set instead of the same
+                // attachments that caused the split.
+                _encoderStateManager.MarkPassAttachmentsWritten();
             }
 
             return renderCommandEncoder;
@@ -1319,6 +1326,15 @@ namespace Ryujinx.Graphics.Metal
                         $"{draws / (ulong)SyncStatsLogFrameInterval} draws " +
                         $"({(passes != 0 ? (double)draws / passes : 0):F1} draws/pass).";
 
+                    // Every stats block reports the configuration it was produced under.
+                    // Two builds that differ only in an uncommitted change log the same
+                    // version string, so a hot-switched A/B could not otherwise be told
+                    // from a build that never had the change in it.
+                    string configText =
+                        $" config: splitScope={(EncoderStateManager.SplitScopePass ? "pass" : "cb")}, " +
+                        $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : "all")}, " +
+                        $"markOnDraw={EncoderStateManager.MarkOnDrawActive}.";
+
                     string reasonText = " pass ends: " + string.Join(", ", Enum.GetValues<PassEndReason>()
                         .Where(r => _passEndReasons[(int)r] != 0)
                         .OrderByDescending(r => _passEndReasons[(int)r])
@@ -1342,7 +1358,7 @@ namespace Ryujinx.Graphics.Metal
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
-                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{reasonText}{revisitText}{gateText}{blitText}");
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{reasonText}{revisitText}{gateText}{blitText}{configText}");
                 }
             }
 
