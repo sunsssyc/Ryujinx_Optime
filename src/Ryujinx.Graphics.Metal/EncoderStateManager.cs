@@ -500,6 +500,7 @@ namespace Ryujinx.Graphics.Metal
 
         public readonly MTLRenderCommandEncoder CreateRenderCommandEncoder()
         {
+            _passAttachments.Clear();
             // Initialise Pass & State
             using MTLRenderPassDescriptor renderPassDescriptor = new();
 
@@ -555,7 +556,14 @@ namespace Ryujinx.Graphics.Metal
                     // earlier pass, which is what buried the feedback signal twice.
                     FeedbackProbe.NoteAttachment(i, tex);
                     UploadCorrelator.NoteAttachment(tex, _currentState.ClearLoadAction);
-                    NoteAttachmentWritten(tex.CanonicalPtr);
+                    if (SplitScopePass)
+                    {
+                        _passAttachments.Add(tex.CanonicalPtr);
+                    }
+                    else
+                    {
+                        NoteAttachmentWritten(tex.CanonicalPtr);
+                    }
                     NotePassSize((ulong)tex.Width, (ulong)tex.Height);
                 }
             }
@@ -579,7 +587,14 @@ namespace Ryujinx.Graphics.Metal
                 // restores the old behaviour for A/B.
                 if (_depthInWriteSet)
                 {
-                    NoteAttachmentWritten(_currentState.DepthStencil.CanonicalPtr);
+                    if (SplitScopePass)
+                    {
+                        _passAttachments.Add(_currentState.DepthStencil.CanonicalPtr);
+                    }
+                    else
+                    {
+                        NoteAttachmentWritten(_currentState.DepthStencil.CanonicalPtr);
+                    }
                 }
                 switch (_currentState.DepthStencil.GetHandle().PixelFormat)
                 {
@@ -2280,6 +2295,15 @@ namespace Ryujinx.Graphics.Metal
         /// this game issues rarely; this keys on the hazard actually occurring.
         /// </summary>
         private readonly HashSet<IntPtr> _writtenThisCb = new();
+
+        /// <summary>
+        /// The current pass's attachments, held back until a draw actually writes them.
+        /// Marking them when the pass descriptor was built made every split pointless:
+        /// the pass opened by a split re-marked the same attachments before encoding a
+        /// single draw, so the next draw that sampled one split again - 674 times a
+        /// frame, every one of them resuming the same render target. Pass scope only.
+        /// </summary>
+        private readonly List<IntPtr> _passAttachments = new();
         private static readonly bool _depthInWriteSet = Environment.GetEnvironmentVariable("RYUJINX_METAL_DEPTH_RAW") == "1";
 
         public readonly void NoteAttachmentWritten(IntPtr root)
@@ -2291,23 +2315,33 @@ namespace Ryujinx.Graphics.Metal
         }
 
         // Scope of the read-after-write split's write set.
-        //   cb   (default, the behaviour measured so far): every texture that has been an
-        //        attachment anywhere in this command buffer. A draw sampling one splits the
-        //        pass - 414 times a frame, and most of those writes finished passes ago and
-        //        are already ordered by those pass boundaries and by Metal's own cross-encoder
-        //        hazard tracking.
-        //   pass: only textures written by the CURRENT pass. That is the dependency Metal
-        //        genuinely cannot express - a fragment write followed by a fragment read
-        //        inside one encoder - and it is what Ultrahand's readback needs ordered.
-        // RYUJINX_METAL_RAW_SPLIT_SCOPE=pass to narrow it.
+        //   pass (default): only textures written by the CURRENT pass, and only once a draw
+        //        has actually written them. That is the dependency Metal genuinely cannot
+        //        express - a fragment write followed by a fragment read inside one encoder -
+        //        and it is what Ultrahand's readback needs ordered.
+        //   cb:  every texture that has been an attachment anywhere in this command buffer.
+        //        A draw sampling one splits the pass even though that write finished passes
+        //        ago and is already ordered by those pass boundaries and by Metal's own
+        //        cross-encoder hazard tracking.
+        // Measured by flipping the toggle every 30s inside one session while the game was
+        // played normally, 48 blocks against 54: -220 passes a frame (2.9 SE) and -7.3 ms a
+        // frame (2.5 SE) at equal draw counts, worth about +15% on an average scene and more
+        // on dense ones. Ultrahand grab, rotate, glue and release all verified unaffected.
+        // RYUJINX_METAL_RAW_SPLIT_SCOPE=cb to go back.
         // Hot-switchable like the split itself: /tmp/ryujinx-metal-split-scope holds "pass"
         // or "cb", re-read once a frame. Static env vars cannot be A/B'd inside one session,
         // and cross-session comparison on this machine is worthless - the scene varies more
         // than the setting does (8,964 draws a frame in one view against 2,528 in another).
         private static bool _splitScopePass =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT_SCOPE") == "pass";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT_SCOPE") != "cb";
         private static readonly bool _splitScopeDefault = _splitScopePass;
         public static bool SplitScopePass => _splitScopePass;
+
+        /// <summary>
+        /// True when the write set is filled by draws rather than by binding attachments.
+        /// Reported in the stats line so a run can prove which code it is running.
+        /// </summary>
+        public static bool MarkOnDrawActive => _splitScopePass;
 
         public static void RefreshSplitScope()
         {
@@ -2320,6 +2354,19 @@ namespace Ryujinx.Graphics.Metal
             catch (IOException)
             {
                 // Raced with the writer; the next frame picks it up.
+            }
+        }
+
+        /// <summary>
+        /// A draw is about to be encoded into the current pass, so the pass really does
+        /// write its attachments from here on. Called after the split decision for that
+        /// draw has been made, so the draw itself never splits on its own output.
+        /// </summary>
+        public readonly void MarkPassAttachmentsWritten()
+        {
+            for (int i = 0; i < _passAttachments.Count; i++)
+            {
+                _writtenThisCb.Add(_passAttachments[i]);
             }
         }
 
