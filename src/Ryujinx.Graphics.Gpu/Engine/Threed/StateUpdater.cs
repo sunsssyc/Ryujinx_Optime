@@ -668,6 +668,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                         height = (int)MathF.Ceiling(height * scale);
                     }
 
+                    if (width <= 0 || height <= 0)
+                    {
+                        Ryujinx.Common.SyncMemDiag.IncrementDegenerateScissor();
+                    }
+
                     regions[index] = new Rectangle<int>(x, y, width, height);
                 }
                 else

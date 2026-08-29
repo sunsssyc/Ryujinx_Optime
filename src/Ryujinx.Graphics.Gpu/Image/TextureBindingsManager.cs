@@ -92,6 +92,32 @@ namespace Ryujinx.Graphics.Gpu.Image
 
     class TextureBindingsManager
     {
+        /// <summary>Hash of the texture last resolved for each fragment-stage binding.
+        /// Read by the watched-draw probe in DrawManager.</summary>
+        public static readonly int[] LastBoundTex = new int[512];
+
+        /// <summary>
+        /// Fragment binding to trace texture swaps on. The map composite samples binding 128;
+        /// one frame in a thousand it resolves to a different texture and the layer vanishes.
+        /// RYUJINX_WATCH_BINDING=128.
+        /// </summary>
+        public static readonly int[] LastBoundId = new int[512];
+        public static readonly int[] LastBoundPacked = new int[512];
+        public static readonly int[] LastBoundWhy = new int[512];
+        public static readonly string[] LastBoundDesc = new string[512];
+        public static readonly string[] LastBoundTexInfo = new string[512];
+
+        private static readonly int WatchBinding =
+            int.TryParse(System.Environment.GetEnvironmentVariable("RYUJINX_WATCH_BINDING"), out int wb) ? wb : -1;
+
+        /// <summary>ModifiedSequence of the texture last resolved for each fragment
+        /// binding: separates a layer re-rendered every frame from one drawn once.</summary>
+        public static readonly long[] LastBoundSeq = new long[512];
+
+        public static readonly bool ProbeLog =
+            System.Environment.GetEnvironmentVariable("RYUJINX_TEXBIND_PROBE") == "1";
+        private static int ProbeCount;
+
         private const int InitialTextureStateSize = 32;
         private const int InitialImageStateSize = 8;
 
@@ -563,6 +589,20 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 ref TextureState state = ref _textureState[bindingInfo.Binding];
 
+                bool wbWatch = WatchBinding >= 0 && stage == ShaderStage.Fragment && bindingInfo.Binding == WatchBinding;
+                int wbPrevHandle = 0, wbPrevInvSeq = 0, wbPrevTexInvSeq = 0, wbPrevHash = 0;
+                bool wbPrevNull = false, wbSamplerGone = false;
+
+                if (wbWatch)
+                {
+                    wbPrevHandle = state.TextureHandle;
+                    wbPrevInvSeq = state.InvalidatedSequence;
+                    wbPrevNull = state.CachedTexture == null;
+                    wbPrevTexInvSeq = state.CachedTexture?.InvalidatedSequence ?? -1;
+                    wbPrevHash = state.CachedTexture?.GetHashCode() ?? 0;
+                    wbSamplerGone = state.CachedSampler?.IsDisposed == true;
+                }
+
                 if (!poolModified &&
                     state.TextureHandle == textureId &&
                     state.SamplerHandle == samplerId &&
@@ -571,6 +611,33 @@ namespace Ryujinx.Graphics.Gpu.Image
                     state.CachedSampler?.IsDisposed != true)
                 {
                     // The texture is already bound.
+                    if (ProbeLog && ProbeCount < 40)
+                    {
+                        ProbeCount++;
+                        Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(
+                            Ryujinx.Common.Logging.LogClass.Gpu,
+                            $"texbindprobe cached stage={stage} binding={bindingInfo.Binding}");
+                    }
+
+                    if (stage == ShaderStage.Fragment && bindingInfo.Binding < LastBoundTex.Length)
+                    {
+                        LastBoundTex[bindingInfo.Binding] = state.CachedTexture.GetHashCode();
+                        LastBoundSeq[bindingInfo.Binding] = state.CachedTexture.Group?.ModifiedSequence ?? -1;
+                    }
+
+                    if (wbWatch)
+                    {
+                        LastBoundId[bindingInfo.Binding] = textureId;
+                        LastBoundPacked[bindingInfo.Binding] = packedId;
+                        LastBoundWhy[bindingInfo.Binding] = 32; // took the cached fast path
+                        LastBoundDesc[bindingInfo.Binding] = "(fast path, descriptor not read)";
+                        LastBoundTexInfo[bindingInfo.Binding] =
+                            $"a={state.CachedTexture.Info.GpuAddress:X} fmt={state.CachedTexture.Info.FormatInfo.Format} " +
+                            $"w={state.CachedTexture.Info.Width} h={state.CachedTexture.Info.Height} " +
+                            $"dl={state.CachedTexture.Info.DepthOrLayers} lvl={state.CachedTexture.Info.Levels} " +
+                            $"invSeq={state.CachedTexture.InvalidatedSequence}";
+                    }
+
                     state.CachedTexture.SynchronizeMemory();
 
                     if ((usageFlags & TextureUsageFlags.NeedsScaleValue) != 0 &&
@@ -602,6 +669,40 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 ITexture hostTexture = texture?.GetTargetTexture(bindingInfo.Target);
                 ISampler hostSampler = sampler?.GetHostSampler(texture);
+
+                // Remember what the fragment stage's low bindings resolved to, so the draw
+                // that composites the Depths map's terrain layer - one fullscreen quad per
+                // frame - can report the texture it sampled. A draw that runs and shows
+                // nothing is either reading the wrong texture or an empty one.
+                if (LastBoundTex != null && stage == ShaderStage.Fragment && bindingInfo.Binding < LastBoundTex.Length)
+                {
+                    LastBoundTex[bindingInfo.Binding] = texture?.GetHashCode() ?? 0;
+                    LastBoundSeq[bindingInfo.Binding] = texture?.Group?.ModifiedSequence ?? -1;
+                }
+
+                if (wbWatch)
+                {
+                    // Record how this binding resolved, do not log it here: binding 128 is used
+                    // by hundreds of programs and logging every swap buried the map's own draw
+                    // under 540k lines a minute. DrawManager prints this, gated to the one
+                    // program that composites the map layer.
+                    LastBoundId[bindingInfo.Binding] = textureId;
+                    LastBoundPacked[bindingInfo.Binding] = packedId;
+                    LastBoundWhy[bindingInfo.Binding] =
+                        (poolModified ? 1 : 0) |
+                        (wbPrevHandle != textureId ? 2 : 0) |
+                        (wbPrevNull ? 4 : 0) |
+                        (wbPrevInvSeq != wbPrevTexInvSeq ? 8 : 0) |
+                        (wbSamplerGone ? 16 : 0);
+                    LastBoundDesc[bindingInfo.Binding] =
+                        $"a={descriptor.UnpackAddress():X} fmt={descriptor.UnpackFormat():X} " +
+                        $"w={descriptor.UnpackWidth()} h={descriptor.UnpackHeight()} d={descriptor.UnpackDepth()} " +
+                        $"lvl={descriptor.UnpackLevels()} tgt={descriptor.UnpackTextureTarget()} srgb={descriptor.UnpackSrgb()}";
+                    LastBoundTexInfo[bindingInfo.Binding] = texture == null ? "null" :
+                        $"a={texture.Info.GpuAddress:X} fmt={texture.Info.FormatInfo.Format} " +
+                        $"w={texture.Info.Width} h={texture.Info.Height} dl={texture.Info.DepthOrLayers} " +
+                        $"lvl={texture.Info.Levels} invSeq={texture.InvalidatedSequence}";
+                }
 
                 if (hostTexture != null && texture.Target == Target.TextureBuffer)
                 {

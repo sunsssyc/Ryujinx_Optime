@@ -267,10 +267,12 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             try
             {
+                Ryujinx.Common.SyncMemDiag.IncrementTexRemove();
                 _textures.Remove(texture);
 
                 texture.ReplaceRange(range);
 
+                Ryujinx.Common.SyncMemDiag.IncrementTexAdd();
                 _textures.Add(texture);
             }
             finally
@@ -1254,6 +1256,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             try
             {
+                Ryujinx.Common.SyncMemDiag.IncrementTexAdd();
                 _textures.Add(texture);
             }
             finally
@@ -1479,6 +1482,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             try
             {
+                Ryujinx.Common.SyncMemDiag.IncrementTexRemove();
                 _textures.Remove(texture);
             }
             finally

@@ -829,6 +829,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         /// <param name="layerCount">For array and 3D textures, indicates how many layers should be cleared</param>
         public void Clear(int argument, int layerCount)
         {
+            Ryujinx.Common.SyncMemDiag.IncrementClear();
+
             _drawManager.Clear(this, argument, layerCount);
         }
 

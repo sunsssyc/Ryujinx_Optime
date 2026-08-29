@@ -51,6 +51,12 @@ namespace Ryujinx.Graphics.Metal
         private const int MaxDisposedResourceCountForFlush = 4096;
         private const int SyncStatsLogFrameInterval = 120;
 
+        // RYUJINX_METAL_FRAME_LINE=1: one log line per presented frame.
+        private static readonly bool _frameLine =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FRAME_LINE") == "1";
+        private ulong _lastFrameLineDraws;
+        private ulong _lastFrameLineRenderPasses;
+
         private readonly MTLDevice _device;
         private readonly MetalRenderer _renderer;
         private EncoderStateManager _encoderStateManager;
@@ -345,6 +351,11 @@ namespace Ryujinx.Graphics.Metal
         }
 
         internal long PoolRentSeq(int cbIndex) => _renderer.CommandBufferPool.RentSeqOf(cbIndex);
+
+        // RYUJINX_METAL_WATCH_ENCODE=<label prefix>: dump how one program's draw is encoded,
+        // once per occurrence.
+        private static readonly bool _watchEncode =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_WATCH_ENCODE") == "1";
 
         private bool SkipThisDraw()
         {
@@ -1255,6 +1266,20 @@ namespace Ryujinx.Graphics.Metal
             _renderer.FrameCapture.BeginScope();
 
             _presentCount++;
+
+            if (_frameLine)
+            {
+                // One line per presented frame: the map flicker lasts about five frames
+                // and the 120-frame stats block cannot see it. Tells "the draws were
+                // skipped" from "the draws ran and read nothing".
+                ulong fDraws = DrawCount - _lastFrameLineDraws;
+                ulong fPasses = _renderPassCount - _lastFrameLineRenderPasses;
+                _lastFrameLineDraws = DrawCount;
+                _lastFrameLineRenderPasses = _renderPassCount;
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"frameline f={_presentCount} t={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} " +
+                    $"passes={fPasses} draws={fDraws} skipped={_skippedDraws} rawsplits={_rawSplits}");
+            }
 
             if (_presentCount % SyncStatsLogFrameInterval == 0)
             {
@@ -2191,6 +2216,26 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndexed(int indexCount, int instanceCount, int firstIndex, int firstVertex, int firstInstance)
         {
+            if (_watchEncode && _encoderStateManager.RenderProgram?.IsWatchedMapShader == true)
+            {
+                // The one draw that composites the Depths map is issued on every frame and
+                // its output is missing on a flicker frame even when the shader writes a
+                // constant - so what differs has to be in how this draw is encoded. Record
+                // the pieces of that encoding per frame; the flicker frames are identified
+                // offline from a recording and lined up by timestamp.
+                MTLRenderCommandEncoder enc = GetOrCreateRenderEncoder(true);
+                Texture rt0 = _encoderStateManager.RenderTargets.Length > 0
+                    ? _encoderStateManager.RenderTargets[0]
+                    : null;
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"watchenc t={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} " +
+                    $"idx={indexCount} inst={instanceCount} enc={enc.NativePtr:X} " +
+                    $"prog={_encoderStateManager.RenderProgram?.GetHashCode():X8} " +
+                    $"rt0={rt0?.GetHashCode() ?? 0:X8} rtw={rt0?.Width ?? 0} rth={rt0?.Height ?? 0} " +
+                    $"raster={_encoderStateManager.DescribeRaster()}");
+            }
+
             if (SkipThisDraw())
             {
                 return;

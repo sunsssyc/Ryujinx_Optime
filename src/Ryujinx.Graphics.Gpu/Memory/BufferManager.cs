@@ -688,6 +688,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                         }
                     }
 
+                    Ryujinx.Common.SyncMemDiag.IncrementSbBind();
                     _context.Renderer.Pipeline.SetStorageBuffers(buffers);
                 }
             }
@@ -824,10 +825,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             if (isStorage)
             {
+                Ryujinx.Common.SyncMemDiag.IncrementSbBind();
                 _context.Renderer.Pipeline.SetStorageBuffers(ranges[..count]);
             }
             else
             {
+                Ryujinx.Common.SyncMemDiag.IncrementUbBind();
                 _context.Renderer.Pipeline.SetUniformBuffers(ranges[..count]);
             }
         }

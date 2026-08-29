@@ -66,6 +66,23 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
         // process launch per candidate set, and each launch has to be focused by hand
         // before input can be injected.
         private const string SkipListPath = "/tmp/ryujinx-skip-progs";
+
+        // RYUJINX_WATCH_PROG=<label>: count this program's draws per frame. One fullscreen
+        // quad lost among four hundred draws needs its own counter to be visible.
+        private static readonly string _watchProg =
+            Environment.GetEnvironmentVariable("RYUJINX_WATCH_PROG");
+
+        private static bool _watchStagesLogged;
+
+        private static readonly bool _watchConst =
+            Environment.GetEnvironmentVariable("RYUJINX_WATCH_CONST") == "1";
+
+        private int _watchTexPrev;
+        private int _watchIdPrev = -1;
+        private int _watchPackedPrev;
+
+        private static readonly bool _watchBarrier =
+            Environment.GetEnvironmentVariable("RYUJINX_WATCH_BARRIER") == "1";
         private static long _skipListStamp = -1;
         private static int _skipCheckCounter;
 
@@ -629,6 +646,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             dstX1 *= dstScale;
             dstY1 *= dstScale;
 
+            Ryujinx.Common.SyncMemDiag.IncrementDrawTexture();
             _context.Renderer.Pipeline.DrawTexture(
                 texture?.HostTexture,
                 sampler?.GetHostSampler(texture),
@@ -736,6 +754,98 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             // engine state update that precedes this call).
             ReloadSkipListIfChanged();
 
+            if (_watchProg != null &&
+                GetTraceProgramLabel(_currentSpecState.CurrentGraphicsShader) == _watchProg)
+            {
+                Ryujinx.Common.SyncMemDiag.IncrementWatchedDraw();
+
+                if (_watchConst)
+                {
+                    // out.rgb = (texA * texB) * fp_c3.data[0] + fp_c3.data[1] and the UVs
+                    // come from vp_c3.data[33] - so a black frame from a draw that runs
+                    // with the right textures bound has to come from these constants.
+                    // Fragment stage is 4, vertex 0; the shaders bind c3 as index 3.
+                    ulong fAddr = _channel.BufferManager.GetGraphicsUniformBufferAddress(4, 3);
+                    ulong vAddr = _channel.BufferManager.GetGraphicsUniformBufferAddress(0, 3);
+                    float f0 = 0, f1 = 0, v33 = 0;
+
+                    if (fAddr != 0)
+                    {
+                        ReadOnlySpan<byte> fb = _channel.MemoryManager.Physical.GetSpan(fAddr, 32);
+                        f0 = BitConverter.ToSingle(fb[..4]);
+                        f1 = BitConverter.ToSingle(fb.Slice(16, 4));
+                    }
+
+                    if (vAddr != 0)
+                    {
+                        ReadOnlySpan<byte> vb = _channel.MemoryManager.Physical.GetSpan(vAddr + 33 * 16, 4);
+                        v33 = BitConverter.ToSingle(vb);
+                    }
+
+                    Ryujinx.Common.SyncMemDiag.NoteWatchedConst(f0, f1, v33);
+                }
+
+                if (!_watchStagesLogged)
+                {
+                    // Name the watched program's stages by the same guest-code hash that
+                    // RYUJINX_SHADER_DIFF uses for its dumps, so the translated source of
+                    // the draw that composites the map can actually be read.
+                    _watchStagesLogged = true;
+                    CachedShaderProgram wp = _currentSpecState.CurrentGraphicsShader;
+                    int si = 0;
+                    foreach (CachedShaderStage st in wp.Shaders)
+                    {
+                        if (st?.Code != null)
+                        {
+                            string h = System.Convert.ToHexString(
+                                System.Security.Cryptography.MD5.HashData(st.Code))[..16];
+                            Logger.Warning?.PrintMsg(LogClass.Gpu,
+                                $"watchstage idx={si} hash={h} bytes={st.Code.Length}");
+                        }
+                        si++;
+                    }
+                }
+
+                if (_watchBarrier)
+                {
+                    // The map's layers are composed into a texture and then blitted to the
+                    // HDR target by this single fullscreen quad. On a flicker frame the quad
+                    // runs and binds the same texture as always, yet nothing appears - which
+                    // is what a read that outruns the writes into that texture looks like.
+                    // If forcing the writes to land first removes the flicker, that is the
+                    // hazard. RYUJINX_WATCH_BARRIER=1.
+                    _context.Renderer.Pipeline.Barrier();
+                }
+                Ryujinx.Common.SyncMemDiag.NoteWatchedTex(
+                    Image.TextureBindingsManager.LastBoundTex[128],
+                    Image.TextureBindingsManager.LastBoundTex[129]);
+                Ryujinx.Common.SyncMemDiag.NoteWatchedSeq(
+                    Image.TextureBindingsManager.LastBoundSeq[128],
+                    Image.TextureBindingsManager.LastBoundSeq[129]);
+
+                // One frame in a thousand this binding resolves to a different texture and the
+                // map layer vanishes. Print only the transition, and only for this program:
+                // binding 128 is shared by hundreds of shaders, logging every swap there buried
+                // this draw under 540k lines a minute.
+                int wtNow = Image.TextureBindingsManager.LastBoundTex[128];
+
+                if (wtNow != _watchTexPrev)
+                {
+                    int why = Image.TextureBindingsManager.LastBoundWhy[128];
+                    Ryujinx.Common.Logging.Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
+                        $"texswap {_watchTexPrev:X8}->{wtNow:X8} id={_watchIdPrev}->{Image.TextureBindingsManager.LastBoundId[128]} " +
+                        $"packed={_watchPackedPrev:X8}->{Image.TextureBindingsManager.LastBoundPacked[128]:X8} " +
+                        $"why[poolMod={(why & 1) != 0} idChg={(why & 2) != 0} cachedNull={(why & 4) != 0} " +
+                        $"invSeqBad={(why & 8) != 0} smpGone={(why & 16) != 0} fastPath={(why & 32) != 0}] " +
+                        $"desc[{Image.TextureBindingsManager.LastBoundDesc[128]}] " +
+                        $"tex[{Image.TextureBindingsManager.LastBoundTexInfo[128]}]");
+
+                    _watchTexPrev = wtNow;
+                    _watchIdPrev = Image.TextureBindingsManager.LastBoundId[128];
+                    _watchPackedPrev = Image.TextureBindingsManager.LastBoundPacked[128];
+                }
+            }
+
             if (_skipProgs.Count != 0 &&
                 _skipProgs.Contains(GetTraceProgramLabel(_currentSpecState.CurrentGraphicsShader)))
             {
@@ -775,10 +885,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             {
                 if (indexed)
                 {
+                    Ryujinx.Common.SyncMemDiag.IncrementDraw();
                     _context.Renderer.Pipeline.DrawIndexed(count, instanceCount, firstIndex, firstVertex, firstInstance);
                 }
                 else
                 {
+                    Ryujinx.Common.SyncMemDiag.IncrementDraw();
                     _context.Renderer.Pipeline.Draw(count, instanceCount, firstVertex, firstInstance);
                 }
             }
@@ -858,10 +970,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
 
                 if (indexed)
                 {
+                    Ryujinx.Common.SyncMemDiag.IncrementIndirectDraw();
                     _context.Renderer.Pipeline.DrawIndexedIndirectCount(indirectBuffer, parameterBuffer, maxDrawCount, stride);
                 }
                 else
                 {
+                    Ryujinx.Common.SyncMemDiag.IncrementIndirectDraw();
                     _context.Renderer.Pipeline.DrawIndirectCount(indirectBuffer, parameterBuffer, maxDrawCount, stride);
                 }
             }
@@ -871,10 +985,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
 
                 if (indexed)
                 {
+                    Ryujinx.Common.SyncMemDiag.IncrementIndirectDraw();
                     _context.Renderer.Pipeline.DrawIndexedIndirect(indirectBuffer);
                 }
                 else
                 {
+                    Ryujinx.Common.SyncMemDiag.IncrementIndirectDraw();
                     _context.Renderer.Pipeline.DrawIndirect(indirectBuffer);
                 }
             }

@@ -211,6 +211,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw
 
             _vacContext.VertexInfoBufferUpdater.Commit();
 
+            Ryujinx.Common.SyncMemDiag.IncrementDispatch();
             _context.Renderer.Pipeline.DispatchCompute(
                 BitUtils.DivRoundUp(_count, ComputeLocalSize),
                 BitUtils.DivRoundUp(_instanceCount, ComputeLocalSize),
@@ -259,6 +260,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw
                 new BufferAssignment(geometryIbBinding, indexBuffer)
             ]);
 
+            Ryujinx.Common.SyncMemDiag.IncrementDispatch();
             _context.Renderer.Pipeline.DispatchCompute(
                 BitUtils.DivRoundUp(primitivesCount, ComputeLocalSize),
                 BitUtils.DivRoundUp(_instanceCount, ComputeLocalSize),

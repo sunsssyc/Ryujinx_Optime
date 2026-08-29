@@ -63,6 +63,10 @@ namespace Ryujinx.Graphics.Metal
         /// chars. Used by the draw/dispatch trace to identify shaders, and as the
         /// file name prefix for <see cref="DumpSources"/>.
         /// </summary>
+        /// <summary>Set when this program's fragment source matches
+        /// RYUJINX_METAL_MAP_CANARY_HASH - the Depths map composite.</summary>
+        public bool IsWatchedMapShader { get; private set; }
+
         public string DebugLabel
         {
             get
@@ -669,6 +673,156 @@ namespace Ryujinx.Graphics.Metal
             return patched;
         }
 
+
+        /// <summary>
+        /// RYUJINX_METAL_MAP_CANARY=1: the Depths map's composite is one fullscreen quad whose
+        /// fragment shader is out.rgb = (texA * texB) * scale + offset. Every CPU-side
+        /// observable is identical on a flicker frame - the draw runs, the same textures are
+        /// bound, their modified sequence advances, the constants hold - so the remaining
+        /// question is what the samples themselves come back as, and that is only answerable
+        /// on the GPU. Colour the output by which sample is black instead of dumping anything:
+        /// red = texA black, green = texB black, magenta = both. A flicker frame that stays
+        /// black under this patch means the samples were fine and the output was lost later.
+        /// </summary>
+        private static string MapCanary(string code)
+        {
+            // The composite writes its channels from temporaries, so match on the sampling
+            // statements and the four channel writes rather than on an fma at the output.
+            if (code == null || !code.Contains("out.color0.x = ") || !code.Contains("out.color0.w = "))
+            {
+                return code;
+            }
+
+            MatchCollection samples = Regex.Matches(
+                code, @"(\w+) = textures\.\w+\.sample\(textures\.\w+, float2\([^)]*\)\)\.xyzw;");
+
+            if (samples.Count != 2)
+            {
+                return code;
+            }
+
+            // Binding names are shared by a hundred shaders, so identify the one that
+            // composites the map by the hash of its whole translated source - the same
+            // text RYUJINX_SHADER_DIFF writes, so the target is read off a dump.
+            // RYUJINX_METAL_MAP_CANARY_HASH=<md5 hex>.
+            string codeHash = Convert.ToHexString(
+                System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(code))).ToLowerInvariant();
+
+            if (_mapCanaryHash == null)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"map-canary candidate {codeHash}");
+                return code;
+            }
+
+            if (codeHash != _mapCanaryHash)
+            {
+                return code;
+            }
+
+            string a = samples[0].Groups[1].Value;
+            string b = samples[1].Groups[1].Value;
+
+            // The generated MSL ends with two `return out;` in a row, so LastIndexOf puts the
+            // canary after the function has already returned - dead code that looks exactly
+            // like a patch that never applied. Anchor on the first return that follows the
+            // colour writes instead.
+            int wpos = code.LastIndexOf("out.color0.w = ", StringComparison.Ordinal);
+            int ret = wpos < 0 ? -1 : code.IndexOf("return out;", wpos, StringComparison.Ordinal);
+
+            if (ret < 0)
+            {
+                return code;
+            }
+
+            // RYUJINX_METAL_MAP_CANARY=2 inverts the test: paint on a NON-black sample, so
+            // the map turns solid red while the patch is live. Proving the patch reaches this
+            // shader has to come before trusting a run that reports no hits.
+            // Mode 3 paints unconditionally: the output no longer depends on the samples at
+            // all, so a frame where the colour is missing proves the fragment's output is
+            // discarded after the shader rather than the shader producing black.
+            // Mode 3 paints unconditionally (proved the output is never lost after the
+            // shader). Mode 1's first pass tested for exactly zero and never fired on a
+            // flicker frame, which only rules out exact zero: two small samples multiplied
+            // together read as black long before either reaches it. The threshold is
+            // therefore configurable - RYUJINX_METAL_MAP_CANARY_EPS, default 0.01.
+            string cmp = _mapCanaryAlways ? ">=" : (_mapCanaryInvert ? ">" : "<");
+            string eps = _mapCanaryAlways || _mapCanaryInvert
+                ? "0.0f"
+                : _mapCanaryEps.ToString("0.0######", System.Globalization.CultureInfo.InvariantCulture) + "f";
+
+            string canary =
+                $"    bool _ca = ({a}.x + {a}.y + {a}.z) {cmp} {eps};\n" +
+                $"    bool _cb = ({b}.x + {b}.y + {b}.z) {cmp} {eps};\n" +
+                "    if (_ca || _cb)\n" +
+                "    {\n" +
+                "        out.color0.x = (_ca && _cb) ? 1.0f : (_ca ? 1.0f : 0.0f);\n" +
+                "        out.color0.y = (_ca && _cb) ? 0.0f : (_cb ? 1.0f : 0.0f);\n" +
+                "        out.color0.z = (_ca && _cb) ? 1.0f : 0.0f;\n" +
+                "        out.color0.w = 1.0f;\n" +
+                "    }\n";
+
+            if (_mapCanaryFloor)
+            {
+                // Mode 3 painted unconditionally and never lost a frame - but an output that
+                // ignores the samples lets the compiler drop the texture reads, and with them
+                // whatever hazard the flicker needs. Keep x and y dependent on the samples so
+                // the reads survive, and force z to a constant: on a flicker frame, blue
+                // surviving means the samples came back black, blue vanishing means the draw
+                // produced nothing at all.
+                string floor = "    out.color0.z = 1.0f;\n";
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"map-canary: patched shader #{Interlocked.Increment(ref _mapCanaryPatched)} floor-mode");
+
+                return code.Insert(ret, floor);
+            }
+
+            if (_mapCanaryProduct)
+            {
+                // Modes 1-3 tested the two samples separately, which cannot see the case that
+                // actually produces black: the output is texA * texB, so 0.05 * 0.05 is a
+                // black pixel while each factor sits far above any per-sample threshold.
+                // Test the colour the shader is about to write instead.
+                string prod =
+                    $"    if ((out.color0.x + out.color0.y + out.color0.z) < {eps})\n" +
+                    "    {\n" +
+                    "        out.color0.x = 1.0f;\n" +
+                    "        out.color0.y = 0.0f;\n" +
+                    "        out.color0.z = 1.0f;\n" +
+                    "        out.color0.w = 1.0f;\n" +
+                    "    }\n";
+
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"map-canary: patched shader #{Interlocked.Increment(ref _mapCanaryPatched)} product eps={eps}");
+
+                return code.Insert(ret, prod);
+            }
+
+            Logger.Warning?.PrintMsg(LogClass.Gpu,
+                $"map-canary: patched shader #{Interlocked.Increment(ref _mapCanaryPatched)}" +
+                $" samples {a}/{b} invert={_mapCanaryInvert}");
+
+            return code.Insert(ret, canary);
+        }
+
+        private static readonly string _mapCanaryMode =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_MAP_CANARY");
+
+        private static readonly bool _mapCanary = _mapCanaryMode is "1" or "2" or "3" or "4" or "5";
+        private static readonly bool _mapCanaryProduct = _mapCanaryMode == "4";
+        private static readonly bool _mapCanaryFloor = _mapCanaryMode == "5";
+        private static readonly bool _mapCanaryInvert = _mapCanaryMode == "2";
+        private static readonly bool _mapCanaryAlways = _mapCanaryMode == "3";
+
+        private static readonly float _mapCanaryEps =
+            float.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_MAP_CANARY_EPS"),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out float e) ? e : 0.01f;
+
+        private static readonly string _mapCanaryHash =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_MAP_CANARY_HASH")?.ToLowerInvariant();
+        private static int _mapCanaryPatched;
+
         private static string GuardReciprocal(string code)
         {
             // Matched independently rather than as adjacent lines: the emitted MSL carries a
@@ -781,6 +935,21 @@ namespace Ryujinx.Graphics.Metal
             if (shader.Stage != ShaderStage.Fragment)
             {
                 return shader.Code;
+            }
+
+            // Mark the map composite by the hash of its translated source, the same way the
+            // canary finds it, so the draw-encoding probe can key off the program object
+            // instead of a label it would have to be told separately.
+            if (_mapCanaryHash != null && !IsWatchedMapShader)
+            {
+                string h = Convert.ToHexString(
+                    System.Security.Cryptography.MD5.HashData(
+                        System.Text.Encoding.UTF8.GetBytes(shader.Code))).ToLowerInvariant();
+
+                if (h == _mapCanaryHash)
+                {
+                    IsWatchedMapShader = true;
+                }
             }
 
             // The fragment half of the flare GPU dump (bit 32) - installed here, not via
@@ -921,6 +1090,11 @@ namespace Ryujinx.Graphics.Metal
             if (_sanitizeOutput)
             {
                 code = SanitizeColorOutputs(code);
+            }
+
+            if (_mapCanary)
+            {
+                code = MapCanary(code);
             }
 
             if (_blitPattern)

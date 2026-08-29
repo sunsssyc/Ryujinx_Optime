@@ -491,6 +491,8 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             if (anyChanged)
             {
+                Ryujinx.Common.SyncMemDiag.NoteRenderTarget(
+                    (_rtHostColors[0]?.GetHashCode() ?? 0) ^ (_rtHostDs?.GetHashCode() ?? 0));
                 _context.Renderer.Pipeline.SetRenderTargets(_rtHostColors, _rtHostDs);
             }
 
@@ -508,6 +510,8 @@ namespace Ryujinx.Graphics.Gpu.Image
             new Span<ITexture>(_rtHostColors).Clear();
             _rtHostDs = _rtDepthStencil?.HostTexture;
 
+            Ryujinx.Common.SyncMemDiag.NoteRenderTarget(
+                (_rtHostColors[0]?.GetHashCode() ?? 0) ^ (_rtHostDs?.GetHashCode() ?? 0));
             _context.Renderer.Pipeline.SetRenderTargets(_rtHostColors, _rtHostDs);
         }
 

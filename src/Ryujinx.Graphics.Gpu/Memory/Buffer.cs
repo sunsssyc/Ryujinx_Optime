@@ -303,6 +303,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     else
                     {
                         BackingState.RecordSet();
+                        Ryujinx.Common.SyncMemDiag.IncrementBufUpload();
                         _context.Renderer.SetBufferData(Handle, 0, _physicalMemory.GetSpan(Address, (int)Size));
                         CopyToDependantVirtualBuffers();
                     }
@@ -589,6 +590,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
             int offset = (int)(mAddress - Address);
 
+            Ryujinx.Common.SyncMemDiag.IncrementBufUpload();
             _context.Renderer.SetBufferData(Handle, offset, _physicalMemory.GetSpan(mAddress, (int)mSize));
 
             CopyToDependantVirtualBuffers(mAddress, mSize);

@@ -201,6 +201,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
 
             _channel.BufferManager.CommitComputeBindings();
 
+            Ryujinx.Common.SyncMemDiag.IncrementDispatch();
             _context.Renderer.Pipeline.DispatchCompute(qmd.CtaRasterWidth, qmd.CtaRasterHeight, qmd.CtaRasterDepth);
 
             _3dEngine.ForceShaderUpdate();

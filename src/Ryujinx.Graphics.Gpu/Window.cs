@@ -16,6 +16,12 @@ namespace Ryujinx.Graphics.Gpu
     {
         private static readonly bool _presentTrace =
             System.Environment.GetEnvironmentVariable("RYUJINX_GPU_PRESENT_TRACE") == "1";
+
+        // RYUJINX_GPU_FRAME_LINE=1: one line per presented frame with the texture
+        // synchronisation counters, for within-run comparison of flicker frames.
+        private static readonly bool _frameLine =
+            System.Environment.GetEnvironmentVariable("RYUJINX_GPU_FRAME_LINE") == "1";
+        private static long _frameLineCount;
         private static int _presentTraceCount;
 
         // Presenting the sRGB render target instead of the Unorm shadow was a white-flash
@@ -221,6 +227,38 @@ namespace Ryujinx.Graphics.Gpu
         {
             _context.AdvanceSequence();
 
+            if (_frameLine)
+            {
+                // One line per presented frame, both backends. The map flicker lasts about
+                // five frames and is far too rare to compare across runs (eight identical
+                // arms measured 0.00-0.67 events per minute), so the only usable comparison
+                // is a flicker frame against its own neighbours inside one run. `uploads`
+                // is the interesting one: guest memory written over a region the GPU had
+                // rendered.
+                (int uploads, int prot, int clean, int flushes) = Common.SyncMemDiag.SnapshotAndReset();
+                (int degenScissor, int clears, int draws) = Common.SyncMemDiag.SnapshotAndResetDraw();
+                (int indirect, int drawTex, int rtUpdates, int rtHash) = Common.SyncMemDiag.SnapshotAndResetDraw2();
+                (int texAdd, int texRem, int poolInv) = Common.SyncMemDiag.SnapshotAndResetTex();
+                (int dispatches, int texCopies) = Common.SyncMemDiag.SnapshotAndResetCompute();
+                (int bufUp, int ubB, int sbB) = Common.SyncMemDiag.SnapshotAndResetBuffer();
+                int watched = Common.SyncMemDiag.SnapshotAndResetWatched();
+                int poolstale = Common.SyncMemDiag.SnapshotPoolStale();
+                (int wtex0, int wtex1) = Common.SyncMemDiag.SnapshotWatchedTex();
+                (float wc0, float wc1, float wc2) = Common.SyncMemDiag.SnapshotWatchedConst();
+                (long ws0, long ws1) = Common.SyncMemDiag.SnapshotWatchedSeq();
+                int ptex = Common.SyncMemDiag.SnapshotPresentTex();
+
+                Common.Logging.Logger.Warning?.PrintMsg(Common.Logging.LogClass.Gpu,
+                    $"gpuframe f={++_frameLineCount} t={System.DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} " +
+                    $"uploads={uploads} protected={prot} clean={clean} flushes={flushes} " +
+                    $"degenscissor={degenScissor} clears={clears} draws={draws} " +
+                    $"indirect={indirect} drawtex={drawTex} rtupd={rtUpdates} rthash={rtHash:X8} " +
+                    $"texadd={texAdd} texrem={texRem} poolinv={poolInv} " +
+                    $"dispatch={dispatches} texcopy={texCopies} " +
+                    $"bufup={bufUp} ubbind={ubB} sbbind={sbB} watched={watched} " +
+                    $"wtex0={wtex0:X8} wtex1={wtex1:X8} wc0={wc0:G6} wc1={wc1:G6} wc2={wc2:G6} ws0={ws0} ws1={ws1} ptex={ptex:X8} poolstale={poolstale}");
+            }
+
             Image.TextureBindRing.DumpIfRequested();
 
             if (_frameQueue.TryDequeue(out PresentationTexture pt))
@@ -243,6 +281,12 @@ namespace Ryujinx.Graphics.Gpu
                 }
 
                 Image.Texture texture = pt.Cache.FindOrCreateTexture(null, TextureSearchFlags.WithUpscale, pt.Info, 0, range: pt.Range);
+
+                // Which texture actually gets presented. The composite draw always writes the
+                // same target, but nothing has ever checked that present picks that one - a
+                // frame served from a different texture at the same range would look exactly
+                // like the draw producing nothing.
+                Common.SyncMemDiag.NotePresentTex(texture?.GetHashCode() ?? 0);
 
                 // The white flash: the game renders its final frame into an sRGB target and
                 // presentation asks for the linear (Unorm) sibling at the same address. That

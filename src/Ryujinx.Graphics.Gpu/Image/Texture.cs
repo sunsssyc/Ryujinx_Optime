@@ -526,6 +526,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
             if (copy)
             {
+                Ryujinx.Common.SyncMemDiag.IncrementTexCopy();
                 HostTexture.CopyTo(storage, new Extents2D(0, 0, HostTexture.Width, HostTexture.Height), new Extents2D(0, 0, storage.Width, storage.Height), true);
             }
 
@@ -700,6 +701,7 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 texture.SetData(result);
 
+                Ryujinx.Common.SyncMemDiag.IncrementTexCopy();
                 texture.CopyTo(HostTexture, new Extents2D(0, 0, texture.Width, texture.Height), new Extents2D(0, 0, HostTexture.Width, HostTexture.Height), true);
             }
             else
