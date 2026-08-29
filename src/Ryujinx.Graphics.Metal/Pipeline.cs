@@ -76,6 +76,7 @@ namespace Ryujinx.Graphics.Metal
         private ulong _renderPassCount;
         private ulong _lastStatsDrawCount;
         private ulong _lastStatsRenderPassCount;
+        private long _lastStatsTicks = Stopwatch.GetTimestamp();
         private readonly int[] _passEndReasons = new int[Enum.GetValues<PassEndReason>().Length];
         private ulong _drawCountAtPassStart;
 
@@ -1305,8 +1306,14 @@ namespace Ryujinx.Graphics.Metal
                 _autoFlushDrawCount = 0;
                 _autoFlushAttachmentCount = 0;
 
+                long nowTicks = Stopwatch.GetTimestamp();
+                double windowMs = (nowTicks - _lastStatsTicks) * 1000.0 / Stopwatch.Frequency;
+                _lastStatsTicks = nowTicks;
+
+                GpuTimeline.Snapshot gpu = GpuTimeline.Enabled ? GpuTimeline.TakeAndReset() : default;
+
                 if (syncWaitCount != 0 || forcedSyncFlushCount != 0 || proactiveSyncFlushCount != 0 || coalescedSyncSignalCount != 0 ||
-                    autoFlushDrawCount != 0 || autoFlushAttachmentCount != 0)
+                    autoFlushDrawCount != 0 || autoFlushAttachmentCount != 0 || gpu.Count != 0)
                 {
                     double waitMs = syncWaitTicks * 1000.0 / Stopwatch.Frequency;
                     string sourceText = string.IsNullOrEmpty(waitBreakdown) ? string.Empty : $" wait: {waitBreakdown}.";
@@ -1335,6 +1342,26 @@ namespace Ryujinx.Graphics.Metal
                         $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : "all")}, " +
                         $"markOnDraw={EncoderStateManager.MarkOnDrawActive}.";
 
+                    // Occupancy, and the evidence that the occupancy is readable. The span
+                    // is the GPU clock's own measure of the same window the wall clock just
+                    // measured; if the two disagree the busy percentage below is meaningless,
+                    // and saying so in the line is cheaper than discovering it later.
+                    string gpuText = string.Empty;
+
+                    if (gpu.Count != 0 && windowMs > 0.0)
+                    {
+                        double busyMs = gpu.BusySeconds * 1000.0;
+                        double spanMs = gpu.SpanSeconds * 1000.0;
+
+                        gpuText =
+                            $" host gpu: busy {busyMs:F0}ms of {windowMs:F0}ms wall ({busyMs * 100.0 / windowMs:F1}%)," +
+                            $" idle {(spanMs - busyMs):F0}ms, {gpu.Count} buffers," +
+                            $" overlap {(gpu.BusySeconds > 0.0 ? gpu.SumSeconds / gpu.BusySeconds : 0.0):F2}x," +
+                            $" gaps>1ms {gpu.GapsOverThreshold} (longest {gpu.LongestGapSeconds * 1000.0:F1}ms)," +
+                            $" clockcheck span/wall {(windowMs > 0.0 ? spanMs / windowMs : 0.0):F3}" +
+                            $"{(gpu.Dropped != 0 ? $", DROPPED {gpu.Dropped}" : string.Empty)}.";
+                    }
+
                     string reasonText = " pass ends: " + string.Join(", ", Enum.GetValues<PassEndReason>()
                         .Where(r => _passEndReasons[(int)r] != 0)
                         .OrderByDescending(r => _passEndReasons[(int)r])
@@ -1358,7 +1385,7 @@ namespace Ryujinx.Graphics.Metal
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
-                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{reasonText}{revisitText}{gateText}{blitText}{configText}");
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{gpuText}{reasonText}{revisitText}{gateText}{blitText}{configText}");
                 }
             }
 

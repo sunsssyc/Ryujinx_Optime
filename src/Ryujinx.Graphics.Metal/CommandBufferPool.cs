@@ -330,6 +330,15 @@ namespace Ryujinx.Graphics.Metal
                     Logger.Error?.PrintMsg(LogClass.Gpu,
                         $"command buffer failed: {StringHelper.String(entry.CommandBuffer.Error.LocalizedDescription)}");
                 }
+
+                // The buffer is complete, which is the only state in which these two are
+                // defined. They are what separates "the GPU is saturated" from "the GPU is
+                // starving" - the distinction every remaining performance decision needs
+                // and that no counter here has ever measured.
+                if (GpuTimeline.Enabled)
+                {
+                    GpuTimeline.Note(entry.CommandBuffer.GPUStartTime, entry.CommandBuffer.GPUEndTime);
+                }
             }
 
             foreach (IAuto dependant in entry.Dependants)
