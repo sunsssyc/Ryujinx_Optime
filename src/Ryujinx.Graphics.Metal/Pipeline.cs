@@ -1348,7 +1348,14 @@ namespace Ryujinx.Graphics.Metal
                     // and saying so in the line is cheaper than discovering it later.
                     string gpuText = string.Empty;
 
-                    if (gpu.Count != 0 && windowMs > 0.0)
+                    if (gpu.Count == 0 && gpu.Rejected != 0)
+                    {
+                        // The readings exist and are not usable. Say so: the previous
+                        // version of this line printed nothing at all in that case, which
+                        // reads exactly like a build that never had the change in it.
+                        gpuText = $" host gpu: NO USABLE READINGS, {gpu.Rejected} rejected.";
+                    }
+                    else if (gpu.Count != 0 && windowMs > 0.0)
                     {
                         double busyMs = gpu.BusySeconds * 1000.0;
                         double spanMs = gpu.SpanSeconds * 1000.0;
@@ -1359,7 +1366,8 @@ namespace Ryujinx.Graphics.Metal
                             $" overlap {(gpu.BusySeconds > 0.0 ? gpu.SumSeconds / gpu.BusySeconds : 0.0):F2}x," +
                             $" gaps>1ms {gpu.GapsOverThreshold} (longest {gpu.LongestGapSeconds * 1000.0:F1}ms)," +
                             $" clockcheck span/wall {(windowMs > 0.0 ? spanMs / windowMs : 0.0):F3}" +
-                            $"{(gpu.Dropped != 0 ? $", DROPPED {gpu.Dropped}" : string.Empty)}.";
+                            $"{(gpu.Dropped != 0 ? $", DROPPED {gpu.Dropped}" : string.Empty)}" +
+                            $"{(gpu.Rejected != 0 ? $", REJECTED {gpu.Rejected}" : string.Empty)}.";
                     }
 
                     string reasonText = " pass ends: " + string.Join(", ", Enum.GetValues<PassEndReason>()

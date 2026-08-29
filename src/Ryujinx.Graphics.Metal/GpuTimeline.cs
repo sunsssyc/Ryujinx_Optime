@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.Versioning;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Metal
 {
@@ -28,6 +29,12 @@ namespace Ryujinx.Graphics.Metal
         private const int Capacity = 32768;
         private const double GapThresholdSeconds = 0.001;
 
+        /// <summary>
+        /// No command buffer in this renderer runs for a second. Anything longer is a
+        /// misread register, not a slow frame.
+        /// </summary>
+        private const double MaxPlausibleSeconds = 1.0;
+
         private static readonly object _lock = new();
         private static readonly double[] _starts = new double[Capacity];
         private static readonly double[] _ends = new double[Capacity];
@@ -36,6 +43,7 @@ namespace Ryujinx.Graphics.Metal
 
         private static int _count;
         private static int _dropped;
+        private static int _rejected;
 
         /// <summary>
         /// On by default - reading two doubles off a command buffer that is already known
@@ -48,6 +56,12 @@ namespace Ryujinx.Graphics.Metal
         {
             public int Count { get; init; }
             public int Dropped { get; init; }
+
+            /// <summary>
+            /// Readings the guard threw away. Nonzero means the timestamps are not
+            /// timestamps, and the busy figure is built on whatever survived.
+            /// </summary>
+            public int Rejected { get; init; }
 
             /// <summary>Union of the execution intervals - the time the GPU was doing something.</summary>
             public double BusySeconds { get; init; }
@@ -66,14 +80,23 @@ namespace Ryujinx.Graphics.Metal
         }
 
         /// <summary>
-        /// Records one completed command buffer. Zero timestamps mean the buffer never
-        /// reached the GPU (an error, or nothing to run) and are dropped rather than
-        /// counted as an interval starting at the epoch.
+        /// Records one completed command buffer. Readings that cannot be an execution
+        /// window are counted, not silently discarded - the first version of this dropped
+        /// every reading in the run because SharpMetal's GPUStartTime returns the receiver
+        /// pointer, so start equalled end, and the stats line simply printed nothing. A
+        /// silent instrument is worse than a wrong one; a rejection count says which.
         /// </summary>
         public static void Note(double start, double end)
         {
-            if (start <= 0.0 || end <= start)
+            if (start <= 0.0 || end < start || end - start > MaxPlausibleSeconds)
             {
+                Interlocked.Increment(ref _rejected);
+                return;
+            }
+
+            if (end == start)
+            {
+                // A buffer with nothing to execute. Real, and not worth an interval.
                 return;
             }
 
@@ -95,11 +118,13 @@ namespace Ryujinx.Graphics.Metal
         {
             int n;
             int dropped;
+            int rejected;
 
             lock (_lock)
             {
                 n = _count;
                 dropped = _dropped;
+                rejected = Interlocked.Exchange(ref _rejected, 0);
 
                 Array.Copy(_starts, _scratchStarts, n);
                 Array.Copy(_ends, _scratchEnds, n);
@@ -110,7 +135,7 @@ namespace Ryujinx.Graphics.Metal
 
             if (n == 0)
             {
-                return new Snapshot { Count = 0, Dropped = dropped };
+                return new Snapshot { Count = 0, Dropped = dropped, Rejected = rejected };
             }
 
             // Sorting the ends along with the starts keeps each interval's pair together.
@@ -170,6 +195,7 @@ namespace Ryujinx.Graphics.Metal
             {
                 Count = n,
                 Dropped = dropped,
+                Rejected = rejected,
                 BusySeconds = busy,
                 SumSeconds = sum,
                 SpanSeconds = maxEnd - _scratchStarts[0],

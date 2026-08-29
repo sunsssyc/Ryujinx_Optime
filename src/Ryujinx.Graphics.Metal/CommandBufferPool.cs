@@ -1,4 +1,5 @@
 using Ryujinx.Common.Logging;
+using Ryujinx.Graphics.Metal.SharpMetalExtensions;
 using SharpMetal.Metal;
 using System;
 using System.Collections.Generic;
@@ -337,7 +338,7 @@ namespace Ryujinx.Graphics.Metal
                 // and that no counter here has ever measured.
                 if (GpuTimeline.Enabled)
                 {
-                    GpuTimeline.Note(entry.CommandBuffer.GPUStartTime, entry.CommandBuffer.GPUEndTime);
+                    GpuTimeline.Note(entry.CommandBuffer.GetGpuStartTime(), entry.CommandBuffer.GetGpuEndTime());
                 }
             }
 
