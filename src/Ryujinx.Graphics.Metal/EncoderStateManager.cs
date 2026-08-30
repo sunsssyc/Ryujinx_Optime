@@ -2359,11 +2359,30 @@ namespace Ryujinx.Graphics.Metal
         //   subres   - every match reads mips/layers the writes never touched; a
         //              subresource-granular write set would not have split here.
         //   legacy   - fired by the whole-table fallback, unclassified.
+        /// <summary>
+        /// What the read-after-write scan found for the draw about to be encoded.
+        /// SelfOnly means every overlapping match is an attachment of the pass the draw
+        /// is joining - on NVN this exact read carries no barrier and is served stale
+        /// data, which is the behaviour the game shipped against. Hazard is everything
+        /// else that overlaps, and what the legacy whole-table walk reports, since it
+        /// cannot classify.
+        /// </summary>
+        public enum RawHazard : byte
+        {
+            None,
+            SelfOnly,
+            Hazard,
+        }
+
         private static long _splitHotSelf;
         private static long _splitHotOther;
         private static long _splitSubres;
         private static long _splitLegacy;
+        private static long _splitSelfSkipped;
         private static int _attachFaults;
+
+        /// <summary>Counts a SelfOnly hazard that was allowed through without a split.</summary>
+        public static void NoteSelfSkip() => _splitSelfSkipped++;
 
         // A few concrete hotSelf splits per stats window: which program, what raster
         // state, what it sampled. The classification says the remaining split load is
@@ -2390,10 +2409,10 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         public static string TakeSplitClasses(int frames)
         {
-            long self = _splitHotSelf, other = _splitHotOther, subres = _splitSubres, legacy = _splitLegacy;
-            _splitHotSelf = _splitHotOther = _splitSubres = _splitLegacy = 0;
+            long self = _splitHotSelf, other = _splitHotOther, subres = _splitSubres, legacy = _splitLegacy, skipped = _splitSelfSkipped;
+            _splitHotSelf = _splitHotOther = _splitSubres = _splitLegacy = _splitSelfSkipped = 0;
 
-            if (self + other + subres + legacy == 0)
+            if (self + other + subres + legacy + skipped == 0)
             {
                 _splitShapes.Clear();
                 return null;
@@ -2412,7 +2431,7 @@ namespace Ryujinx.Graphics.Metal
                 _selfSampleCount = 0;
             }
 
-            return $" rawsplit classes/frame: hotSelf={self / frames}, hotOther={other / frames}, subres={subres / frames}" +
+            return $" rawsplit classes/frame: hotSelf={self / frames}, hotOther={other / frames}, subres={subres / frames}, selfSkipped={skipped / frames}" +
                    (legacy != 0 ? $", legacy={legacy / frames}" : string.Empty) +
                    (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".") + samples;
         }
@@ -2624,11 +2643,11 @@ namespace Ryujinx.Graphics.Metal
         /// performing. RYUJINX_METAL_RAW_DECLARED=0 (or /tmp/ryujinx-metal-raw-declared)
         /// restores the whole-table walk for comparison.
         /// </summary>
-        public readonly bool SamplesEarlierWrite()
+        public readonly RawHazard SamplesEarlierWrite()
         {
             if (_writtenThisCb.Count == 0)
             {
-                return false;
+                return RawHazard.None;
             }
 
             Program program = _currentState.RenderProgram;
@@ -2638,10 +2657,10 @@ namespace Ryujinx.Graphics.Metal
                 if (SamplesEarlierWriteAnyBinding())
                 {
                     _splitLegacy++;
-                    return true;
+                    return RawHazard.Hazard;
                 }
 
-                return false;
+                return RawHazard.None;
             }
 
             // Detection and classification in one walk. The split fires exactly as before
@@ -2652,6 +2671,7 @@ namespace Ryujinx.Graphics.Metal
             bool any = false;
             bool anyOverlap = false;
             bool anySelf = false;
+            bool anyForeign = false;
 
             ResourceBindingSegment[] segments = program.BindingSegments[Constants.TexturesSetIndex];
 
@@ -2677,7 +2697,7 @@ namespace Ryujinx.Graphics.Metal
 
                         if (_currentState.TextureRefs[index].Storage is Texture sampled)
                         {
-                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf);
+                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf, ref anyForeign);
                         }
                     }
                 }
@@ -2699,38 +2719,46 @@ namespace Ryujinx.Graphics.Metal
                     {
                         if (reference.Storage is Texture sampled)
                         {
-                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf);
+                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf, ref anyForeign);
                         }
                     }
                 }
             }
 
-            if (any)
+            if (!any)
             {
-                if (!anyOverlap)
-                {
-                    _splitSubres++;
-                }
-                else if (anySelf)
-                {
-                    _splitHotSelf++;
-
-                    if (_selfSampleCount < MaxSelfSamples)
-                    {
-                        _selfSamples[_selfSampleCount++] =
-                            $"[{program.DebugLabel}] reads {_selfSampleTex} {DescribeRaster()}";
-                    }
-                }
-                else
-                {
-                    _splitHotOther++;
-                }
+                return RawHazard.None;
             }
 
-            return any;
+            if (!anyOverlap)
+            {
+                _splitSubres++;
+
+                return RawHazard.Hazard;
+            }
+
+            if (anyForeign)
+            {
+                // A mixed draw - it reads its own pass's attachment AND something a
+                // different pass wrote. The foreign read is a real cross-pass hazard, so
+                // the draw is never a skip candidate.
+                _splitHotOther++;
+
+                return RawHazard.Hazard;
+            }
+
+            _splitHotSelf++;
+
+            if (_selfSampleCount < MaxSelfSamples)
+            {
+                _selfSamples[_selfSampleCount++] =
+                    $"[{program.DebugLabel}] reads {_selfSampleTex} {DescribeRaster()}";
+            }
+
+            return RawHazard.SelfOnly;
         }
 
-        private readonly void ClassifyMatch(Texture sampled, ref bool any, ref bool anyOverlap, ref bool anySelf)
+        private readonly void ClassifyMatch(Texture sampled, ref bool any, ref bool anyOverlap, ref bool anySelf, ref bool anyForeign)
         {
             if (!_writtenThisCb.TryGetValue(sampled.CanonicalPtr, out SubRange written))
             {
@@ -2750,20 +2778,31 @@ namespace Ryujinx.Graphics.Metal
                 NoteSplitShape(sampled);
             }
 
+            bool self = false;
+
             for (int i = 0; i < _passAttachments.Count; i++)
             {
                 if (_passAttachments[i].Ptr == sampled.CanonicalPtr)
                 {
-                    anySelf = true;
-
-                    if (_selfSampleCount < MaxSelfSamples)
-                    {
-                        _selfSampleTex =
-                            $"{sampled.Width}x{sampled.Height}/{sampled.MtlFormat} lv{sampled.FirstLevel}+{Math.Max(1, sampled.Info.Levels)} ly{sampled.FirstLayer}+{Math.Max(1, sampled.Info.GetLayers())}";
-                    }
+                    self = true;
 
                     break;
                 }
+            }
+
+            if (self)
+            {
+                anySelf = true;
+
+                if (_selfSampleCount < MaxSelfSamples)
+                {
+                    _selfSampleTex =
+                        $"{sampled.Width}x{sampled.Height}/{sampled.MtlFormat} lv{sampled.FirstLevel}+{Math.Max(1, sampled.Info.Levels)} ly{sampled.FirstLayer}+{Math.Max(1, sampled.Info.GetLayers())}";
+                }
+            }
+            else
+            {
+                anyForeign = true;
             }
         }
 

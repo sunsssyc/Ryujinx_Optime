@@ -153,6 +153,34 @@ namespace Ryujinx.Graphics.Metal
         private static bool _rawSplit =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_SPLIT") != "0";
 
+        // NVN semantics for a draw whose only read-after-write hazard is its own pass's
+        // attachments: on the guest hardware that exact read carries no barrier and is
+        // served stale data, and the game shipped against that behaviour. The classifier
+        // measured the remaining split load as almost entirely this shape (hotSelf 150-760
+        // a frame against ~30 barriers the game actually issues). Skipping the split
+        // reproduces the guest contract: unbarriered self-reads see stale content, and the
+        // game's own TextureBarrier calls still split. Off by default until the visual
+        // pass (water, Ultrahand, shrines) says otherwise; RYUJINX_METAL_SKIP_SELF_SPLIT=1
+        // or /tmp/ryujinx-metal-skip-self-split to enable, re-read once a frame.
+        private static bool _skipSelfSplit =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_SKIP_SELF_SPLIT") == "1";
+
+        private static readonly bool _skipSelfSplitDefault = _skipSelfSplit;
+
+        private static void RefreshSkipSelfSplit()
+        {
+            try
+            {
+                _skipSelfSplit = System.IO.File.Exists("/tmp/ryujinx-metal-skip-self-split")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-skip-self-split").Trim() == "1"
+                    : _skipSelfSplitDefault;
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
+
         // Forces the split for the blit that writes the presented surface, whether or not
         // SamplesEarlierWrite() notices the dependency. RYUJINX_METAL_SPLIT_BLIT=1.
         private static readonly int _canaryClear2 =
@@ -650,10 +678,25 @@ namespace Ryujinx.Graphics.Metal
                 blitLabel != null &&
                 blitLabel.StartsWith("480117", StringComparison.Ordinal);
 
-            if (forceDrawTrace || forceAllSplit || forceBlitSplit || (forDraw && _rawSplit &&
+            bool rawHazardSplit = false;
+
+            if (forDraw && _rawSplit &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
-                DrawCount != _drawCountAtPassStart &&
-                _encoderStateManager.SamplesEarlierWrite()))
+                DrawCount != _drawCountAtPassStart)
+            {
+                EncoderStateManager.RawHazard hazard = _encoderStateManager.SamplesEarlierWrite();
+
+                if (hazard == EncoderStateManager.RawHazard.SelfOnly && _skipSelfSplit)
+                {
+                    EncoderStateManager.NoteSelfSkip();
+                }
+                else
+                {
+                    rawHazardSplit = hazard != EncoderStateManager.RawHazard.None;
+                }
+            }
+
+            if (forceDrawTrace || forceAllSplit || forceBlitSplit || rawHazardSplit)
             {
                 // Signal on the encoder that did the writing, before it ends, and wait on
                 // the one that will do the reading - the pairing MoltenVK produces for an
@@ -1098,6 +1141,7 @@ namespace Ryujinx.Graphics.Metal
             RefreshSkipDraws();
             RefreshSkipProgram();
             RefreshRawSplit();
+            RefreshSkipSelfSplit();
             EncoderStateManager.RefreshRawDeclared();
             RefreshBarrierScope();
             EncoderStateManager.RefreshSplitScope();
@@ -1342,7 +1386,7 @@ namespace Ryujinx.Graphics.Metal
                         $" config: splitScope={(EncoderStateManager.SplitScopePass ? "pass" : "cb")}, " +
                         $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : "all")}, " +
                         $"markOnDraw={EncoderStateManager.MarkOnDrawActive}, " +
-                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}.";
+                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}.";
 
                     // Occupancy, and the evidence that the occupancy is readable. The span
                     // is the GPU clock's own measure of the same window the wall clock just
@@ -2927,7 +2971,9 @@ namespace Ryujinx.Graphics.Metal
             // orders a dependency that does not exist. RYUJINX_METAL_BARRIER_SCOPE=hazard,
             // and only meaningful together with RAW_SPLIT_SCOPE=pass, which makes the write
             // set per pass rather than per command buffer.
-            if (_barrierHazardOnly && !_encoderStateManager.SamplesEarlierWrite())
+            // A game-issued barrier is the guest explicitly asking for ordering, so a
+            // SelfOnly hazard splits here even when the raw-split path would skip it.
+            if (_barrierHazardOnly && _encoderStateManager.SamplesEarlierWrite() == EncoderStateManager.RawHazard.None)
             {
                 _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
                 UploadCorrelator.NoteBarrierSkipped();
