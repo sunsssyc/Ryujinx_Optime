@@ -1074,6 +1074,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void Present(CAMetalDrawable drawable, Texture src, Extents2D srcRegion, Extents2D dstRegion, bool isLinear, bool useFsrSharpener, float scalingFilterLevel)
         {
+
             UploadCorrelator._inPresent = true;
             try
             {
@@ -1489,8 +1490,41 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        private static int _crossThreadFlushLogs;
+
         public void FlushCommandsImpl()
         {
+            // The pipeline's encoder state machine is single-threaded by construction:
+            // ThreadedRenderer makes the thread that called RunLoop the backend thread
+            // (GUI.RenderThread here), and draws, presents and interrupts all execute on
+            // it. Every one of 2026-08-30's five AGX/IOGPU lifecycle aborts - double
+            // commit, double endEncoding, commit with a live encoder, encoder creation
+            // over freed state - faulted on a DIFFERENT thread committing this pipeline's
+            // command buffers directly. Those are bypasses: sync creation, counter and
+            // readback paths that call back into the backend from the GPU emulation or a
+            // guest thread. Marshal them onto the backend thread through the interrupt
+            // mechanism the sync wait path already uses, and name the caller so the
+            // bypass list shrinks by evidence rather than by hope.
+            if (!_renderer.CommandBufferPool.OwnedByCurrentThread)
+            {
+                if (_crossThreadFlushLogs++ < 20)
+                {
+                    Logger.Warning?.PrintMsg(LogClass.Gpu,
+                        $"cross-thread flush marshalled from '{System.Threading.Thread.CurrentThread.Name}'\n{Environment.StackTrace}");
+                }
+
+                if (_renderer.InterruptAction != null)
+                {
+                    _renderer.InterruptAction(FlushCommandsImpl);
+
+                    return;
+                }
+
+                // No interrupt mechanism (startup, or threading off): nothing to marshal
+                // onto; the direct call preserves the old behaviour and the log above
+                // still names the path.
+            }
+
             _renderer.AutoFlush.RegisterFlush(DrawCount);
             EndCurrentPass(PassEndReason.Flush);
 
