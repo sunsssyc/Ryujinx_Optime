@@ -2823,9 +2823,17 @@ namespace Ryujinx.Graphics.Metal
                 case MTLPixelFormat.RGBA8UnormsRGB:
                 case MTLPixelFormat.BGRA8Unorm:
                 case MTLPixelFormat.BGRA8UnormsRGB:
-                case MTLPixelFormat.RG11B10Float:
-                case MTLPixelFormat.RGB10A2Unorm:
                     return true;
+
+                // RG11B10Float is the scene HDR target and water refraction samples it
+                // mid-pass; served stale on a TBDR the read returns tile rows the pass
+                // has stored and nothing for the rows it has not, which renders as
+                // horizontal banding across flowing water (user screenshot, 2026-08-30
+                // 13:2x). On the guest's IMR the same unbarriered read was merely a
+                // frame late, never partial. RGB10A2 goes with it on the same argument
+                // (normal/material data); the census counted its self-reads at zero, so
+                // excluding it costs nothing. The 8-bit compose targets carry the bulk
+                // of the win (631 of ~700 skips a frame) and stay.
                 default:
                     return false;
             }

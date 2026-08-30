@@ -157,13 +157,19 @@ namespace Ryujinx.Graphics.Metal
         // attachments: on the guest hardware that exact read carries no barrier and is
         // served stale data, and the game shipped against that behaviour. The classifier
         // measured the remaining split load as almost entirely this shape (hotSelf 150-760
-        // a frame against ~30 barriers the game actually issues). Skipping the split
-        // reproduces the guest contract: unbarriered self-reads see stale content, and the
-        // game's own TextureBarrier calls still split. Off by default until the visual
-        // pass (water, Ultrahand, shrines) says otherwise; RYUJINX_METAL_SKIP_SELF_SPLIT=1
-        // or /tmp/ryujinx-metal-skip-self-split to enable, re-read once a frame.
+        // a frame against ~30 barriers the game actually issues); skipping reproduces the
+        // guest contract - unbarriered self-reads see stale content, the game's own
+        // TextureBarrier calls still split, and data formats (R32Float first among them,
+        // the depth/picking chain Ultrahand reads) are never skipped - serving those stale
+        // is precisely how grabbing broke, twice.
+        //
+        // Default on since 2026-08-30: measured +61% inside one session at equal spots
+        // (27.8 -> 44.7 fps median, passes 530 -> 198, sync waits 2686 -> 193 ms/block),
+        // then held at 45 by the mod's own FPS cap; Ultrahand and sunlight verified by
+        // hand after the format restriction. RYUJINX_METAL_SKIP_SELF_SPLIT=0 or
+        // /tmp/ryujinx-metal-skip-self-split containing 0 to revert, re-read once a frame.
         private static bool _skipSelfSplit =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_SKIP_SELF_SPLIT") == "1";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_SKIP_SELF_SPLIT") != "0";
 
         private static readonly bool _skipSelfSplitDefault = _skipSelfSplit;
 
