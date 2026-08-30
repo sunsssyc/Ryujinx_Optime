@@ -2790,7 +2790,7 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
-            if (self)
+            if (self && SkippableSelfFormat(sampled.MtlFormat))
             {
                 anySelf = true;
 
@@ -2803,6 +2803,31 @@ namespace Ryujinx.Graphics.Metal
             else
             {
                 anyForeign = true;
+            }
+        }
+
+        /// <summary>
+        /// Whether a self-read of this format may be served stale under the NVN
+        /// unbarriered-read tolerance. Colour formats carry picture - water refraction,
+        /// distortion, compositing - where a frame-late read is what the guest hardware
+        /// delivered too. Data formats are excluded: the R32Float self-reads feed the
+        /// depth/picking chain, and letting those go stale is exactly how Ultrahand
+        /// stopped grabbing (reported live, 2026-08-30, and once before in the archive
+        /// when splits were disabled wholesale). Anything not explicitly listed splits.
+        /// </summary>
+        private static bool SkippableSelfFormat(MTLPixelFormat format)
+        {
+            switch (format)
+            {
+                case MTLPixelFormat.RGBA8Unorm:
+                case MTLPixelFormat.RGBA8UnormsRGB:
+                case MTLPixelFormat.BGRA8Unorm:
+                case MTLPixelFormat.BGRA8UnormsRGB:
+                case MTLPixelFormat.RG11B10Float:
+                case MTLPixelFormat.RGB10A2Unorm:
+                    return true;
+                default:
+                    return false;
             }
         }
 
