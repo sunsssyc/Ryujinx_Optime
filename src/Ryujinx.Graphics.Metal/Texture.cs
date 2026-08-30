@@ -906,6 +906,8 @@ namespace Ryujinx.Graphics.Metal
 
         public PinnedSpan<byte> GetData()
         {
+            EncoderStateManager.NoteReadback(CanonicalPtr, $"{Info.Width}x{Info.Height}/{MtlFormat} full");
+
             BackgroundResource resources = Renderer.BackgroundResources.Get();
 
             if (Renderer.CommandBufferPool.OwnedByCurrentThread)
@@ -934,6 +936,8 @@ namespace Ryujinx.Graphics.Metal
 
         public PinnedSpan<byte> GetData(int layer, int level)
         {
+            EncoderStateManager.NoteReadback(CanonicalPtr, $"{Info.Width}x{Info.Height}/{MtlFormat} layer={layer} level={level}");
+
             BackgroundResource resources = Renderer.BackgroundResources.Get();
 
             if (Renderer.CommandBufferPool.OwnedByCurrentThread)

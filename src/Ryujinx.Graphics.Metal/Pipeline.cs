@@ -694,7 +694,7 @@ namespace Ryujinx.Graphics.Metal
 
                 if (hazard == EncoderStateManager.RawHazard.SelfOnly && _skipSelfSplit)
                 {
-                    EncoderStateManager.NoteSelfSkip();
+                    _encoderStateManager.NoteSelfSkipAndTaint();
                 }
                 else
                 {

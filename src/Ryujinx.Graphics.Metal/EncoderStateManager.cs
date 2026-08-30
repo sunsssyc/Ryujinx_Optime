@@ -2381,8 +2381,40 @@ namespace Ryujinx.Graphics.Metal
         private static long _splitSelfSkipped;
         private static int _attachFaults;
 
-        /// <summary>Counts a SelfOnly hazard that was allowed through without a split.</summary>
+        /// <summary>
+        /// Counts a SelfOnly hazard that was allowed through without a split, and taints
+        /// the pass's attachments: their contents were computed from a stale read, which
+        /// is fine for pictures but wrong for anything the guest later reads back. The
+        /// 19:56 guest crash dereferenced a pointer whose bits were two floats - the
+        /// shape of game logic consuming bad data - and whether skipped output can even
+        /// reach guest memory is exactly what the taint log answers.
+        /// </summary>
+        public void NoteSelfSkipAndTaint()
+        {
+            _splitSelfSkipped++;
+
+            for (int i = 0; i < _passAttachments.Count; i++)
+            {
+                TaintedStaleFrames[_passAttachments[i].Ptr] = _splitSelfSkipped;
+            }
+        }
+
         public static void NoteSelfSkip() => _splitSelfSkipped++;
+
+        /// <summary>Attachments of passes that encoded a stale self-read, by CanonicalPtr.</summary>
+        internal static readonly Dictionary<IntPtr, long> TaintedStaleFrames = new();
+
+        private static int _taintReadbackLogs;
+
+        /// <summary>Called from the readback path: the guest is about to receive this texture's bytes.</summary>
+        public static void NoteReadback(IntPtr canonicalPtr, string identity)
+        {
+            if (TaintedStaleFrames.ContainsKey(canonicalPtr) && _taintReadbackLogs++ < 20)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu,
+                    $"tainted readback: guest reads {identity} whose content was rendered from a stale self-read\n{Environment.StackTrace}");
+            }
+        }
 
         // A few concrete hotSelf splits per stats window: which program, what raster
         // state, what it sampled. The classification says the remaining split load is
