@@ -78,8 +78,31 @@ namespace Ryujinx.Graphics.Metal
             MtlTextureAuto = new Auto<DisposableTexture>(new DisposableTexture(texture), null, referencedObjs);
         }
 
+        private static int _offThreadHandleLogs;
+
+        /// <summary>
+        /// The 14:34 crash was the backend thread segfaulting inside
+        /// drawIndexedPrimitives - a native object dying under a draw being encoded.
+        /// Handle replacement and disposal are the two operations that can do that. This
+        /// names any caller that performs them off the backend thread, with its stack,
+        /// so the racing writer is identified from a normal session instead of deduced
+        /// from a crash dump. Log-only: behaviour is unchanged.
+        /// </summary>
+        private void NoteOffThreadHandleMutation(string what)
+        {
+            if (Renderer?.CommandBufferPool != null &&
+                !Renderer.CommandBufferPool.OwnedByCurrentThread &&
+                _offThreadHandleLogs++ < 20)
+            {
+                Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(Ryujinx.Common.Logging.LogClass.Gpu,
+                    $"off-thread texture {what} on '{System.Threading.Thread.CurrentThread.Name}' {Info.Width}x{Info.Height} {MtlFormat}\n{Environment.StackTrace}");
+            }
+        }
+
         protected void ReplaceHandle(MTLTexture texture, params IAutoPrivate[] referencedObjs)
         {
+            NoteOffThreadHandleMutation("replace");
+
             // The underlying MTLTexture changes while CanonicalPtr keeps its creation-time
             // value, so every canonical-keyed identity measurement is blind to this exact
             // operation. The generation counter is what makes a swap observable.
@@ -104,6 +127,8 @@ namespace Ryujinx.Graphics.Metal
 
         protected void DisposeHandle()
         {
+            NoteOffThreadHandleMutation("dispose");
+
             Auto<DisposableTexture> texture = MtlTextureAuto;
             MtlTextureAuto = null;
             texture?.Dispose();

@@ -706,8 +706,19 @@ namespace Ryujinx.Graphics.Metal
         }
 
 
+        private static int _offThreadDisposeLogs;
+
         public void Dispose()
         {
+            // Same instrument as TextureBase.NoteOffThreadHandleMutation: a buffer dying
+            // off the backend thread while a draw referencing it is being encoded is the
+            // shape of the 14:34 drawIndexedPrimitives segfault. Log-only.
+            if (!_renderer.CommandBufferPool.OwnedByCurrentThread && _offThreadDisposeLogs++ < 20)
+            {
+                Ryujinx.Common.Logging.Logger.Warning?.PrintMsg(Ryujinx.Common.Logging.LogClass.Gpu,
+                    $"off-thread buffer dispose on '{System.Threading.Thread.CurrentThread.Name}' size={Size}\n{Environment.StackTrace}");
+            }
+
             _pipeline.FlushCommandsIfWeightExceeding(_buffer, (ulong)Size);
 
             _buffer.Dispose();
