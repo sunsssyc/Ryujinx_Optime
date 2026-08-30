@@ -1098,6 +1098,7 @@ namespace Ryujinx.Graphics.Metal
             RefreshSkipDraws();
             RefreshSkipProgram();
             RefreshRawSplit();
+            EncoderStateManager.RefreshRawDeclared();
             RefreshBarrierScope();
             EncoderStateManager.RefreshSplitScope();
             RefreshRawFence();
@@ -1340,7 +1341,8 @@ namespace Ryujinx.Graphics.Metal
                     string configText =
                         $" config: splitScope={(EncoderStateManager.SplitScopePass ? "pass" : "cb")}, " +
                         $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : "all")}, " +
-                        $"markOnDraw={EncoderStateManager.MarkOnDrawActive}.";
+                        $"markOnDraw={EncoderStateManager.MarkOnDrawActive}, " +
+                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}.";
 
                     // Occupancy, and the evidence that the occupancy is readable. The span
                     // is the GPU clock's own measure of the same window the wall clock just
@@ -1370,6 +1372,8 @@ namespace Ryujinx.Graphics.Metal
                             $"{(gpu.Rejected != 0 ? $", REJECTED {gpu.Rejected}" : string.Empty)}.";
                     }
 
+                    string splitClassText = EncoderStateManager.TakeSplitClasses(SyncStatsLogFrameInterval) ?? string.Empty;
+
                     string reasonText = " pass ends: " + string.Join(", ", Enum.GetValues<PassEndReason>()
                         .Where(r => _passEndReasons[(int)r] != 0)
                         .OrderByDescending(r => _passEndReasons[(int)r])
@@ -1393,7 +1397,7 @@ namespace Ryujinx.Graphics.Metal
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
-                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{gpuText}{reasonText}{revisitText}{gateText}{blitText}{configText}");
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{gpuText}{splitClassText}{reasonText}{revisitText}{gateText}{blitText}{configText}");
                 }
             }
 

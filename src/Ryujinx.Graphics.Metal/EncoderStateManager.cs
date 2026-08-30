@@ -558,11 +558,11 @@ namespace Ryujinx.Graphics.Metal
                     UploadCorrelator.NoteAttachment(tex, _currentState.ClearLoadAction);
                     if (SplitScopePass)
                     {
-                        _passAttachments.Add(tex.CanonicalPtr);
+                        _passAttachments.Add(new PassAttachment(tex.CanonicalPtr, SubRange.Of(tex)));
                     }
                     else
                     {
-                        NoteAttachmentWritten(tex.CanonicalPtr);
+                        NoteAttachmentWritten(tex.CanonicalPtr, SubRange.Of(tex));
                     }
                     NotePassSize((ulong)tex.Width, (ulong)tex.Height);
                 }
@@ -589,11 +589,11 @@ namespace Ryujinx.Graphics.Metal
                 {
                     if (SplitScopePass)
                     {
-                        _passAttachments.Add(_currentState.DepthStencil.CanonicalPtr);
+                        _passAttachments.Add(new PassAttachment(_currentState.DepthStencil.CanonicalPtr, SubRange.Of(_currentState.DepthStencil)));
                     }
                     else
                     {
-                        NoteAttachmentWritten(_currentState.DepthStencil.CanonicalPtr);
+                        NoteAttachmentWritten(_currentState.DepthStencil.CanonicalPtr, SubRange.Of(_currentState.DepthStencil));
                     }
                 }
                 switch (_currentState.DepthStencil.GetHandle().PixelFormat)
@@ -2294,7 +2294,98 @@ namespace Ryujinx.Graphics.Metal
         /// The ledger's "strict barrier" test keyed on guest TextureBarrier calls, which
         /// this game issues rarely; this keys on the hazard actually occurring.
         /// </summary>
-        private readonly HashSet<IntPtr> _writtenThisCb = new();
+        private readonly Dictionary<IntPtr, SubRange> _writtenThisCb = new();
+
+        /// <summary>
+        /// Subresource span of a view within its storage. Instrument-only: the split
+        /// predicate still fires at whole-texture granularity; these ranges only record
+        /// what a finer predicate would have decided, so the classification below can
+        /// say how many of the remaining splits a subresource-level write set would
+        /// eliminate before anyone risks building one.
+        /// </summary>
+        public readonly struct SubRange
+        {
+            public static readonly SubRange Full = new(0, int.MaxValue, 0, int.MaxValue);
+
+            public readonly int MinLevel;
+            public readonly int MaxLevel;
+            public readonly int MinLayer;
+            public readonly int MaxLayer;
+
+            public SubRange(int minLevel, int maxLevel, int minLayer, int maxLayer)
+            {
+                MinLevel = minLevel;
+                MaxLevel = maxLevel;
+                MinLayer = minLayer;
+                MaxLayer = maxLayer;
+            }
+
+            public static SubRange Of(Texture view)
+            {
+                int levels = Math.Max(1, view.Info.Levels);
+                int layers = Math.Max(1, view.Info.GetLayers());
+
+                return new SubRange(view.FirstLevel, view.FirstLevel + levels - 1,
+                    view.FirstLayer, view.FirstLayer + layers - 1);
+            }
+
+            public SubRange Union(SubRange other) => new(
+                Math.Min(MinLevel, other.MinLevel),
+                Math.Max(MaxLevel, other.MaxLevel),
+                Math.Min(MinLayer, other.MinLayer),
+                Math.Max(MaxLayer, other.MaxLayer));
+
+            public bool Overlaps(SubRange other) =>
+                MinLevel <= other.MaxLevel && other.MinLevel <= MaxLevel &&
+                MinLayer <= other.MaxLayer && other.MinLayer <= MaxLayer;
+        }
+
+        private readonly record struct PassAttachment(IntPtr Ptr, SubRange Range);
+
+        // Split classification. Every raw split lands in exactly one bucket:
+        //   hotSelf  - the draw samples an attachment of the very pass it joins; the one
+        //              shape that cannot be ordered on Apple GPUs without ending the pass.
+        //   hotOther - reads a texture written earlier in scope, subresources overlapping.
+        //   subres   - every match reads mips/layers the writes never touched; a
+        //              subresource-granular write set would not have split here.
+        //   legacy   - fired by the whole-table fallback, unclassified.
+        private static long _splitHotSelf;
+        private static long _splitHotOther;
+        private static long _splitSubres;
+        private static long _splitLegacy;
+        private static readonly Dictionary<(int Width, int Height, MTLPixelFormat Format), int> _splitShapes = new();
+
+        private static void NoteSplitShape(Texture sampled)
+        {
+            (int, int, MTLPixelFormat) key = (sampled.Width, sampled.Height, sampled.MtlFormat);
+            _splitShapes.TryGetValue(key, out int n);
+            _splitShapes[key] = n + 1;
+        }
+
+        /// <summary>
+        /// Snapshot and reset the split classification, formatted for the stats line.
+        /// Null when the window recorded nothing.
+        /// </summary>
+        public static string TakeSplitClasses(int frames)
+        {
+            long self = _splitHotSelf, other = _splitHotOther, subres = _splitSubres, legacy = _splitLegacy;
+            _splitHotSelf = _splitHotOther = _splitSubres = _splitLegacy = 0;
+
+            if (self + other + subres + legacy == 0)
+            {
+                _splitShapes.Clear();
+                return null;
+            }
+
+            string shapes = string.Join(", ", _splitShapes.OrderByDescending(kv => kv.Value).Take(3)
+                .Select(kv => $"{kv.Key.Width}x{kv.Key.Height}/{kv.Key.Format}={kv.Value / frames}"));
+
+            _splitShapes.Clear();
+
+            return $" rawsplit classes/frame: hotSelf={self / frames}, hotOther={other / frames}, subres={subres / frames}" +
+                   (legacy != 0 ? $", legacy={legacy / frames}" : string.Empty) +
+                   (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".");
+        }
 
         /// <summary>
         /// The current pass's attachments, held back until a draw actually writes them.
@@ -2303,15 +2394,48 @@ namespace Ryujinx.Graphics.Metal
         /// single draw, so the next draw that sampled one split again - 674 times a
         /// frame, every one of them resuming the same render target. Pass scope only.
         /// </summary>
-        private readonly List<IntPtr> _passAttachments = new();
+        private readonly List<PassAttachment> _passAttachments = new();
         private static readonly bool _depthInWriteSet = Environment.GetEnvironmentVariable("RYUJINX_METAL_DEPTH_RAW") == "1";
 
-        public readonly void NoteAttachmentWritten(IntPtr root)
+        /// <summary>
+        /// Restrict the read-after-write scan to the bindings the bound program declares.
+        /// Default on; RYUJINX_METAL_RAW_DECLARED=0 or /tmp/ryujinx-metal-raw-declared
+        /// containing 0 restores the whole-table walk, re-read once a frame so both arms
+        /// can be measured inside one session.
+        /// </summary>
+        private static readonly bool _rawDeclaredDefault =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_RAW_DECLARED") != "0";
+
+        private static bool _rawDeclaredOnly = _rawDeclaredDefault;
+
+        public static bool RawDeclaredOnly => _rawDeclaredOnly;
+
+        public static void RefreshRawDeclared()
         {
-            if (root != IntPtr.Zero)
+            try
             {
-                _writtenThisCb.Add(root);
+                _rawDeclaredOnly = System.IO.File.Exists("/tmp/ryujinx-metal-raw-declared")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-raw-declared").Trim() != "0"
+                    : _rawDeclaredDefault;
             }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
+
+        public readonly void NoteAttachmentWritten(IntPtr root) => NoteAttachmentWritten(root, SubRange.Full);
+
+        public readonly void NoteAttachmentWritten(IntPtr root, SubRange range)
+        {
+            if (root == IntPtr.Zero)
+            {
+                return;
+            }
+
+            _writtenThisCb[root] = _writtenThisCb.TryGetValue(root, out SubRange existing)
+                ? existing.Union(range)
+                : range;
         }
 
         // Scope of the read-after-write split's write set.
@@ -2366,7 +2490,7 @@ namespace Ryujinx.Graphics.Metal
         {
             for (int i = 0; i < _passAttachments.Count; i++)
             {
-                _writtenThisCb.Add(_passAttachments[i]);
+                NoteAttachmentWritten(_passAttachments[i].Ptr, _passAttachments[i].Range);
             }
         }
 
@@ -2396,7 +2520,7 @@ namespace Ryujinx.Graphics.Metal
 
             foreach (TextureRef reference in _currentState.TextureRefs)
             {
-                if (reference.Storage is Texture sampled && _writtenThisCb.Contains(sampled.CanonicalPtr))
+                if (reference.Storage is Texture sampled && _writtenThisCb.ContainsKey(sampled.CanonicalPtr))
                 {
                     return sampled;
                 }
@@ -2449,6 +2573,27 @@ namespace Ryujinx.Graphics.Metal
             return null;
         }
 
+        /// <summary>
+        /// Whether this draw reads something the pass already wrote - the read-after-write
+        /// hazard that can only be ordered by ending the pass.
+        ///
+        /// TextureRefs is a persistent table indexed by binding slot, not the set of
+        /// textures this draw uses: a slot keeps whatever was last bound to it, across
+        /// programs, until something overwrites it. Walking the whole table therefore
+        /// reports a hazard for a render target that is merely still sitting in a slot the
+        /// current shader never declared - and a shader that does not declare a binding
+        /// cannot read through it, so that is not a hazard at any level.
+        ///
+        /// Measured at 1000+ splits a frame against a floor of ~110 real render target
+        /// switches, each costing a full attachment store and reload (45.8us a pass; the
+        /// dense scenes spend 57ms of a 74ms frame on it). Disabling the split entirely -
+        /// incorrect, but it bounds the prize - was worth +76% in those scenes.
+        ///
+        /// Restricting the walk to the bindings the bound program actually declares is a
+        /// strict narrowing: it can only remove hazards the shader was incapable of
+        /// performing. RYUJINX_METAL_RAW_DECLARED=0 (or /tmp/ryujinx-metal-raw-declared)
+        /// restores the whole-table walk for comparison.
+        /// </summary>
         public readonly bool SamplesEarlierWrite()
         {
             if (_writtenThisCb.Count == 0)
@@ -2456,9 +2601,138 @@ namespace Ryujinx.Graphics.Metal
                 return false;
             }
 
+            Program program = _currentState.RenderProgram;
+
+            if (!RawDeclaredOnly || program == null)
+            {
+                if (SamplesEarlierWriteAnyBinding())
+                {
+                    _splitLegacy++;
+                    return true;
+                }
+
+                return false;
+            }
+
+            // Detection and classification in one walk. The split fires exactly as before
+            // (any declared binding whose storage is in the write set), but every firing is
+            // also binned by what a subresource-granular predicate would have said, so the
+            // stats line reports how much of the remaining split load is actually
+            // avoidable before anyone builds the finer write set.
+            bool any = false;
+            bool anyOverlap = false;
+            bool anySelf = false;
+
+            ResourceBindingSegment[] segments = program.BindingSegments[Constants.TexturesSetIndex];
+
+            foreach (ResourceBindingSegment segment in segments)
+            {
+                // A sampler-only segment names no texture, and a buffer texture is never a
+                // render target, so neither can carry the hazard.
+                if (segment.Type is ResourceType.Sampler or ResourceType.BufferTexture)
+                {
+                    continue;
+                }
+
+                if (!segment.IsArray)
+                {
+                    for (int i = 0; i < segment.Count; i++)
+                    {
+                        int index = segment.Binding + i;
+
+                        if ((uint)index >= (uint)_currentState.TextureRefs.Length)
+                        {
+                            continue;
+                        }
+
+                        if (_currentState.TextureRefs[index].Storage is Texture sampled)
+                        {
+                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf);
+                        }
+                    }
+                }
+                else
+                {
+                    if ((uint)segment.Binding >= (uint)_currentState.TextureArrayRefs.Length)
+                    {
+                        continue;
+                    }
+
+                    TextureArray array = _currentState.TextureArrayRefs[segment.Binding].Array;
+
+                    if (array == null)
+                    {
+                        continue;
+                    }
+
+                    foreach (TextureRef reference in array.GetTextureRefs())
+                    {
+                        if (reference.Storage is Texture sampled)
+                        {
+                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf);
+                        }
+                    }
+                }
+            }
+
+            if (any)
+            {
+                if (!anyOverlap)
+                {
+                    _splitSubres++;
+                }
+                else if (anySelf)
+                {
+                    _splitHotSelf++;
+                }
+                else
+                {
+                    _splitHotOther++;
+                }
+            }
+
+            return any;
+        }
+
+        private readonly void ClassifyMatch(Texture sampled, ref bool any, ref bool anyOverlap, ref bool anySelf)
+        {
+            if (!_writtenThisCb.TryGetValue(sampled.CanonicalPtr, out SubRange written))
+            {
+                return;
+            }
+
+            any = true;
+
+            if (!written.Overlaps(SubRange.Of(sampled)))
+            {
+                return;
+            }
+
+            if (!anyOverlap)
+            {
+                anyOverlap = true;
+                NoteSplitShape(sampled);
+            }
+
+            for (int i = 0; i < _passAttachments.Count; i++)
+            {
+                if (_passAttachments[i].Ptr == sampled.CanonicalPtr)
+                {
+                    anySelf = true;
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// The original predicate: any texture sitting in any binding slot. Kept as the
+        /// comparison arm, and as the fallback when no program is bound.
+        /// </summary>
+        private readonly bool SamplesEarlierWriteAnyBinding()
+        {
             foreach (TextureRef reference in _currentState.TextureRefs)
             {
-                if (reference.Storage is Texture sampled && _writtenThisCb.Contains(sampled.CanonicalPtr))
+                if (reference.Storage is Texture sampled && _writtenThisCb.ContainsKey(sampled.CanonicalPtr))
                 {
                     return true;
                 }
@@ -2473,7 +2747,7 @@ namespace Ryujinx.Graphics.Metal
 
                 foreach (TextureRef reference in arrayRef.Array.GetTextureRefs())
                 {
-                    if (reference.Storage is Texture sampled && _writtenThisCb.Contains(sampled.CanonicalPtr))
+                    if (reference.Storage is Texture sampled && _writtenThisCb.ContainsKey(sampled.CanonicalPtr))
                     {
                         return true;
                     }
