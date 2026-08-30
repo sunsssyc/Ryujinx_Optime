@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.Metal;
 using SharpMetal.Metal;
 using System;
@@ -39,6 +40,19 @@ class CommandBufferEncoder
     internal MTLCommandEncoder? CurrentEncoder { get; private set; }
 
     private static long _renderEncoderGeneration;
+
+    // Lifecycle tripwire. Two AGX-level crashes within an hour of each other were both
+    // encoder lifecycle corruption: renderCommandEncoderWithDescriptor segfaulting in
+    // ResourceGroupUsage (11:03) and `endEncoding has already been called` (11:51).
+    // Every create and end in this backend goes through this class and the guards here
+    // are airtight in source, so if either state recurs the wrapper's view of the
+    // world was corrupted from outside. These convert the fatal call into a logged
+    // managed stack so the next occurrence names its culprit instead of killing the
+    // process. _lastEndedEncoderPtr is cleared when an address is legitimately
+    // recycled for a fresh encoder, so a reused allocation never trips it.
+    private IntPtr _lastEndedEncoderPtr;
+    private static int _lifecycleFaults;
+
 
     /// <summary>
     /// Incremented for every render command encoder created, process-wide.
@@ -154,9 +168,29 @@ class CommandBufferEncoder
                     CurrentEncoder = null;
                     break;
                 case EncoderType.Render:
+                    IntPtr endingPtr = CurrentEncoder.Value.NativePtr;
+
+                    if (endingPtr == _lastEndedEncoderPtr)
+                    {
+                        // The exact state the AGX assertion aborts on: a second
+                        // endEncoding for an object already ended. Skip the fatal call -
+                        // the first end already released the ownership - and log who
+                        // got here, because through this class it cannot happen.
+                        if (_lifecycleFaults++ < 20)
+                        {
+                            Logger.Error?.PrintMsg(LogClass.Gpu,
+                                $"encoder double-end averted: gen={_renderEncoderGeneration} ptr=0x{endingPtr:X}\n{Environment.StackTrace}");
+                        }
+
+                        CurrentEncoder = null;
+                        _encoderFactory?.OnRenderPassEnded(_endingFor);
+                        break;
+                    }
+
                     _encoderFactory?.FixupStoreActions(RenderEncoder);
                     RenderEncoder.EndEncoding();
-                    ObjcOwnership.Release(RenderEncoder.NativePtr);
+                    _lastEndedEncoderPtr = endingPtr;
+                    ObjcOwnership.Release(endingPtr);
                     CurrentEncoder = null;
                     _encoderFactory?.OnRenderPassEnded(_endingFor);
                     break;
@@ -181,6 +215,14 @@ class CommandBufferEncoder
         // Pass encoders are autoreleased with no pool on this thread; own them
         // for the pass lifetime (released in EndCurrentPass after EndEncoding).
         ObjcOwnership.Retain(renderCommandEncoder.NativePtr);
+
+        if (renderCommandEncoder.NativePtr == _lastEndedEncoderPtr)
+        {
+            // The allocator recycled the last-ended encoder's address for this fresh
+            // one; it may legally end once. Without this, the tripwire above would
+            // skip its end and leak an open encoder into commit.
+            _lastEndedEncoderPtr = IntPtr.Zero;
+        }
 
         CurrentEncoder = renderCommandEncoder;
         CurrentEncoderType = EncoderType.Render;

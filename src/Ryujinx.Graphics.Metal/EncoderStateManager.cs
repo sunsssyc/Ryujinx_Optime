@@ -525,6 +525,16 @@ namespace Ryujinx.Graphics.Metal
                 {
                     MTLRenderPassColorAttachmentDescriptor passAttachment = renderPassDescriptor.ColorAttachments.Object((ulong)i);
                     tex.PopulateRenderPassAttachment(passAttachment, _pipeline.Cbs);
+
+                    // The 11:03 crash was AGX segfaulting while walking this descriptor's
+                    // attachments at encoder creation - a dead texture handle. If one ever
+                    // lands here again, name it in the log instead of letting the driver
+                    // dereference it.
+                    if (passAttachment.Texture.NativePtr == IntPtr.Zero && _attachFaults++ < 20)
+                    {
+                        Logger.Error?.PrintMsg(LogClass.Gpu,
+                            $"null colour attachment handle at pass build: rt={i} {tex.Width}x{tex.Height}/{tex.MtlFormat}\n{Environment.StackTrace}");
+                    }
                     passAttachment.LoadAction = _currentState.ClearLoadAction ? MTLLoadAction.Clear : MTLLoadAction.Load;
 
                     // Experiment: the game's final 1080p sRGB target is Loaded every frame and
@@ -2353,6 +2363,18 @@ namespace Ryujinx.Graphics.Metal
         private static long _splitHotOther;
         private static long _splitSubres;
         private static long _splitLegacy;
+        private static int _attachFaults;
+
+        // A few concrete hotSelf splits per stats window: which program, what raster
+        // state, what it sampled. The classification says the remaining split load is
+        // almost entirely draws sampling their own pass's attachment; whether the fix is
+        // a framebuffer-fetch rewrite (same-pixel reads), Switch-semantics tolerance
+        // (stale reads the guest hardware also served), or nothing (fresh data really
+        // needed) depends entirely on which shaders these are.
+        private const int MaxSelfSamples = 4;
+        private static readonly string[] _selfSamples = new string[MaxSelfSamples];
+        private static int _selfSampleCount;
+        private static string _selfSampleTex = string.Empty;
         private static readonly Dictionary<(int Width, int Height, MTLPixelFormat Format), int> _splitShapes = new();
 
         private static void NoteSplitShape(Texture sampled)
@@ -2382,9 +2404,17 @@ namespace Ryujinx.Graphics.Metal
 
             _splitShapes.Clear();
 
+            string samples = string.Empty;
+
+            if (_selfSampleCount > 0)
+            {
+                samples = " hotSelf samples: " + string.Join(" | ", _selfSamples.Take(_selfSampleCount)) + ".";
+                _selfSampleCount = 0;
+            }
+
             return $" rawsplit classes/frame: hotSelf={self / frames}, hotOther={other / frames}, subres={subres / frames}" +
                    (legacy != 0 ? $", legacy={legacy / frames}" : string.Empty) +
-                   (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".");
+                   (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".") + samples;
         }
 
         /// <summary>
@@ -2684,6 +2714,12 @@ namespace Ryujinx.Graphics.Metal
                 else if (anySelf)
                 {
                     _splitHotSelf++;
+
+                    if (_selfSampleCount < MaxSelfSamples)
+                    {
+                        _selfSamples[_selfSampleCount++] =
+                            $"[{program.DebugLabel}] reads {_selfSampleTex} {DescribeRaster()}";
+                    }
                 }
                 else
                 {
@@ -2719,6 +2755,13 @@ namespace Ryujinx.Graphics.Metal
                 if (_passAttachments[i].Ptr == sampled.CanonicalPtr)
                 {
                     anySelf = true;
+
+                    if (_selfSampleCount < MaxSelfSamples)
+                    {
+                        _selfSampleTex =
+                            $"{sampled.Width}x{sampled.Height}/{sampled.MtlFormat} lv{sampled.FirstLevel}+{Math.Max(1, sampled.Info.Levels)} ly{sampled.FirstLayer}+{Math.Max(1, sampled.Info.GetLayers())}";
+                    }
+
                     break;
                 }
             }
