@@ -3,6 +3,7 @@ using Ryujinx.Graphics.GAL;
 using SharpMetal.Foundation;
 using SharpMetal.Metal;
 using System;
+using System.Diagnostics;
 using System.Runtime.Versioning;
 
 namespace Ryujinx.Graphics.Metal
@@ -243,6 +244,17 @@ namespace Ryujinx.Graphics.Metal
         public static readonly bool MaskUnwrittenOutputs = Environment.GetEnvironmentVariable("RYUJINX_METAL_MASK_UNWRITTEN") != "0";
         public static long MaskedUnwrittenCount;
 
+        // Read-only probe for the synchronous pipeline-state compiles. A cache miss
+        // below is a GPU back-end compile on the render thread, and nothing else in
+        // the stats line can see one; a burst of them is the leading suspect for the
+        // camera-turn drops that are neither sync waits nor pass count. Only the miss
+        // path touches these, so the hit path is as it was.
+        public static long PsoRenderCreated;
+        public static long PsoRenderTicks;
+        public static long PsoRenderMaxTicks;
+        public static long PsoComputeCreated;
+        public static long PsoComputeTicks;
+
         public MTLRenderPipelineState CreateRenderPipeline(MTLDevice device, Program program)
         {
             if (program.TryGetGraphicsPipeline(ref Internal, out MTLRenderPipelineState pipelineState))
@@ -253,7 +265,17 @@ namespace Ryujinx.Graphics.Metal
             using MTLRenderPipelineDescriptor descriptor = CreateRenderDescriptor(program);
 
             NSError error = new(IntPtr.Zero);
+            long psoStart = Stopwatch.GetTimestamp();
             pipelineState = device.NewRenderPipelineState(descriptor, ref error);
+            long psoTicks = Stopwatch.GetTimestamp() - psoStart;
+            PsoRenderCreated++;
+            PsoRenderTicks += psoTicks;
+
+            if (psoTicks > PsoRenderMaxTicks)
+            {
+                PsoRenderMaxTicks = psoTicks;
+            }
+
             if (error != IntPtr.Zero)
             {
                 Logger.Error?.PrintMsg(LogClass.Gpu, $"Failed to create Render Pipeline State: {StringHelper.String(error.LocalizedDescription)}");
@@ -308,7 +330,11 @@ namespace Ryujinx.Graphics.Metal
             using MTLComputePipelineDescriptor descriptor = CreateComputeDescriptor(program);
 
             NSError error = new(IntPtr.Zero);
+            long psoStart = Stopwatch.GetTimestamp();
             pipelineState = device.NewComputePipelineState(descriptor, MTLPipelineOption.None, 0, ref error);
+            PsoComputeTicks += Stopwatch.GetTimestamp() - psoStart;
+            PsoComputeCreated++;
+
             if (error != IntPtr.Zero)
             {
                 Logger.Error?.PrintMsg(LogClass.Gpu, $"Failed to create Compute Pipeline State: {StringHelper.String(error.LocalizedDescription)}");

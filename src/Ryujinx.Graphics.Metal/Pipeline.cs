@@ -57,6 +57,20 @@ namespace Ryujinx.Graphics.Metal
         private ulong _lastFrameLineDraws;
         private ulong _lastFrameLineRenderPasses;
 
+        // Pipeline-state compiles are attributed per presented frame, then folded into
+        // the 120-frame block as "frames that compiled" and "worst frame": a burst of
+        // three stalled frames averages away to nothing over 120, and the burst is the
+        // thing being looked for.
+        private long _lastPresentPsoCreated;
+        private long _lastPresentPsoTicks;
+        private long _statsPsoFramesWithCreation;
+        private long _statsPsoWorstFrameTicks;
+        private long _statsPsoWorstFrameCount;
+        private long _lastStatsPsoRenderCreated;
+        private long _lastStatsPsoRenderTicks;
+        private long _lastStatsPsoComputeCreated;
+        private long _lastStatsPsoComputeTicks;
+
         private readonly MTLDevice _device;
         private readonly MetalRenderer _renderer;
         private EncoderStateManager _encoderStateManager;
@@ -1327,6 +1341,27 @@ namespace Ryujinx.Graphics.Metal
 
             _presentCount++;
 
+            // Synchronous pipeline-state compiles this frame, render and compute together:
+            // for a stall what matters is the wall clock the render thread spent inside
+            // the driver, whichever kind of pipeline it was building.
+            long psoCreatedTotal = PipelineState.PsoRenderCreated + PipelineState.PsoComputeCreated;
+            long psoTicksTotal = PipelineState.PsoRenderTicks + PipelineState.PsoComputeTicks;
+            long framePsoCreated = psoCreatedTotal - _lastPresentPsoCreated;
+            long framePsoTicks = psoTicksTotal - _lastPresentPsoTicks;
+            _lastPresentPsoCreated = psoCreatedTotal;
+            _lastPresentPsoTicks = psoTicksTotal;
+
+            if (framePsoCreated != 0)
+            {
+                _statsPsoFramesWithCreation++;
+
+                if (framePsoTicks > _statsPsoWorstFrameTicks)
+                {
+                    _statsPsoWorstFrameTicks = framePsoTicks;
+                    _statsPsoWorstFrameCount = framePsoCreated;
+                }
+            }
+
             if (_frameLine)
             {
                 // One line per presented frame: the map flicker lasts about five frames
@@ -1338,7 +1373,8 @@ namespace Ryujinx.Graphics.Metal
                 _lastFrameLineRenderPasses = _renderPassCount;
                 Logger.Warning?.PrintMsg(LogClass.Gpu,
                     $"frameline f={_presentCount} t={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} " +
-                    $"passes={fPasses} draws={fDraws} skipped={_skippedDraws} rawsplits={_rawSplits}");
+                    $"passes={fPasses} draws={fDraws} skipped={_skippedDraws} rawsplits={_rawSplits} " +
+                    $"pso={framePsoCreated}/{framePsoTicks * 1000.0 / Stopwatch.Frequency:F1}ms");
             }
 
             if (_presentCount % SyncStatsLogFrameInterval == 0)
@@ -1364,8 +1400,28 @@ namespace Ryujinx.Graphics.Metal
 
                 GpuTimeline.Snapshot gpu = GpuTimeline.Enabled ? GpuTimeline.TakeAndReset() : default;
 
+                // The window's pipeline-state compiles, consumed here whether or not the
+                // block prints, so each block's numbers are its own window's.
+                long psoRenderCreated = PipelineState.PsoRenderCreated - _lastStatsPsoRenderCreated;
+                long psoRenderTicks = PipelineState.PsoRenderTicks - _lastStatsPsoRenderTicks;
+                long psoComputeCreated = PipelineState.PsoComputeCreated - _lastStatsPsoComputeCreated;
+                long psoComputeTicks = PipelineState.PsoComputeTicks - _lastStatsPsoComputeTicks;
+                long psoRenderMaxTicks = PipelineState.PsoRenderMaxTicks;
+                long psoFramesWithCreation = _statsPsoFramesWithCreation;
+                long psoWorstFrameTicks = _statsPsoWorstFrameTicks;
+                long psoWorstFrameCount = _statsPsoWorstFrameCount;
+                _lastStatsPsoRenderCreated = PipelineState.PsoRenderCreated;
+                _lastStatsPsoRenderTicks = PipelineState.PsoRenderTicks;
+                _lastStatsPsoComputeCreated = PipelineState.PsoComputeCreated;
+                _lastStatsPsoComputeTicks = PipelineState.PsoComputeTicks;
+                PipelineState.PsoRenderMaxTicks = 0;
+                _statsPsoFramesWithCreation = 0;
+                _statsPsoWorstFrameTicks = 0;
+                _statsPsoWorstFrameCount = 0;
+
                 if (syncWaitCount != 0 || forcedSyncFlushCount != 0 || proactiveSyncFlushCount != 0 || coalescedSyncSignalCount != 0 ||
-                    autoFlushDrawCount != 0 || autoFlushAttachmentCount != 0 || gpu.Count != 0)
+                    autoFlushDrawCount != 0 || autoFlushAttachmentCount != 0 || gpu.Count != 0 ||
+                    psoRenderCreated != 0 || psoComputeCreated != 0)
                 {
                     double waitMs = syncWaitTicks * 1000.0 / Stopwatch.Frequency;
                     string sourceText = string.IsNullOrEmpty(waitBreakdown) ? string.Empty : $" wait: {waitBreakdown}.";
@@ -1442,13 +1498,20 @@ namespace Ryujinx.Graphics.Metal
                     string blitCallers = CommandBufferEncoder.TakeBlitCallers();
                     string blitText = blitCallers == null ? string.Empty : $" blit callers: {blitCallers}.";
 
+                    double tickMs = 1000.0 / Stopwatch.Frequency;
+                    string psoText =
+                        $" pso compiles: {psoRenderCreated} render ({psoRenderTicks * tickMs:F1}ms, longest {psoRenderMaxTicks * tickMs:F1}ms), " +
+                        $"{psoComputeCreated} compute ({psoComputeTicks * tickMs:F1}ms); " +
+                        $"{psoFramesWithCreation} of {SyncStatsLogFrameInterval} frames compiled, " +
+                        $"worst frame {psoWorstFrameCount} in {psoWorstFrameTicks * tickMs:F1}ms.";
+
                     Logger.Info?.PrintMsg(
                         LogClass.Gpu,
                         $"Metal sync stats over last {SyncStatsLogFrameInterval} frames: {waitMs:F2}ms in {syncWaitCount} waits, " +
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
-                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{gpuText}{splitClassText}{reasonText}{revisitText}{gateText}{blitText}{configText}");
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{gpuText}{splitClassText}{reasonText}{revisitText}{gateText}{blitText}{psoText}{configText}");
                 }
             }
 

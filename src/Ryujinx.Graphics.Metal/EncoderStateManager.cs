@@ -568,7 +568,7 @@ namespace Ryujinx.Graphics.Metal
                     UploadCorrelator.NoteAttachment(tex, _currentState.ClearLoadAction);
                     if (SplitScopePass)
                     {
-                        _passAttachments.Add(new PassAttachment(tex.CanonicalPtr, SubRange.Of(tex)));
+                        _passAttachments.Add(new PassAttachment(tex.CanonicalPtr, SubRange.Of(tex), i));
                     }
                     else
                     {
@@ -599,7 +599,7 @@ namespace Ryujinx.Graphics.Metal
                 {
                     if (SplitScopePass)
                     {
-                        _passAttachments.Add(new PassAttachment(_currentState.DepthStencil.CanonicalPtr, SubRange.Of(_currentState.DepthStencil)));
+                        _passAttachments.Add(new PassAttachment(_currentState.DepthStencil.CanonicalPtr, SubRange.Of(_currentState.DepthStencil), -1));
                     }
                     else
                     {
@@ -2305,6 +2305,7 @@ namespace Ryujinx.Graphics.Metal
         /// this game issues rarely; this keys on the hazard actually occurring.
         /// </summary>
         private readonly Dictionary<IntPtr, SubRange> _writtenThisCb = new();
+        private readonly HashSet<IntPtr> _reallyWrittenThisPass = new();
 
         /// <summary>
         /// Subresource span of a view within its storage. Instrument-only: the split
@@ -2350,7 +2351,7 @@ namespace Ryujinx.Graphics.Metal
                 MinLayer <= other.MaxLayer && other.MinLayer <= MaxLayer;
         }
 
-        private readonly record struct PassAttachment(IntPtr Ptr, SubRange Range);
+        private readonly record struct PassAttachment(IntPtr Ptr, SubRange Range, int Slot);
 
         // Split classification. Every raw split lands in exactly one bucket:
         //   hotSelf  - the draw samples an attachment of the very pass it joins; the one
@@ -2379,6 +2380,17 @@ namespace Ryujinx.Graphics.Metal
         private static long _splitSubres;
         private static long _splitLegacy;
         private static long _splitSelfSkipped;
+        private static long _splitOtherUnwritten;
+        private static long _splitSelfUnwritten;
+        private static readonly Dictionary<string, int> _otherLabels = new();
+        private static readonly Dictionary<(MTLPixelFormat Format, bool Skippable, bool Written), int> _hazardTextures = new();
+
+        private static void NoteHazardTexture(MTLPixelFormat format, bool skippable, bool written)
+        {
+            (MTLPixelFormat, bool, bool) key = (format, skippable, written);
+            _hazardTextures.TryGetValue(key, out int n);
+            _hazardTextures[key] = n + 1;
+        }
         private static int _attachFaults;
 
         /// <summary>
@@ -2442,11 +2454,15 @@ namespace Ryujinx.Graphics.Metal
         public static string TakeSplitClasses(int frames)
         {
             long self = _splitHotSelf, other = _splitHotOther, subres = _splitSubres, legacy = _splitLegacy, skipped = _splitSelfSkipped;
+            long otherUnwritten = _splitOtherUnwritten, selfUnwritten = _splitSelfUnwritten;
             _splitHotSelf = _splitHotOther = _splitSubres = _splitLegacy = _splitSelfSkipped = 0;
+            _splitOtherUnwritten = _splitSelfUnwritten = 0;
 
             if (self + other + subres + legacy + skipped == 0)
             {
                 _splitShapes.Clear();
+                _otherLabels.Clear();
+                _hazardTextures.Clear();
                 return null;
             }
 
@@ -2463,9 +2479,20 @@ namespace Ryujinx.Graphics.Metal
                 _selfSampleCount = 0;
             }
 
+            // hazard textures: format(w=really written this pass|u=unwritten, s=skippable format|d=data format)=matches per frame
+            string hazardTex = string.Join(", ", _hazardTextures.OrderByDescending(kv => kv.Value).Take(5)
+                .Select(kv => $"{kv.Key.Format}({(kv.Key.Written ? "w" : "u")}{(kv.Key.Skippable ? "s" : "d")})={kv.Value / frames}"));
+            _hazardTextures.Clear();
+            string otherLabels = string.Join(", ", _otherLabels.OrderByDescending(kv => kv.Value).Take(5)
+                .Select(kv => $"{kv.Key}={kv.Value / frames}"));
+            _otherLabels.Clear();
+
             return $" rawsplit classes/frame: hotSelf={self / frames}, hotOther={other / frames}, subres={subres / frames}, selfSkipped={skipped / frames}" +
                    (legacy != 0 ? $", legacy={legacy / frames}" : string.Empty) +
-                   (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".") + samples;
+                   $", onUnwritten: other={otherUnwritten / frames} self={selfUnwritten / frames}" +
+                   (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".") +
+                   (hazardTex.Length != 0 ? $" hazard textures/frame: {hazardTex}." : string.Empty) +
+                   (otherLabels.Length != 0 ? $" hotOther programs/frame: {otherLabels}." : string.Empty) + samples;
         }
 
         /// <summary>
@@ -2569,9 +2596,29 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         public readonly void MarkPassAttachmentsWritten()
         {
+            // The conservative set marks every attachment. The honest set beside it marks
+            // only what this draw can actually write: a colour slot whose guest write mask
+            // is non-zero AND whose output the fragment function declares (the pipeline
+            // descriptor already ANDs those two), depth only with depth writes enabled.
+            // Probe only: the split decision still uses the conservative set, and the
+            // stats line reports how many hazards land on attachments nobody in the pass
+            // has really written.
+            int outputMap = _currentState.RenderProgram?.FragmentOutputMap ?? -1;
+
             for (int i = 0; i < _passAttachments.Count; i++)
             {
                 NoteAttachmentWritten(_passAttachments[i].Ptr, _passAttachments[i].Range);
+
+                int slot = _passAttachments[i].Slot;
+                bool writes = slot < 0
+                    ? _currentState.DepthStencilUid.DepthWriteEnabled
+                    : _currentState.Pipeline.Internal.ColorBlendState[slot].WriteMask != MTLColorWriteMask.None &&
+                      (outputMap & (1 << slot)) != 0;
+
+                if (writes)
+                {
+                    _reallyWrittenThisPass.Add(_passAttachments[i].Ptr);
+                }
             }
         }
 
@@ -2580,12 +2627,14 @@ namespace Ryujinx.Graphics.Metal
             if (SplitScopePass)
             {
                 _writtenThisCb.Clear();
+                _reallyWrittenThisPass.Clear();
             }
         }
 
         public readonly void ClearWrittenThisCb()
         {
             _writtenThisCb.Clear();
+            _reallyWrittenThisPass.Clear();
         }
 
         /// <summary>
@@ -2704,6 +2753,7 @@ namespace Ryujinx.Graphics.Metal
             bool anyOverlap = false;
             bool anySelf = false;
             bool anyForeign = false;
+            bool anyReallyWritten = false;
 
             ResourceBindingSegment[] segments = program.BindingSegments[Constants.TexturesSetIndex];
 
@@ -2729,7 +2779,7 @@ namespace Ryujinx.Graphics.Metal
 
                         if (_currentState.TextureRefs[index].Storage is Texture sampled)
                         {
-                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf, ref anyForeign);
+                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten);
                         }
                     }
                 }
@@ -2751,7 +2801,7 @@ namespace Ryujinx.Graphics.Metal
                     {
                         if (reference.Storage is Texture sampled)
                         {
-                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf, ref anyForeign);
+                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten);
                         }
                     }
                 }
@@ -2776,10 +2826,23 @@ namespace Ryujinx.Graphics.Metal
                 // the draw is never a skip candidate.
                 _splitHotOther++;
 
+                if (!anyReallyWritten)
+                {
+                    _splitOtherUnwritten++;
+                }
+
+                _otherLabels.TryGetValue(program.DebugLabel, out int seen);
+                _otherLabels[program.DebugLabel] = seen + 1;
+
                 return RawHazard.Hazard;
             }
 
             _splitHotSelf++;
+
+            if (!anyReallyWritten)
+            {
+                _splitSelfUnwritten++;
+            }
 
             if (_selfSampleCount < MaxSelfSamples)
             {
@@ -2790,7 +2853,7 @@ namespace Ryujinx.Graphics.Metal
             return RawHazard.SelfOnly;
         }
 
-        private readonly void ClassifyMatch(Texture sampled, ref bool any, ref bool anyOverlap, ref bool anySelf, ref bool anyForeign)
+        private readonly void ClassifyMatch(Texture sampled, ref bool any, ref bool anyOverlap, ref bool anySelf, ref bool anyForeign, ref bool anyReallyWritten)
         {
             if (!_writtenThisCb.TryGetValue(sampled.CanonicalPtr, out SubRange written))
             {
@@ -2809,6 +2872,13 @@ namespace Ryujinx.Graphics.Metal
                 anyOverlap = true;
                 NoteSplitShape(sampled);
             }
+
+            // Every overlapping match, not just the first: the hot-shapes histogram only
+            // sees the first texture a draw matches, which is how the second one - the
+            // one that makes a draw hotOther - stayed invisible.
+            bool reallyWritten = _reallyWrittenThisPass.Contains(sampled.CanonicalPtr);
+            anyReallyWritten |= reallyWritten;
+            NoteHazardTexture(sampled.MtlFormat, SkippableSelfFormat(sampled.MtlFormat), reallyWritten);
 
             bool self = false;
 
