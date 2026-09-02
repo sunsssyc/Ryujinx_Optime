@@ -187,6 +187,28 @@ namespace Ryujinx.Graphics.Metal
 
         private static readonly bool _skipSelfSplitDefault = _skipSelfSplit;
 
+        // Same-pixel self-reads of a data-format attachment go to a framebuffer-fetch
+        // variant of the shader instead of ending the pass. RYUJINX_METAL_FB_FETCH=0 or
+        // /tmp/ryujinx-metal-fb-fetch containing 0 to revert, re-read once a frame.
+        private static bool _fbFetch =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_FB_FETCH") != "0";
+
+        private static readonly bool _fbFetchDefault = _fbFetch;
+
+        private static void RefreshFbFetch()
+        {
+            try
+            {
+                _fbFetch = System.IO.File.Exists("/tmp/ryujinx-metal-fb-fetch")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-fb-fetch").Trim() == "1"
+                    : _fbFetchDefault;
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; next frame picks it up.
+            }
+        }
+
         private static void RefreshSkipSelfSplit()
         {
             try
@@ -699,6 +721,7 @@ namespace Ryujinx.Graphics.Metal
                 blitLabel.StartsWith("480117", StringComparison.Ordinal);
 
             bool rawHazardSplit = false;
+            Program fetchVariant = null;
 
             if (forDraw && _rawSplit &&
                 Cbs.Encoders.CurrentEncoderType == EncoderType.Render &&
@@ -706,14 +729,51 @@ namespace Ryujinx.Graphics.Metal
             {
                 EncoderStateManager.RawHazard hazard = _encoderStateManager.SamplesEarlierWrite();
 
+                if (hazard == EncoderStateManager.RawHazard.Fetchable)
+                {
+                    // Serve the data-format self-reads from tile memory. Any skippable colour
+                    // self-read on the same draw is handled as before: skipped when that is
+                    // on, otherwise the draw still has to split for it. A variant that is
+                    // still compiling falls back to the split for this draw, never a stall.
+                    bool colourOk = !EncoderStateManager.FetchPlanHasSkippableSelf || _skipSelfSplit;
+                    Program variant = _fbFetch && colourOk
+                        ? _encoderStateManager.RenderProgram?.GetOrCreateFetchVariant(_device, EncoderStateManager.FetchPlan)
+                        : null;
+
+                    if (variant != null && variant.CheckProgramLink(false) == ProgramLinkStatus.Success)
+                    {
+                        fetchVariant = variant;
+                        EncoderStateManager.NoteFetchServed();
+
+                        if (EncoderStateManager.FetchPlanHasSkippableSelf)
+                        {
+                            _encoderStateManager.NoteSelfSkipAndTaint();
+                        }
+                    }
+                    else
+                    {
+                        if (variant != null)
+                        {
+                            EncoderStateManager.NoteFetchPending();
+                        }
+
+                        hazard = EncoderStateManager.RawHazard.Hazard;
+                    }
+                }
+
                 if (hazard == EncoderStateManager.RawHazard.SelfOnly && _skipSelfSplit)
                 {
                     _encoderStateManager.NoteSelfSkipAndTaint();
                 }
-                else
+                else if (hazard != EncoderStateManager.RawHazard.Fetchable)
                 {
                     rawHazardSplit = hazard != EncoderStateManager.RawHazard.None;
                 }
+            }
+
+            if (forDraw)
+            {
+                _encoderStateManager.UseFetchVariant(fetchVariant);
             }
 
             if (forceDrawTrace || forceAllSplit || forceBlitSplit || rawHazardSplit)
@@ -1163,6 +1223,7 @@ namespace Ryujinx.Graphics.Metal
             RefreshSkipProgram();
             RefreshRawSplit();
             RefreshSkipSelfSplit();
+            RefreshFbFetch();
             EncoderStateManager.RefreshRawDeclared();
             RefreshBarrierScope();
             EncoderStateManager.RefreshSplitScope();
@@ -1449,7 +1510,7 @@ namespace Ryujinx.Graphics.Metal
                         $" config: splitScope={(EncoderStateManager.SplitScopePass ? "pass" : "cb")}, " +
                         $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : "all")}, " +
                         $"markOnDraw={EncoderStateManager.MarkOnDrawActive}, " +
-                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}.";
+                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}, fbFetch={_fbFetch}.";
 
                     // Occupancy, and the evidence that the occupancy is readable. The span
                     // is the GPU clock's own measure of the same window the wall clock just

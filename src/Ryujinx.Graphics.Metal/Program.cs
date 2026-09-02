@@ -21,6 +21,13 @@ namespace Ryujinx.Graphics.Metal
     class Program : IProgram
     {
         private volatile ProgramLinkStatus _status;
+        private readonly ResourceLayout _resourceLayout;
+        // Framebuffer-fetch variants of this program by fetch plan; null = the plan could
+        // not be patched, so the draw keeps splitting.
+        private Dictionary<ulong, Program> _fetchVariants;
+        public bool IsFetchVariant { get; init; }
+        public static long FetchVariantsCreated;
+        public static long FetchVariantsRejected;
         private readonly ShaderSource[] _shaders;
         private readonly GCHandle[] _handles;
         private readonly ManualResetEventSlim _compilationEvent = new(false);
@@ -1395,6 +1402,7 @@ namespace Ryujinx.Graphics.Metal
             int fragmentOutputMap = -1)
         {
             _renderer = renderer;
+            _resourceLayout = resourceLayout;
             FragmentOutputMap = fragmentOutputMap;
             renderer.Programs.Add(this);
 
@@ -1637,6 +1645,250 @@ namespace Ryujinx.Graphics.Metal
             return false;
         }
 
+        /// <summary>
+        /// The framebuffer-fetch variant of this program for a fetch plan: the fragment
+        /// source with each planned texture's sample() replaced by a [[color(slot)]]
+        /// input, compiled as a program of its own (own pipeline cache, same binding
+        /// layout). Null when the source could not be patched safely.
+        /// </summary>
+        public Program GetOrCreateFetchVariant(MTLDevice device, ReadOnlySpan<FetchBinding> plan)
+        {
+            if (IsFetchVariant || plan.Length == 0 || plan.Length > 3)
+            {
+                return null;
+            }
+
+            ulong key = (ulong)plan.Length << 60;
+
+            for (int i = 0; i < plan.Length; i++)
+            {
+                key |= ((ulong)(byte)plan[i].Binding | ((ulong)(byte)plan[i].Slot << 8)) << (16 * i);
+            }
+
+            _fetchVariants ??= new Dictionary<ulong, Program>();
+
+            if (_fetchVariants.TryGetValue(key, out Program variant))
+            {
+                return variant;
+            }
+
+            string planText = string.Join(",", plan.ToArray().Select(p => $"b{p.Binding}->c{p.Slot}"));
+
+            if (TryPatchFetch(_shaders, BindingSegments[(int)Constants.TexturesSetIndex], plan, out ShaderSource[] patched, out string reason))
+            {
+                variant = new Program(_renderer, device, patched, _resourceLayout, ComputeLocalSize, FragmentOutputMap) { IsFetchVariant = true };
+                FetchVariantsCreated++;
+                Logger.Info?.PrintMsg(LogClass.Gpu, $"fb-fetch variant {variant.DebugLabel} of {DebugLabel} [{planText}]");
+            }
+            else
+            {
+                FetchVariantsRejected++;
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"fb-fetch variant of {DebugLabel} [{planText}] rejected: {reason}");
+            }
+
+            _fetchVariants[key] = variant;
+
+            return variant;
+        }
+
+        /// <summary>
+        /// Rewrites the fragment stage so the planned bindings read their attachment slot
+        /// through a [[color(n)]] argument. The k-th "tex_" member of the fragment's
+        /// Textures struct is the k-th fragment-stage texture binding in segment order -
+        /// the same order UpdateAndBind fills the argument buffer in, which is what makes
+        /// the shader see its textures at all. Anything outside the one shape that was
+        /// verified same-pixel (a plain sample() whose result is read as .x) is refused.
+        /// </summary>
+        private static bool TryPatchFetch(ShaderSource[] shaders, ResourceBindingSegment[] textureSegments, ReadOnlySpan<FetchBinding> plan, out ShaderSource[] patched, out string reason)
+        {
+            patched = null;
+            reason = null;
+
+            int fragIndex = Array.FindIndex(shaders, sh => sh.Stage == ShaderStage.Fragment);
+
+            if (fragIndex < 0 || shaders[fragIndex].Code == null)
+            {
+                reason = "no fragment stage";
+                return false;
+            }
+
+            string code = shaders[fragIndex].Code;
+
+            int structStart = code.IndexOf("struct Textures\n{", StringComparison.Ordinal);
+            int structEnd = structStart < 0 ? -1 : code.IndexOf("};", structStart, StringComparison.Ordinal);
+
+            if (structEnd < 0)
+            {
+                reason = "no Textures struct";
+                return false;
+            }
+
+            List<(string Type, string Name)> members = new();
+
+            foreach (string raw in code.Substring(structStart, structEnd - structStart).Split('\n'))
+            {
+                string line = raw.Trim();
+                int space = line.LastIndexOf(' ');
+
+                if (!line.EndsWith(';') || space < 0)
+                {
+                    continue;
+                }
+
+                string name = line[(space + 1)..^1];
+
+                if (name.StartsWith("tex_", StringComparison.Ordinal))
+                {
+                    members.Add((line[..space], name));
+                }
+            }
+
+            List<int> fragmentTextureBindings = new();
+
+            foreach (ResourceBindingSegment segment in textureSegments)
+            {
+                if (segment.IsArray)
+                {
+                    reason = "texture array binding";
+                    return false;
+                }
+
+                if (segment.Type == ResourceType.Sampler || (segment.Stages & ResourceStages.Fragment) == 0)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < segment.Count; i++)
+                {
+                    fragmentTextureBindings.Add(segment.Binding + i);
+                }
+            }
+
+            if (fragmentTextureBindings.Count != members.Count)
+            {
+                reason = $"{members.Count} texture members vs {fragmentTextureBindings.Count} fragment bindings";
+                return false;
+            }
+
+            SortedSet<int> slots = new();
+
+            foreach (FetchBinding fb in plan)
+            {
+                int k = fragmentTextureBindings.IndexOf(fb.Binding);
+
+                if (k < 0)
+                {
+                    reason = $"binding {fb.Binding} is not a fragment texture";
+                    return false;
+                }
+
+                (string type, string name) = members[k];
+
+                if (type != "texture2d<float>")
+                {
+                    reason = $"{name} is {type}";
+                    return false;
+                }
+
+                string call = $"textures.{name}.sample(";
+                string fetch = $"fb_color_{fb.Slot}";
+                int replaced = 0;
+                int pos;
+
+                while ((pos = code.IndexOf(call, StringComparison.Ordinal)) >= 0)
+                {
+                    int close = MatchingParen(code, pos + call.Length - 1);
+
+                    if (close < 0)
+                    {
+                        reason = $"{name}: unbalanced sample()";
+                        return false;
+                    }
+
+                    string args = code.Substring(pos + call.Length, close - pos - call.Length);
+
+                    if (args.Contains("level(") || args.Contains("bias(") || args.Contains("gradient") || args.Contains("offset") ||
+                        close + 2 >= code.Length || code[close + 1] != '.' || code[close + 2] != 'x' ||
+                        (close + 3 < code.Length && (char.IsLetterOrDigit(code[close + 3]) || code[close + 3] == '_')))
+                    {
+                        reason = $"{name}: sample() not the plain .x shape";
+                        return false;
+                    }
+
+                    code = code[..pos] + fetch + code[(close + 1)..];
+                    replaced++;
+                }
+
+                if (replaced == 0 || CountUses(code, $"textures.{name}") != 0)
+                {
+                    reason = replaced == 0 ? $"{name} never sampled" : $"{name} has non-sample uses";
+                    return false;
+                }
+
+                slots.Add(fb.Slot);
+            }
+
+            int signature = code.IndexOf("fragmentMain(", StringComparison.Ordinal);
+            int signatureClose = signature < 0 ? -1 : MatchingParen(code, signature + "fragmentMain(".Length - 1);
+
+            if (signatureClose < 0)
+            {
+                reason = "no fragmentMain signature";
+                return false;
+            }
+
+            StringBuilder extra = new();
+
+            foreach (int slot in slots)
+            {
+                extra.Append($", float4 fb_color_{slot} [[color({slot})]]");
+            }
+
+            code = code[..signatureClose] + extra + code[signatureClose..];
+
+            patched = (ShaderSource[])shaders.Clone();
+            patched[fragIndex] = new ShaderSource(code, shaders[fragIndex].Stage, shaders[fragIndex].Language);
+
+            return true;
+        }
+
+        private static int MatchingParen(string code, int open)
+        {
+            int depth = 0;
+
+            for (int i = open; i < code.Length; i++)
+            {
+                if (code[i] == '(')
+                {
+                    depth++;
+                }
+                else if (code[i] == ')' && --depth == 0)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private static int CountUses(string code, string identifier)
+        {
+            int count = 0;
+            int pos = 0;
+
+            while ((pos = code.IndexOf(identifier, pos, StringComparison.Ordinal)) >= 0)
+            {
+                pos += identifier.Length;
+
+                if (pos >= code.Length || !(char.IsLetterOrDigit(code[pos]) || code[pos] == '_'))
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
         public void Dispose()
         {
             if (!_renderer.Programs.Remove(this))
@@ -1653,6 +1905,14 @@ namespace Ryujinx.Graphics.Metal
             }
 
             _computePipelineCache?.Dispose();
+
+            if (_fetchVariants != null)
+            {
+                foreach (Program variant in _fetchVariants.Values)
+                {
+                    variant?.Dispose();
+                }
+            }
 
             VertexFunction.Dispose();
             FragmentFunction.Dispose();

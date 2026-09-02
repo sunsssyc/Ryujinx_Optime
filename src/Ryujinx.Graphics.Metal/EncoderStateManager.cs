@@ -448,6 +448,20 @@ namespace Ryujinx.Graphics.Metal
             SignalDirty(DirtyFlags.RenderAll);
         }
 
+        /// <summary>
+        /// Draws the current program through its framebuffer-fetch variant (null = the
+        /// program itself). Only the pipeline object changes; the variant keeps the base
+        /// program's binding layout, so argument buffers are built from the base as before.
+        /// </summary>
+        public readonly void UseFetchVariant(Program variant)
+        {
+            if (!ReferenceEquals(_currentState.FetchVariant, variant))
+            {
+                _currentState.FetchVariant = variant;
+                SignalDirty(DirtyFlags.RenderPipeline);
+            }
+        }
+
         public readonly void SignalComputeDirty()
         {
             SignalDirty(DirtyFlags.ComputeAll);
@@ -1083,7 +1097,7 @@ namespace Ryujinx.Graphics.Metal
 
         private readonly void SetRenderPipelineState(MTLRenderCommandEncoder renderCommandEncoder)
         {
-            MTLRenderPipelineState pipelineState = _currentState.Pipeline.CreateRenderPipeline(_device, _currentState.RenderProgram);
+            MTLRenderPipelineState pipelineState = _currentState.Pipeline.CreateRenderPipeline(_device, _currentState.FetchVariant ?? _currentState.RenderProgram);
 
             // Compilation failed (async shader compile not finished, or a genuinely
             // bad pipeline). Leave whatever is on the encoder alone and report the
@@ -1170,6 +1184,7 @@ namespace Ryujinx.Graphics.Metal
             if (prg.VertexFunction != IntPtr.Zero)
             {
                 _currentState.RenderProgram = prg;
+                _currentState.FetchVariant = null;
                 _currentState.DrawRingCb1Address = 0;
                 _currentState.DrawRingCb3Address = 0;
                 _currentState.DrawRingTex8ResourceId = 0;
@@ -2373,6 +2388,9 @@ namespace Ryujinx.Graphics.Metal
             None,
             SelfOnly,
             Hazard,
+            // Every hazard is a same-pixel read of a current attachment that a
+            // framebuffer-fetch variant can serve from tile memory without a split.
+            Fetchable,
         }
 
         private static long _splitHotSelf;
@@ -2382,6 +2400,19 @@ namespace Ryujinx.Graphics.Metal
         private static long _splitSelfSkipped;
         private static long _splitOtherUnwritten;
         private static long _splitSelfUnwritten;
+        private static long _splitFetchable;
+        private static long _splitFetched;
+        private static long _fetchPending;
+        // The fetch plan of the draw being classified: which fragment texture bindings
+        // alias which colour attachment slot. Static like the rest of the classification
+        // state; the backend is single-threaded on the render thread.
+        private static readonly FetchBinding[] _fetchPlan = new FetchBinding[3];
+        private static int _fetchPlanCount;
+        private static bool _fetchPlanHasSkippableSelf;
+        public static ReadOnlySpan<FetchBinding> FetchPlan => _fetchPlan.AsSpan(0, _fetchPlanCount);
+        public static bool FetchPlanHasSkippableSelf => _fetchPlanHasSkippableSelf;
+        public static void NoteFetchServed() => _splitFetched++;
+        public static void NoteFetchPending() => _fetchPending++;
         private static readonly Dictionary<string, int> _otherLabels = new();
         private static readonly Dictionary<(MTLPixelFormat Format, bool Skippable, bool Written), int> _hazardTextures = new();
 
@@ -2455,10 +2486,11 @@ namespace Ryujinx.Graphics.Metal
         {
             long self = _splitHotSelf, other = _splitHotOther, subres = _splitSubres, legacy = _splitLegacy, skipped = _splitSelfSkipped;
             long otherUnwritten = _splitOtherUnwritten, selfUnwritten = _splitSelfUnwritten;
+            long fetchable = _splitFetchable, fetched = _splitFetched, fetchPending = _fetchPending;
             _splitHotSelf = _splitHotOther = _splitSubres = _splitLegacy = _splitSelfSkipped = 0;
-            _splitOtherUnwritten = _splitSelfUnwritten = 0;
+            _splitOtherUnwritten = _splitSelfUnwritten = _splitFetchable = _splitFetched = _fetchPending = 0;
 
-            if (self + other + subres + legacy + skipped == 0)
+            if (self + other + subres + legacy + skipped + fetchable == 0)
             {
                 _splitShapes.Clear();
                 _otherLabels.Clear();
@@ -2490,6 +2522,7 @@ namespace Ryujinx.Graphics.Metal
             return $" rawsplit classes/frame: hotSelf={self / frames}, hotOther={other / frames}, subres={subres / frames}, selfSkipped={skipped / frames}" +
                    (legacy != 0 ? $", legacy={legacy / frames}" : string.Empty) +
                    $", onUnwritten: other={otherUnwritten / frames} self={selfUnwritten / frames}" +
+                   $", fetchable={fetchable / frames} fetched={fetched / frames} fetchPending={fetchPending / frames}" +
                    (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".") +
                    (hazardTex.Length != 0 ? $" hazard textures/frame: {hazardTex}." : string.Empty) +
                    (otherLabels.Length != 0 ? $" hotOther programs/frame: {otherLabels}." : string.Empty) + samples;
@@ -2754,6 +2787,9 @@ namespace Ryujinx.Graphics.Metal
             bool anySelf = false;
             bool anyForeign = false;
             bool anyReallyWritten = false;
+            bool anyFetchable = false;
+            bool anySkippableSelf = false;
+            _fetchPlanCount = 0;
 
             ResourceBindingSegment[] segments = program.BindingSegments[Constants.TexturesSetIndex];
 
@@ -2779,7 +2815,7 @@ namespace Ryujinx.Graphics.Metal
 
                         if (_currentState.TextureRefs[index].Storage is Texture sampled)
                         {
-                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten);
+                            ClassifyMatch(sampled, index, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten, ref anyFetchable, ref anySkippableSelf);
                         }
                     }
                 }
@@ -2801,7 +2837,7 @@ namespace Ryujinx.Graphics.Metal
                     {
                         if (reference.Storage is Texture sampled)
                         {
-                            ClassifyMatch(sampled, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten);
+                            ClassifyMatch(sampled, -1, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten, ref anyFetchable, ref anySkippableSelf);
                         }
                     }
                 }
@@ -2837,6 +2873,16 @@ namespace Ryujinx.Graphics.Metal
                 return RawHazard.Hazard;
             }
 
+            if (anyFetchable)
+            {
+                // Only same-pixel attachment reads: the data-format ones go to a fetch
+                // variant, any skippable colour ones are the caller's to skip or split.
+                _splitFetchable++;
+                _fetchPlanHasSkippableSelf = anySkippableSelf;
+
+                return RawHazard.Fetchable;
+            }
+
             _splitHotSelf++;
 
             if (!anyReallyWritten)
@@ -2853,7 +2899,7 @@ namespace Ryujinx.Graphics.Metal
             return RawHazard.SelfOnly;
         }
 
-        private readonly void ClassifyMatch(Texture sampled, ref bool any, ref bool anyOverlap, ref bool anySelf, ref bool anyForeign, ref bool anyReallyWritten)
+        private readonly void ClassifyMatch(Texture sampled, int binding, ref bool any, ref bool anyOverlap, ref bool anySelf, ref bool anyForeign, ref bool anyReallyWritten, ref bool anyFetchable, ref bool anySkippableSelf)
         {
             if (!_writtenThisCb.TryGetValue(sampled.CanonicalPtr, out SubRange written))
             {
@@ -2881,12 +2927,14 @@ namespace Ryujinx.Graphics.Metal
             NoteHazardTexture(sampled.MtlFormat, SkippableSelfFormat(sampled.MtlFormat), reallyWritten);
 
             bool self = false;
+            int slot = -1;
 
             for (int i = 0; i < _passAttachments.Count; i++)
             {
                 if (_passAttachments[i].Ptr == sampled.CanonicalPtr)
                 {
                     self = true;
+                    slot = _passAttachments[i].Slot;
 
                     break;
                 }
@@ -2895,6 +2943,7 @@ namespace Ryujinx.Graphics.Metal
             if (self && SkippableSelfFormat(sampled.MtlFormat))
             {
                 anySelf = true;
+                anySkippableSelf = true;
 
                 if (_selfSampleCount < MaxSelfSamples)
                 {
@@ -2902,10 +2951,33 @@ namespace Ryujinx.Graphics.Metal
                         $"{sampled.Width}x{sampled.Height}/{sampled.MtlFormat} lv{sampled.FirstLevel}+{Math.Max(1, sampled.Info.Levels)} ly{sampled.FirstLayer}+{Math.Max(1, sampled.Info.GetLayers())}";
                 }
             }
+            else if (self && binding >= 0 && slot >= 0 && FetchableSelfFormat(sampled.MtlFormat) &&
+                     sampled.FirstLevel == 0 && sampled.FirstLayer == 0 &&
+                     sampled.Info.Levels <= 1 && sampled.Info.GetLayers() <= 1 &&
+                     _fetchPlanCount < _fetchPlan.Length)
+            {
+                // A data-format attachment the draw samples at its own pixel (every such
+                // shader in the archive projects its own clip position: uv = attr.xy / attr.w,
+                // no offset). Tile memory holds exactly the value the split would have
+                // stored, so a framebuffer-fetch variant reads it in place - fresh, unlike
+                // the stale self-skip that broke Ultrahand on this very format.
+                _fetchPlan[_fetchPlanCount++] = new FetchBinding(binding, slot);
+                anyFetchable = true;
+            }
             else
             {
                 anyForeign = true;
             }
+        }
+
+        /// <summary>
+        /// Data formats whose same-pixel self-reads a framebuffer-fetch variant serves.
+        /// R32Float is the full-resolution linear depth the translucent materials read for
+        /// soft blending; it is what every remaining hotOther split at the probe point was.
+        /// </summary>
+        private static bool FetchableSelfFormat(MTLPixelFormat format)
+        {
+            return format == MTLPixelFormat.R32Float;
         }
 
         /// <summary>

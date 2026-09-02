@@ -97,6 +97,8 @@ namespace Ryujinx.Graphics.Metal
     class EncoderState
     {
         public Program RenderProgram = null;
+        // Framebuffer-fetch variant of RenderProgram chosen for the current draw, or null.
+        public Program FetchVariant = null;
         public Program ComputeProgram = null;
 
         public PipelineState Pipeline;
