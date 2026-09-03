@@ -624,6 +624,55 @@ namespace Ryujinx.Graphics.Metal
                 NotePassSize((ulong)_currentState.DepthStencil.Width, (ulong)_currentState.DepthStencil.Height);
             }
 
+            // Tile snapshot: a pass carrying an R32Float colour target gets a memoryless
+            // twin in its highest free slot. The twin is in the pipeline descriptor of every
+            // draw of the pass (write mask forced off), never stored or loaded, and only a
+            // tile kernel writes it - right before a draw that reads the R32Float slot it
+            // also writes, which then fetches the twin instead of splitting the pass.
+            _snapshotSrc = -1;
+            _snapshotDst = -1;
+            PipelineState.SnapshotSlot = -1;
+
+            if (TileSnapshot.Enabled)
+            {
+                int snapshotSrc = -1;
+                int snapshotDst = -1;
+                Texture snapshotSource = null;
+
+                for (int i = 0; i < Constants.MaxColorAttachments; i++)
+                {
+                    if (_currentState.RenderTargets[i] is Texture candidate)
+                    {
+                        if (snapshotSrc < 0 && candidate.MtlFormat == MTLPixelFormat.R32Float)
+                        {
+                            snapshotSrc = i;
+                            snapshotSource = candidate;
+                        }
+                    }
+                    else
+                    {
+                        snapshotDst = i;
+                    }
+                }
+
+                if (snapshotSrc >= 0 && snapshotDst >= 0)
+                {
+                    MTLRenderPassColorAttachmentDescriptor twin = renderPassDescriptor.ColorAttachments.Object((ulong)snapshotDst);
+                    twin.Texture = TileSnapshot.GetMemoryless(_device, snapshotSource.Width, snapshotSource.Height);
+                    twin.LoadAction = MTLLoadAction.DontCare;
+                    twin.StoreAction = MTLStoreAction.DontCare;
+
+                    ref ColorBlendStateUid twinBlend = ref _currentState.Pipeline.Internal.ColorBlendState[snapshotDst];
+                    twinBlend.PixelFormat = MTLPixelFormat.R32Float;
+                    twinBlend.WriteMask = MTLColorWriteMask.None;
+
+                    _snapshotSrc = snapshotSrc;
+                    _snapshotDst = snapshotDst;
+                    PipelineState.SnapshotSlot = snapshotDst;
+                    SignalDirty(DirtyFlags.RenderPipeline);
+                }
+            }
+
             MTLRenderPassDepthAttachmentDescriptor depthAttachment = renderPassDescriptor.DepthAttachment;
             MTLRenderPassStencilAttachmentDescriptor stencilAttachment = renderPassDescriptor.StencilAttachment;
 
@@ -832,6 +881,40 @@ namespace Ryujinx.Graphics.Metal
 
             _passStoreElided = action == MTLStoreAction.DontCare;
             _passStoreUnknown = false;
+        }
+
+        /// <summary>
+        /// Runs the snapshot kernel for the planned fetch on the open encoder: slot src is
+        /// copied into the twin for every pixel. The tile pipeline replaces the encoder's
+        /// pipeline state, so the draw's own is marked dirty and bound again after.
+        /// </summary>
+        public readonly bool DispatchSnapshotIfPlanned(MTLRenderCommandEncoder encoder)
+        {
+            if (!_fetchPlanNeedsSnapshot || _snapshotSrc < 0 || _snapshotDst < 0)
+            {
+                return false;
+            }
+
+            Span<MTLPixelFormat> formats = stackalloc MTLPixelFormat[Constants.MaxColorAttachments];
+
+            for (int i = 0; i < formats.Length; i++)
+            {
+                formats[i] = _currentState.Pipeline.Internal.ColorBlendState[i].PixelFormat;
+            }
+
+            if (!TileSnapshot.Dispatch(_device, encoder, _snapshotSrc, _snapshotDst, formats))
+            {
+                return false;
+            }
+
+            // The encoder now holds the tile pipeline. The applied-state cache still
+            // remembers the draw's pipeline as bound and would skip setting it again -
+            // which drew with the tile pipeline and faulted inside drawIndexedPrimitives
+            // the first time this ran. Forget it so the rebind really sets it.
+            _applied.PipelineState = IntPtr.Zero;
+            SignalDirty(DirtyFlags.RenderPipeline);
+
+            return true;
         }
 
         /// <summary>
@@ -2467,6 +2550,11 @@ namespace Ryujinx.Graphics.Metal
         // The fetch plan of the draw being classified: which fragment texture bindings
         // alias which colour attachment slot. Static like the rest of the classification
         // state; the backend is single-threaded on the render thread.
+        private static int _snapshotSrc = -1;
+        private static int _snapshotDst = -1;
+        private static bool _fetchPlanNeedsSnapshot;
+        private static long _splitSnapshot;
+        public static bool FetchPlanNeedsSnapshot => _fetchPlanNeedsSnapshot;
         private static readonly FetchBinding[] _fetchPlan = new FetchBinding[3];
         private static int _fetchPlanCount;
         private static bool _fetchPlanHasSkippableSelf;
@@ -2549,6 +2637,11 @@ namespace Ryujinx.Graphics.Metal
             long otherUnwritten = _splitOtherUnwritten, selfUnwritten = _splitSelfUnwritten;
             long fetchable = _splitFetchable, fetched = _splitFetched, fetchPending = _fetchPending, fetchWriter = _splitFetchRefusedWriter;
             _splitFetchRefusedWriter = 0;
+            long storageWrites = _storageWrites, storageRawDraws = _storageRawDraws, storageBarriersKept = _storageBarriersKept, storageRawBarriers = _storageRawBarriers;
+            long snapshotServed = _splitSnapshot, snapshotDispatches = TileSnapshot.Dispatches;
+            _splitSnapshot = 0;
+            TileSnapshot.Dispatches = 0;
+            _storageWrites = _storageRawDraws = _storageBarriersKept = _storageRawBarriers = 0;
             _splitHotSelf = _splitHotOther = _splitSubres = _splitLegacy = _splitSelfSkipped = 0;
             _splitOtherUnwritten = _splitSelfUnwritten = _splitFetchable = _splitFetched = _fetchPending = 0;
 
@@ -2587,7 +2680,9 @@ namespace Ryujinx.Graphics.Metal
                    $", fetchable={fetchable / frames} fetched={fetched / frames} fetchPending={fetchPending / frames} fetchWriter={fetchWriter / frames}" +
                    (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".") +
                    (hazardTex.Length != 0 ? $" hazard textures/frame: {hazardTex}." : string.Empty) +
-                   (otherLabels.Length != 0 ? $" hotOther programs/frame: {otherLabels}." : string.Empty) + samples;
+                   (otherLabels.Length != 0 ? $" hotOther programs/frame: {otherLabels}." : string.Empty) +
+                   $" snapshot: served={snapshotServed / frames}/frame, dispatches={snapshotDispatches / frames}/frame, failures={TileSnapshot.Failures}." +
+                   $" storage: fragWrites={storageWrites / frames}/frame, rawDraws={storageRawDraws / frames}/frame, keptBarriers={storageBarriersKept / frames}/frame, rawAtBarrier={storageRawBarriers / frames}/frame." + samples;
         }
 
         /// <summary>
@@ -2724,6 +2819,104 @@ namespace Ryujinx.Graphics.Metal
             {
                 _writtenThisCb.Clear();
                 _reallyWrittenThisPass.Clear();
+                _storageWrittenThisPass.Clear();
+            }
+        }
+
+        // Storage buffers a fragment stage stored to in this pass, by buffer identity and
+        // range. The texture write set cannot see these, and a later draw in the same
+        // pass reading one is the dependency the guest's barrier has been kept for since
+        // the decal footprints. Probe only: it counts how often such a read really
+        // occurs at a draw and at a barrier, which decides whether the barrier can be
+        // skipped on buffer identity instead of on "the pass has a fragment store".
+        private readonly List<(Auto<DisposableBuffer> Buffer, int Offset, int Size)> _storageWrittenThisPass = new();
+        private static long _storageWrites, _storageRawDraws, _storageBarriersKept, _storageRawBarriers;
+
+        public readonly void NoteFragmentStorageWrites()
+        {
+            Program program = _currentState.RenderProgram;
+
+            if (program == null)
+            {
+                return;
+            }
+
+            foreach (ResourceBindingSegment segment in program.BindingSegments[(int)Constants.StorageBuffersSetIndex])
+            {
+                if ((segment.Stages & ResourceStages.Fragment) == 0)
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < segment.Count; i++)
+                {
+                    int index = segment.Binding + i;
+
+                    if ((uint)index >= (uint)_currentState.StorageBufferRefs.Length || _currentState.StorageBufferRefs[index].Buffer == null)
+                    {
+                        continue;
+                    }
+
+                    ref BufferRef buffer = ref _currentState.StorageBufferRefs[index];
+                    _storageWrittenThisPass.Add((buffer.Buffer, buffer.Range?.Offset ?? 0, buffer.Range?.Size ?? int.MaxValue));
+                    _storageWrites++;
+                }
+            }
+        }
+
+        /// <summary>Whether any storage buffer the current program binds, at any stage, overlaps one a fragment stored to in this pass.</summary>
+        public readonly bool BoundStorageOverlapsWritten()
+        {
+            if (_storageWrittenThisPass.Count == 0 || _currentState.RenderProgram == null)
+            {
+                return false;
+            }
+
+            foreach (ResourceBindingSegment segment in _currentState.RenderProgram.BindingSegments[(int)Constants.StorageBuffersSetIndex])
+            {
+                for (int i = 0; i < segment.Count; i++)
+                {
+                    int index = segment.Binding + i;
+
+                    if ((uint)index >= (uint)_currentState.StorageBufferRefs.Length || _currentState.StorageBufferRefs[index].Buffer == null)
+                    {
+                        continue;
+                    }
+
+                    ref BufferRef bound = ref _currentState.StorageBufferRefs[index];
+                    int offset = bound.Range?.Offset ?? 0;
+                    int size = bound.Range?.Size ?? int.MaxValue;
+
+                    for (int w = 0; w < _storageWrittenThisPass.Count; w++)
+                    {
+                        (Auto<DisposableBuffer> wb, int wo, int ws) = _storageWrittenThisPass[w];
+
+                        if (ReferenceEquals(wb, bound.Buffer) && offset < wo + ws && wo < offset + size)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        public readonly void NoteStorageRawAtDraw()
+        {
+            if (BoundStorageOverlapsWritten())
+            {
+                _storageRawDraws++;
+            }
+        }
+
+        public readonly void NoteStorageRawAtBarrier()
+        {
+            _storageBarriersKept++;
+
+            if (BoundStorageOverlapsWritten())
+            {
+                _storageRawBarriers++;
             }
         }
 
@@ -2731,6 +2924,7 @@ namespace Ryujinx.Graphics.Metal
         {
             _writtenThisCb.Clear();
             _reallyWrittenThisPass.Clear();
+            _storageWrittenThisPass.Clear();
         }
 
         /// <summary>
@@ -2853,6 +3047,7 @@ namespace Ryujinx.Graphics.Metal
             bool anyFetchable = false;
             bool anySkippableSelf = false;
             _fetchPlanCount = 0;
+            _fetchPlanNeedsSnapshot = false;
 
             ResourceBindingSegment[] segments = program.BindingSegments[Constants.TexturesSetIndex];
 
@@ -3027,8 +3222,22 @@ namespace Ryujinx.Graphics.Metal
                 // two-sided decal box read the front face's fresh depth through the fetch,
                 // rebuilt a floating world position and shaded its whole footprint
                 // black, flickering with primitive order). So this stays a split.
-                _splitFetchRefusedWriter++;
-                anyForeign = true;
+                if (TileSnapshot.Enabled && slot == _snapshotSrc && _snapshotDst >= 0 && _fetchPlanCount < _fetchPlan.Length)
+                {
+                    // Served from the snapshot instead: the tile kernel copies this slot's
+                    // tile value into the twin right before the draw, and the fetch variant
+                    // reads the twin - the value the split would have stored, constant for
+                    // the whole draw, with no round trip to memory.
+                    _fetchPlan[_fetchPlanCount++] = new FetchBinding(binding, _snapshotDst);
+                    _fetchPlanNeedsSnapshot = true;
+                    anyFetchable = true;
+                    _splitSnapshot++;
+                }
+                else
+                {
+                    _splitFetchRefusedWriter++;
+                    anyForeign = true;
+                }
             }
             else if (self && binding >= 0 && slot >= 0 && FetchableSelfFormat(sampled.MtlFormat) &&
                      sampled.FirstLevel == 0 && sampled.FirstLayer == 0 &&

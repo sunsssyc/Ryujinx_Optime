@@ -202,6 +202,7 @@ namespace Ryujinx.Graphics.Metal
                 _fbFetch = System.IO.File.Exists("/tmp/ryujinx-metal-fb-fetch")
                     ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-fb-fetch").Trim() == "1"
                     : _fbFetchDefault;
+                TileSnapshot.Refresh();
             }
             catch (System.IO.IOException)
             {
@@ -728,6 +729,7 @@ namespace Ryujinx.Graphics.Metal
                 DrawCount != _drawCountAtPassStart)
             {
                 EncoderStateManager.RawHazard hazard = _encoderStateManager.SamplesEarlierWrite();
+                _encoderStateManager.NoteStorageRawAtDraw();
 
                 if (hazard == EncoderStateManager.RawHazard.Fetchable)
                 {
@@ -739,6 +741,14 @@ namespace Ryujinx.Graphics.Metal
                     Program variant = _fbFetch && colourOk
                         ? _encoderStateManager.RenderProgram?.GetOrCreateFetchVariant(_device, EncoderStateManager.FetchPlan)
                         : null;
+
+                    if (variant != null && EncoderStateManager.FetchPlanNeedsSnapshot && TileSnapshot.Mode == 2)
+                    {
+                        // Diagnostic: take the snapshot on the encoder as the real path would,
+                        // then split anyway. Prices the dispatch by itself.
+                        _encoderStateManager.DispatchSnapshotIfPlanned(Cbs.Encoders.RenderEncoder);
+                        variant = null;
+                    }
 
                     if (variant != null && variant.CheckProgramLink(false) == ProgramLinkStatus.Success)
                     {
@@ -926,6 +936,16 @@ namespace Ryujinx.Graphics.Metal
 
             if (forDraw)
             {
+                if (fetchVariant != null && EncoderStateManager.FetchPlanNeedsSnapshot && TileSnapshot.Mode != 3 &&
+                    !_encoderStateManager.DispatchSnapshotIfPlanned(renderCommandEncoder))
+                {
+                    // No snapshot could be taken (the tile pipeline failed to build and the
+                    // feature has switched itself off): the variant would read a twin nobody
+                    // wrote. Draw with the base program instead - one stale read, not garbage.
+                    fetchVariant = null;
+                    _encoderStateManager.UseFetchVariant(null);
+                }
+
                 _encoderStateManager.RebindRenderState(renderCommandEncoder);
 
                 // Only now is the pass genuinely writing its attachments. The split
@@ -1511,7 +1531,7 @@ namespace Ryujinx.Graphics.Metal
                         $" config: splitScope={(EncoderStateManager.SplitScopePass ? "pass" : "cb")}, " +
                         $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : "all")}, " +
                         $"markOnDraw={EncoderStateManager.MarkOnDrawActive}, " +
-                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}, fbFetch={_fbFetch}.";
+                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}, fbFetch={_fbFetch}, tileSnapshot={TileSnapshot.Enabled}/{TileSnapshot.Mode}.";
 
                     // Occupancy, and the evidence that the occupancy is readable. The span
                     // is the GPU clock's own measure of the same window the wall clock just
@@ -2280,7 +2300,7 @@ namespace Ryujinx.Graphics.Metal
 
             NoteAttachmentWriter();
 
-            if (_encoderStateManager.RenderProgram?.FragmentWritesStorage == true) { _passHasFragmentStore = true; }
+            if (_encoderStateManager.RenderProgram?.FragmentWritesStorage == true) { _passHasFragmentStore = true; _encoderStateManager.NoteFragmentStorageWrites(); }
             UploadCorrelator.PollCount();
             if (UploadCorrelator.Enabled)
             {
@@ -2513,7 +2533,7 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
-            if (_encoderStateManager.RenderProgram?.FragmentWritesStorage == true) { _passHasFragmentStore = true; }
+            if (_encoderStateManager.RenderProgram?.FragmentWritesStorage == true) { _passHasFragmentStore = true; _encoderStateManager.NoteFragmentStorageWrites(); }
             UploadCorrelator.PollCount();
             if (UploadCorrelator.Enabled)
             {
@@ -3170,6 +3190,13 @@ namespace Ryujinx.Graphics.Metal
 
                     return;
                 }
+            }
+            else if (_barrierHazardOnly)
+            {
+                // Kept for the fragment store: count how often the bindings at this point
+                // really overlap what was stored, which is what a buffer-identity skip
+                // would look at instead.
+                _encoderStateManager.NoteStorageRawAtBarrier();
             }
 
             // A fragment-writes-then-fragment-reads dependency cannot be expressed

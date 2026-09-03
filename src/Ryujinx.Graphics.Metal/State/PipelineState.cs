@@ -168,6 +168,11 @@ namespace Ryujinx.Graphics.Metal
 
                     BuildColorAttachment(pipelineAttachment, blendState);
 
+                    if (i == SnapshotSlot)
+                    {
+                        pipelineAttachment.WriteMask = MTLColorWriteMask.None;
+                    }
+
                     // An attachment the fragment function does not write gets UNDEFINED
                     // contents from Metal (the OpenGL backend masks these with the program's
                     // FragmentOutputMap; MoltenVK disables the write mask for them). Without
@@ -242,6 +247,9 @@ namespace Ryujinx.Graphics.Metal
         }
 
         public static readonly bool MaskUnwrittenOutputs = Environment.GetEnvironmentVariable("RYUJINX_METAL_MASK_UNWRITTEN") != "0";
+
+        /// <summary>The pass's tile-snapshot attachment slot, which no fragment function may write; -1 when the pass has none.</summary>
+        public static int SnapshotSlot = -1;
         public static long MaskedUnwrittenCount;
 
         // Read-only probe for the synchronous pipeline-state compiles. A cache miss
