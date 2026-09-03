@@ -2401,6 +2401,7 @@ namespace Ryujinx.Graphics.Metal
         private static long _splitOtherUnwritten;
         private static long _splitSelfUnwritten;
         private static long _splitFetchable;
+        private static long _splitFetchRefusedWriter;
         private static long _splitFetched;
         private static long _fetchPending;
         // The fetch plan of the draw being classified: which fragment texture bindings
@@ -2486,7 +2487,8 @@ namespace Ryujinx.Graphics.Metal
         {
             long self = _splitHotSelf, other = _splitHotOther, subres = _splitSubres, legacy = _splitLegacy, skipped = _splitSelfSkipped;
             long otherUnwritten = _splitOtherUnwritten, selfUnwritten = _splitSelfUnwritten;
-            long fetchable = _splitFetchable, fetched = _splitFetched, fetchPending = _fetchPending;
+            long fetchable = _splitFetchable, fetched = _splitFetched, fetchPending = _fetchPending, fetchWriter = _splitFetchRefusedWriter;
+            _splitFetchRefusedWriter = 0;
             _splitHotSelf = _splitHotOther = _splitSubres = _splitLegacy = _splitSelfSkipped = 0;
             _splitOtherUnwritten = _splitSelfUnwritten = _splitFetchable = _splitFetched = _fetchPending = 0;
 
@@ -2522,7 +2524,7 @@ namespace Ryujinx.Graphics.Metal
             return $" rawsplit classes/frame: hotSelf={self / frames}, hotOther={other / frames}, subres={subres / frames}, selfSkipped={skipped / frames}" +
                    (legacy != 0 ? $", legacy={legacy / frames}" : string.Empty) +
                    $", onUnwritten: other={otherUnwritten / frames} self={selfUnwritten / frames}" +
-                   $", fetchable={fetchable / frames} fetched={fetched / frames} fetchPending={fetchPending / frames}" +
+                   $", fetchable={fetchable / frames} fetched={fetched / frames} fetchPending={fetchPending / frames} fetchWriter={fetchWriter / frames}" +
                    (shapes.Length != 0 ? $". hot shapes: {shapes}." : ".") +
                    (hazardTex.Length != 0 ? $" hazard textures/frame: {hazardTex}." : string.Empty) +
                    (otherLabels.Length != 0 ? $" hotOther programs/frame: {otherLabels}." : string.Empty) + samples;
@@ -2645,8 +2647,7 @@ namespace Ryujinx.Graphics.Metal
                 int slot = _passAttachments[i].Slot;
                 bool writes = slot < 0
                     ? _currentState.DepthStencilUid.DepthWriteEnabled
-                    : _currentState.Pipeline.Internal.ColorBlendState[slot].WriteMask != MTLColorWriteMask.None &&
-                      (outputMap & (1 << slot)) != 0;
+                    : DrawWritesColorSlot(slot, outputMap);
 
                 if (writes)
                 {
@@ -2954,6 +2955,22 @@ namespace Ryujinx.Graphics.Metal
             else if (self && binding >= 0 && slot >= 0 && FetchableSelfFormat(sampled.MtlFormat) &&
                      sampled.FirstLevel == 0 && sampled.FirstLayer == 0 &&
                      sampled.Info.Levels <= 1 && sampled.Info.GetLayers() <= 1 &&
+                     DrawWritesColorSlot(slot, _currentState.RenderProgram?.FragmentOutputMap ?? -1))
+            {
+                // The draw reads the slot it also writes. Between draws a fetch and a split
+                // agree - the split stores the tile the fetch would have read - but inside
+                // one draw they do not: a fetch sees the fragment before it at the same
+                // pixel, a sample after a split sees memory from before the draw began.
+                // The guest's decals and layered translucents rely on the latter (a
+                // two-sided decal box read the front face's fresh depth through the fetch,
+                // rebuilt a floating world position and shaded its whole footprint
+                // black, flickering with primitive order). So this stays a split.
+                _splitFetchRefusedWriter++;
+                anyForeign = true;
+            }
+            else if (self && binding >= 0 && slot >= 0 && FetchableSelfFormat(sampled.MtlFormat) &&
+                     sampled.FirstLevel == 0 && sampled.FirstLayer == 0 &&
+                     sampled.Info.Levels <= 1 && sampled.Info.GetLayers() <= 1 &&
                      _fetchPlanCount < _fetchPlan.Length)
             {
                 // A data-format attachment the draw samples at its own pixel (every such
@@ -2975,6 +2992,19 @@ namespace Ryujinx.Graphics.Metal
         /// R32Float is the full-resolution linear depth the translucent materials read for
         /// soft blending; it is what every remaining hotOther split at the probe point was.
         /// </summary>
+        /// <summary>
+        /// Whether the current draw can write colour slot <paramref name="slot"/>: the
+        /// fragment function declares that output (FragmentOutputMap keeps a component
+        /// nibble per attachment; -1 means unknown, treated as declared) and the guest's
+        /// write mask for the slot is not empty.
+        /// </summary>
+        private readonly bool DrawWritesColorSlot(int slot, int outputMap)
+        {
+            bool declared = outputMap == -1 || ((outputMap >> (slot * 4)) & 0xF) != 0;
+
+            return declared && _currentState.Pipeline.Internal.ColorBlendState[slot].WriteMask != MTLColorWriteMask.None;
+        }
+
         private static bool FetchableSelfFormat(MTLPixelFormat format)
         {
             // R32Float only: the linear depth translucent materials read at their own
