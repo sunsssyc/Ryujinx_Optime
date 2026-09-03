@@ -119,6 +119,8 @@ namespace Ryujinx.Graphics.Metal
         {
             if (_renderer.Pipeline is Pipeline pipeline && texture is Texture tex)
             {
+                StoreLiveness.NoteRead(tex.CanonicalPtr);
+
                 ResizeIfNeeded();
 
                 CAMetalDrawable drawable = new(ObjectiveC.IntPtr_objc_msgSend(_metalLayer, "nextDrawable"));

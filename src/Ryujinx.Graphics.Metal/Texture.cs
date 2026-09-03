@@ -532,6 +532,14 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int firstLayer, int firstLevel)
         {
+            StoreLiveness.NoteRead(CanonicalPtr);
+
+            if (firstLayer == 0 && firstLevel == 0 && destination is Texture whole &&
+                whole.Info.Width == Info.Width && whole.Info.Height == Info.Height)
+            {
+                StoreLiveness.NoteOverwrite(whole.CanonicalPtr);
+            }
+
             OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             UploadCorrelator.NoteCopyIn(destination as Texture);
@@ -593,6 +601,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, int srcLayer, int dstLayer, int srcLevel, int dstLevel)
         {
+            StoreLiveness.NoteRead(CanonicalPtr);
+
             OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             UploadCorrelator.NoteCopyIn(destination as Texture);
@@ -656,6 +666,14 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(ITexture destination, Extents2D srcRegion, Extents2D dstRegion, bool linearFilter)
         {
+            StoreLiveness.NoteRead(CanonicalPtr);
+
+            if (destination is Texture blitDst && dstRegion.X1 == 0 && dstRegion.Y1 == 0 &&
+                dstRegion.X2 == blitDst.Info.Width && dstRegion.Y2 == blitDst.Info.Height)
+            {
+                StoreLiveness.NoteOverwrite(blitDst.CanonicalPtr);
+            }
+
             OpRing.NoteTexCopy(GetHandle().NativePtr, (destination as Texture)?.GetHandle().NativePtr ?? IntPtr.Zero);
             HdrPassProbe.NoteSceneCopy(this, destination as Texture);
             UploadCorrelator.NoteCopyIn(destination as Texture);
@@ -687,6 +705,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void CopyTo(BufferRange range, int layer, int level, int stride)
         {
+            StoreLiveness.NoteRead(CanonicalPtr);
+
             CommandBufferScoped cbs = Pipeline.Cbs;
 
             int outSize = Info.GetMipSize(level);
@@ -906,6 +926,8 @@ namespace Ryujinx.Graphics.Metal
 
         public PinnedSpan<byte> GetData()
         {
+            StoreLiveness.NoteRead(CanonicalPtr);
+
             EncoderStateManager.NoteReadback(CanonicalPtr, $"{Info.Width}x{Info.Height}/{MtlFormat} full");
 
             BackgroundResource resources = Renderer.BackgroundResources.Get();
@@ -936,6 +958,8 @@ namespace Ryujinx.Graphics.Metal
 
         public PinnedSpan<byte> GetData(int layer, int level)
         {
+            StoreLiveness.NoteRead(CanonicalPtr);
+
             EncoderStateManager.NoteReadback(CanonicalPtr, $"{Info.Width}x{Info.Height}/{MtlFormat} layer={layer} level={level}");
 
             BackgroundResource resources = Renderer.BackgroundResources.Get();
@@ -1000,6 +1024,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void SetData(MemoryOwner<byte> data)
         {
+            StoreLiveness.NoteOverwrite(CanonicalPtr);
+
             NoteSetDataThread();
             OpRing.NoteSetData(GetHandle().NativePtr);
             HdrPassProbe.NoteSceneCopy(null, this);

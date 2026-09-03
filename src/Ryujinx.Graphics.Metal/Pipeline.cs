@@ -1139,6 +1139,7 @@ namespace Ryujinx.Graphics.Metal
         public void FixupStoreActions(MTLRenderCommandEncoder encoder)
         {
             _encoderStateManager.FixupStoreActions(encoder, DrawCount - _drawCountAtPassStart);
+            _encoderStateManager.NotePassStored();
         }
 
         // Diagnostic: RYUJINX_METAL_LOG_PRESENT=1 logs the source texture of every
@@ -1541,6 +1542,7 @@ namespace Ryujinx.Graphics.Metal
                     }
 
                     string splitClassText = EncoderStateManager.TakeSplitClasses(SyncStatsLogFrameInterval) ?? string.Empty;
+                    string storeText = StoreLiveness.Take(SyncStatsLogFrameInterval) ?? string.Empty;
 
                     string reasonText = " pass ends: " + string.Join(", ", Enum.GetValues<PassEndReason>()
                         .Where(r => _passEndReasons[(int)r] != 0)
@@ -1572,7 +1574,7 @@ namespace Ryujinx.Graphics.Metal
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
-                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{gpuText}{splitClassText}{reasonText}{revisitText}{gateText}{blitText}{psoText}{configText}");
+                        $"(fast flush: {_renderer.AutoFlush.FastFlushMode}).{sourceText}{createText}{durationText}{threadText}{passText}{gpuText}{splitClassText}{reasonText}{revisitText}{gateText}{blitText}{storeText}{psoText}{configText}");
                 }
             }
 

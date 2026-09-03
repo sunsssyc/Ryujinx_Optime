@@ -515,6 +515,31 @@ namespace Ryujinx.Graphics.Metal
         public readonly MTLRenderCommandEncoder CreateRenderCommandEncoder()
         {
             _passAttachments.Clear();
+            _passStoreCandidates.Clear();
+            _passStoreElided = false;
+
+            // Reads through bindings made before the producing pass ended: the guest binds
+            // its inputs, then switches targets, and the draws of this new pass sample
+            // them without another bind call. Sweep what is bound now so those stores
+            // count as consumed; a bind change mid-pass still reports through the setter.
+            if (StoreLiveness.Enabled)
+            {
+                for (int i = 0; i < _currentState.TextureRefs.Length; i++)
+                {
+                    if (_currentState.TextureRefs[i].Storage is Texture bound)
+                    {
+                        StoreLiveness.NoteRead(bound.CanonicalPtr);
+                    }
+                }
+
+                for (int i = 0; i < _currentState.ImageRefs.Length; i++)
+                {
+                    if (_currentState.ImageRefs[i].Storage is Texture boundImage)
+                    {
+                        StoreLiveness.NoteRead(boundImage.CanonicalPtr);
+                    }
+                }
+            }
             // Initialise Pass & State
             using MTLRenderPassDescriptor renderPassDescriptor = new();
 
@@ -574,6 +599,8 @@ namespace Ryujinx.Graphics.Metal
                     }
                     passAttachment.StoreAction = _passStoreUnknown ? MTLStoreAction.Unknown : MTLStoreAction.Store;
                     _passColorMask |= 1ul << i;
+                    StoreLiveness.NoteLoad(tex.CanonicalPtr, passAttachment.LoadAction == MTLLoadAction.Load);
+                    _passStoreCandidates.Add((tex.CanonicalPtr, tex.Info.Width, tex.Info.Height, tex.MtlFormat, tex.Info.BytesPerPixel, false));
 
                     // The attachments this pass really carries. Comparing against
                     // _currentState.RenderTargets instead counted targets bound for an
@@ -620,6 +647,10 @@ namespace Ryujinx.Graphics.Metal
                         NoteAttachmentWritten(_currentState.DepthStencil.CanonicalPtr, SubRange.Of(_currentState.DepthStencil));
                     }
                 }
+                StoreLiveness.NoteLoad(_currentState.DepthStencil.CanonicalPtr, true);
+                _passStoreCandidates.Add((_currentState.DepthStencil.CanonicalPtr, _currentState.DepthStencil.Info.Width, _currentState.DepthStencil.Info.Height,
+                    _currentState.DepthStencil.MtlFormat, _currentState.DepthStencil.Info.BytesPerPixel, true));
+
                 switch (_currentState.DepthStencil.GetHandle().PixelFormat)
                 {
                     // Depth Only Attachment
@@ -799,7 +830,30 @@ namespace Ryujinx.Graphics.Metal
                 encoder.SetStencilStoreAction(action);
             }
 
+            _passStoreElided = action == MTLStoreAction.DontCare;
             _passStoreUnknown = false;
+        }
+
+        /// <summary>
+        /// The pass has ended and its attachments were stored (unless the fixup elided
+        /// the store): hand every one to the liveness probe.
+        /// </summary>
+        public readonly void NotePassStored()
+        {
+            if (_passStoreElided)
+            {
+                return;
+            }
+
+            for (int i = 0; i < _passStoreCandidates.Count; i++)
+            {
+                (IntPtr ptr, int w, int h, MTLPixelFormat fmt, int bpp, bool depth) = _passStoreCandidates[i];
+                StoreLiveness.NoteStore(ptr, w, h, fmt, bpp, depth);
+            }
+
+            // A helper pass that ends without going through CreateRenderCommandEncoder
+            // must not report the previous pass's attachments a second time.
+            _passStoreCandidates.Clear();
         }
 
         public readonly MTLComputeCommandEncoder CreateComputeCommandEncoder()
@@ -1724,6 +1778,11 @@ namespace Ryujinx.Graphics.Metal
             if (texture != null)
             {
                 _currentState.TextureRefs[binding] = new(stage, texture, samplerHolder?.GetSampler());
+
+                if (texture is Texture sampled)
+                {
+                    StoreLiveness.NoteRead(sampled.CanonicalPtr);
+                }
             }
             else
             {
@@ -1738,6 +1797,7 @@ namespace Ryujinx.Graphics.Metal
             if (image is Texture view)
             {
                 _currentState.ImageRefs[binding] = new(stage, view);
+                StoreLiveness.NoteRead(view.CanonicalPtr);
             }
             else
             {
@@ -2538,6 +2598,8 @@ namespace Ryujinx.Graphics.Metal
         /// frame, every one of them resuming the same render target. Pass scope only.
         /// </summary>
         private readonly List<PassAttachment> _passAttachments = new();
+        private readonly List<(IntPtr Ptr, int Width, int Height, MTLPixelFormat Format, int BytesPerPixel, bool Depth)> _passStoreCandidates = new();
+        private static bool _passStoreElided;
         private static readonly bool _depthInWriteSet = Environment.GetEnvironmentVariable("RYUJINX_METAL_DEPTH_RAW") == "1";
 
         /// <summary>
