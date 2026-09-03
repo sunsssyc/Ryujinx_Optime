@@ -3135,14 +3135,28 @@ namespace Ryujinx.Graphics.Metal
             // orders a dependency that does not exist. RYUJINX_METAL_BARRIER_SCOPE=hazard,
             // and only meaningful together with RAW_SPLIT_SCOPE=pass, which makes the write
             // set per pass rather than per command buffer.
-            // A game-issued barrier is the guest explicitly asking for ordering, so a
-            // SelfOnly hazard splits here even when the raw-split path would skip it.
-            if (_barrierHazardOnly && _encoderStateManager.SamplesEarlierWrite() == EncoderStateManager.RawHazard.None)
+            // The draw-time check runs for the next draw regardless, so ending the pass
+            // here only pays off for a hazard that check would also split on. None: the
+            // pass wrote nothing the bound textures read. Fetchable: the read is served
+            // from tile memory by a fetch variant, or falls back to the draw-time split.
+            // SelfOnly with skipSelf on: a colour self-read the draw-time path lets
+            // through stale by policy - the barrier does not change that trade. Only a
+            // real cross-attachment hazard ends the pass at the barrier. (This call also
+            // feeds the classification counters, so in hazard mode they count barrier
+            // sites as well as draws.)
+            if (_barrierHazardOnly)
             {
-                _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
-                UploadCorrelator.NoteBarrierSkipped();
+                EncoderStateManager.RawHazard barrierHazard = _encoderStateManager.SamplesEarlierWrite();
 
-                return;
+                if (barrierHazard == EncoderStateManager.RawHazard.None ||
+                    barrierHazard == EncoderStateManager.RawHazard.Fetchable ||
+                    (barrierHazard == EncoderStateManager.RawHazard.SelfOnly && _skipSelfSplit))
+                {
+                    _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
+                    UploadCorrelator.NoteBarrierSkipped();
+
+                    return;
+                }
             }
 
             // A fragment-writes-then-fragment-reads dependency cannot be expressed
