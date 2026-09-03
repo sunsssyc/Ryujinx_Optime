@@ -3139,18 +3139,29 @@ namespace Ryujinx.Graphics.Metal
             // here only pays off for a hazard that check would also split on. None: the
             // pass wrote nothing the bound textures read. Fetchable: the read is served
             // from tile memory by a fetch variant, or falls back to the draw-time split.
-            // SelfOnly with skipSelf on: a colour self-read the draw-time path lets
-            // through stale by policy - the barrier does not change that trade. Only a
-            // real cross-attachment hazard ends the pass at the barrier. (This call also
-            // feeds the classification counters, so in hazard mode they count barrier
-            // sites as well as draws.)
-            if (_barrierHazardOnly)
+            // A SelfOnly hazard is different: the draw-time path lets that colour
+            // self-read through stale by policy, and the stale value is only tolerable
+            // while memory is fresh - which is exactly what the guest's barrier used to
+            // guarantee by ending the pass. Skipping it too handed the decals a G-buffer
+            // that had not been stored since a pass or more back, tile-partial on this
+            // GPU: black polygons flickering with primitive order at the user's save
+            // (2026-09-03). So a game-issued barrier over a SelfOnly read stands. (This
+            // call also feeds the classification counters, so in hazard mode they count
+            // barrier sites as well as draws.)
+            // The texture check sees attachments only. A fragment stage that stored to a
+            // storage buffer in this pass is a dependency it cannot see, and one this GPU
+            // cannot order inside a pass at all: a later draw's vertex work runs before
+            // any of the pass's fragment work, and fragment-to-fragment has no memory
+            // barrier. 1130 of the game's fragment shaders store (the visibility feedback
+            // flags), the decals among them, and skipping their barrier is what painted
+            // the flickering black footprints at the user's save. So once the pass holds
+            // a fragment store the guest's barrier ends it, whatever the textures say.
+            if (_barrierHazardOnly && !_passHasFragmentStore)
             {
                 EncoderStateManager.RawHazard barrierHazard = _encoderStateManager.SamplesEarlierWrite();
 
                 if (barrierHazard == EncoderStateManager.RawHazard.None ||
-                    barrierHazard == EncoderStateManager.RawHazard.Fetchable ||
-                    (barrierHazard == EncoderStateManager.RawHazard.SelfOnly && _skipSelfSplit))
+                    barrierHazard == EncoderStateManager.RawHazard.Fetchable)
                 {
                     _passEndReasons[(int)PassEndReason.FragmentDependencySkipped]++;
                     UploadCorrelator.NoteBarrierSkipped();
