@@ -1807,11 +1807,16 @@ namespace Ryujinx.Graphics.Metal
 
                     string args = code.Substring(pos + call.Length, close - pos - call.Length);
 
+                    // The only accepted shape is sample(sampler, coords) followed by a plain
+                    // component swizzle (.x, .xyz, .xyzw ...): the fetched float4 takes the
+                    // same swizzle unchanged. Anything with a level, bias, gradient or offset
+                    // is not a same-pixel read and keeps splitting.
+                    int swizzle = PlainSwizzleLength(code, close + 1);
+
                     if (args.Contains("level(") || args.Contains("bias(") || args.Contains("gradient") || args.Contains("offset") ||
-                        close + 2 >= code.Length || code[close + 1] != '.' || code[close + 2] != 'x' ||
-                        (close + 3 < code.Length && (char.IsLetterOrDigit(code[close + 3]) || code[close + 3] == '_')))
+                        swizzle == 0)
                     {
-                        reason = $"{name}: sample() not the plain .x shape";
+                        reason = $"{name}: sample() not the plain swizzle shape";
                         return false;
                     }
 
@@ -1850,6 +1855,40 @@ namespace Ryujinx.Graphics.Metal
             patched[fragIndex] = new ShaderSource(code, shaders[fragIndex].Stage, shaders[fragIndex].Language);
 
             return true;
+        }
+
+        /// <summary>
+        /// Length of a plain component swizzle starting at <paramref name="dot"/>: a '.'
+        /// followed by one to four of x, y, z, w and then a non-identifier character.
+        /// Zero when the text there is anything else.
+        /// </summary>
+        private static int PlainSwizzleLength(string code, int dot)
+        {
+            if (dot >= code.Length || code[dot] != '.')
+            {
+                return 0;
+            }
+
+            int n = 0;
+
+            while (dot + 1 + n < code.Length && n < 4 && "xyzw".IndexOf(code[dot + 1 + n]) >= 0)
+            {
+                n++;
+            }
+
+            if (n == 0)
+            {
+                return 0;
+            }
+
+            int next = dot + 1 + n;
+
+            if (next < code.Length && (char.IsLetterOrDigit(code[next]) || code[next] == '_'))
+            {
+                return 0;
+            }
+
+            return n;
         }
 
         private static int MatchingParen(string code, int open)

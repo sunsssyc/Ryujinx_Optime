@@ -2977,6 +2977,14 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private static bool FetchableSelfFormat(MTLPixelFormat format)
         {
+            // R32Float only: the linear depth translucent materials read at their own
+            // pixel (soft particles, depth fade), where the fetched tile value is exactly
+            // the split's stored value. RG11B10Float was tried and reverted: the HDR scene
+            // target is read by water refraction at a PERTURBED coordinate, not the
+            // fragment's own pixel, and the coordinate is a computed temp the patcher
+            // cannot tell from a same-pixel one - so fetch returned own-pixel colour and
+            // the refraction flattened (reported live, 2026-09-03). A colour target only
+            // becomes fetchable again with a runtime same-pixel proof, not a format test.
             return format == MTLPixelFormat.R32Float;
         }
 
