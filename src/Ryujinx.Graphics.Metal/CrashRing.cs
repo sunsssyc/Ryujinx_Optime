@@ -21,13 +21,17 @@ namespace Ryujinx.Graphics.Metal
         public const string Path = "/tmp/ryujinx-metal-crash-ring.bin";
         private const int HeaderSize = 64;
         private const int RecordSize = 64;
-        private const int Capacity = 1 << 13;
+        private const int Capacity = 1 << 15;
+        // Disposals are rare and matter minutes later; they get their own ring so the
+        // draw firehose (~17k records a second) cannot overwrite them.
+        private const int DisposeCapacity = 1 << 12;
 
         public static readonly bool Enabled =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_CRASH_RING") != "0";
 
         private static readonly unsafe byte* _base = Map();
         private static long _next;
+        private static long _nextDispose;
         public static int Frame;
 
         public enum Kind : byte
@@ -53,7 +57,7 @@ namespace Ryujinx.Graphics.Metal
 
             try
             {
-                long size = HeaderSize + (long)RecordSize * Capacity;
+                long size = HeaderSize + (long)RecordSize * (Capacity + DisposeCapacity);
                 using FileStream fs = new(Path, FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite);
                 fs.SetLength(size);
                 MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(fs, null, size, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, leaveOpen: false);
@@ -64,6 +68,7 @@ namespace Ryujinx.Graphics.Metal
                 *(ulong*)ptr = 0x474E4952485352C3UL;                 // "CRSHRING" tag
                 *(int*)(ptr + 8) = Capacity;
                 *(int*)(ptr + 12) = RecordSize;
+                *(int*)(ptr + 20) = DisposeCapacity;
                 *(int*)(ptr + 16) = Environment.ProcessId;
                 *(long*)(ptr + 24) = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 return ptr;
@@ -92,8 +97,19 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            bool disposal = kind == Kind.BufferDispose || kind == Kind.ProgramDispose;
             long seq = Interlocked.Increment(ref _next);
-            byte* rec = basePtr + HeaderSize + (seq & (Capacity - 1)) * RecordSize;
+            byte* rec;
+
+            if (disposal)
+            {
+                long slot = Interlocked.Increment(ref _nextDispose);
+                rec = basePtr + HeaderSize + ((long)Capacity + (slot & (DisposeCapacity - 1))) * RecordSize;
+            }
+            else
+            {
+                rec = basePtr + HeaderSize + (seq & (Capacity - 1)) * RecordSize;
+            }
 
             *(long*)(rec + 0) = seq;
             rec[8] = (byte)kind;
@@ -110,8 +126,12 @@ namespace Ryujinx.Graphics.Metal
                 rec[56 + i] = (byte)(label != null && i < label.Length ? label[i] : 0);
             }
 
-            // The header's write index is what the reader trusts; store it last.
+            // The header's write indices are what the reader trusts; store them last.
             *(long*)(basePtr + 32) = seq;
+            if (disposal)
+            {
+                *(long*)(basePtr + 40) = Interlocked.Read(ref _nextDispose);
+            }
         }
 
         public static void Draw(Kind kind, string program, IntPtr pso, IntPtr indexBuffer, IntPtr encoder, long generation, int count)
