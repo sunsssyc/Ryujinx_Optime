@@ -140,18 +140,32 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _dumpAllShaders = Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_SHADERS") == "1";
         private static readonly bool _drawTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_DRAW_TRACE") == "1";
         private static readonly bool _passTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_PASS_TRACE") == "1";
-        // /tmp/ryujinx-metal-barrier-scope holds "hazard" or "all", re-read once a frame.
+        // Guest texture barriers end the pass only for a hazard the draw-time check
+        // would also split on (see TextureBarrier). Default since v419 (2026-09-04):
+        // it ran opt-in through the user's play from 2026-09-03 across two days of
+        // sessions - dense field, water, Ultrahand, the hill save that first showed
+        // its two defects - with no regression after v410/v411 restored the barriers
+        // over stale-policy reads and fragment stores. RYUJINX_METAL_BARRIER_SCOPE=all
+        // opts out. /tmp/ryujinx-metal-barrier-scope holds "hazard" or "all" and is
+        // re-read once a frame; any other content leaves the default in force.
         private static bool _barrierHazardOnly =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") == "hazard";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") != "all";
         private static readonly bool _barrierHazardDefault = _barrierHazardOnly;
 
         private static void RefreshBarrierScope()
         {
             try
             {
-                _barrierHazardOnly = System.IO.File.Exists("/tmp/ryujinx-metal-barrier-scope")
-                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-barrier-scope").Trim() == "hazard"
-                    : _barrierHazardDefault;
+                string scope = System.IO.File.Exists("/tmp/ryujinx-metal-barrier-scope")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-barrier-scope").Trim()
+                    : null;
+
+                _barrierHazardOnly = scope switch
+                {
+                    "hazard" => true,
+                    "all" => false,
+                    _ => _barrierHazardDefault,
+                };
             }
             catch (System.IO.IOException)
             {
@@ -3154,9 +3168,10 @@ namespace Ryujinx.Graphics.Metal
             // A barrier that orders nothing can be skipped. The guest issues these in the
             // hundreds per frame; ending the pass for one whose bound textures were not
             // written by the pass now running costs a full attachment store and reload and
-            // orders a dependency that does not exist. RYUJINX_METAL_BARRIER_SCOPE=hazard,
-            // and only meaningful together with RAW_SPLIT_SCOPE=pass, which makes the write
-            // set per pass rather than per command buffer.
+            // orders a dependency that does not exist. This is the default (v419);
+            // RYUJINX_METAL_BARRIER_SCOPE=all ends the pass for every guest barrier. It
+            // is only meaningful together with RAW_SPLIT_SCOPE=pass (also the default),
+            // which makes the write set per pass rather than per command buffer.
             // The draw-time check runs for the next draw regardless, so ending the pass
             // here only pays off for a hazard that check would also split on. None: the
             // pass wrote nothing the bound textures read. Fetchable: the read is served
