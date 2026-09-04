@@ -721,6 +721,7 @@ namespace Ryujinx.Graphics.Metal
 
             _pipeline.FlushCommandsIfWeightExceeding(_buffer, (ulong)Size);
 
+            CrashRing.BufferDispose(_buffer.GetUnsafe().Value.NativePtr, Size);
             _buffer.Dispose();
             _cachedConvertedBuffers.Dispose();
 

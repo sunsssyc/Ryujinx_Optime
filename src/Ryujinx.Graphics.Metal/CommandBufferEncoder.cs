@@ -188,6 +188,7 @@ class CommandBufferEncoder
                     }
 
                     _encoderFactory?.FixupStoreActions(RenderEncoder);
+                    CrashRing.EncoderEnd(RenderEncoder.NativePtr, RenderEncoderGeneration);
                     RenderEncoder.EndEncoding();
                     _lastEndedEncoderPtr = endingPtr;
                     ObjcOwnership.Release(endingPtr);
@@ -211,6 +212,7 @@ class CommandBufferEncoder
         MTLRenderCommandEncoder renderCommandEncoder = _encoderFactory.CreateRenderCommandEncoder();
 
         System.Threading.Interlocked.Increment(ref _renderEncoderGeneration);
+        CrashRing.EncoderBegin(renderCommandEncoder.NativePtr, RenderEncoderGeneration);
 
         // Pass encoders are autoreleased with no pool on this thread; own them
         // for the pass lifetime (released in EndCurrentPass after EndEncoding).

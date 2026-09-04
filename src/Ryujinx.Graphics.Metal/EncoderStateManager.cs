@@ -1254,6 +1254,7 @@ namespace Ryujinx.Graphics.Metal
                 _applied.PipelineState = pipelineState.NativePtr;
 
                 renderCommandEncoder.SetRenderPipelineState(pipelineState);
+                CrashRing.PsoSet(pipelineState.NativePtr, renderCommandEncoder.NativePtr, CommandBufferEncoder.RenderEncoderGeneration, _currentState.RenderProgram?.DebugLabel);
             }
 
             // The blend colour is not part of the pipeline object, but every dirty
@@ -2378,6 +2379,7 @@ namespace Ryujinx.Graphics.Metal
         private static long _shadowCollected;
 
         private static IntPtr _lastPsoPtr;
+        public static IntPtr LastPso => _lastPsoPtr;
 
         private static bool _passStoreUnknown;
         private static ulong _passColorMask;

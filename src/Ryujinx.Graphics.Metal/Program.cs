@@ -1937,10 +1937,15 @@ namespace Ryujinx.Graphics.Metal
 
             if (_graphicsPipelineCache != null)
             {
+                IntPtr firstPso = IntPtr.Zero;
+                int psoCount = 0;
                 foreach (MTLRenderPipelineState pipeline in _graphicsPipelineCache.Values)
                 {
+                    if (firstPso == IntPtr.Zero) firstPso = pipeline.NativePtr;
+                    psoCount++;
                     pipeline.Dispose();
                 }
+                CrashRing.ProgramDispose(DebugLabel, firstPso, psoCount);
             }
 
             _computePipelineCache?.Dispose();

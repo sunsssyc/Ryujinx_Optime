@@ -1436,6 +1436,7 @@ namespace Ryujinx.Graphics.Metal
             _renderer.FrameCapture.BeginScope();
 
             _presentCount++;
+            CrashRing.Present((int)_presentCount);
 
             // Synchronous pipeline-state compiles this frame, render and compute together:
             // for a stall what matters is the wall clock the render thread spent inside
@@ -2416,6 +2417,7 @@ namespace Ryujinx.Graphics.Metal
                     // The converted-topology path must keep the draw's instancing and
                     // base vertex/instance: dropping them draws a single instance of
                     // the wrong vertices for instanced quad/fan draws.
+                    CrashRing.Draw(CrashRing.Kind.DrawIndexed, _encoderStateManager.RenderProgram?.DebugLabel, EncoderStateManager.LastPso, mtlBuffer.NativePtr, renderCommandEncoder.NativePtr, CommandBufferEncoder.RenderEncoderGeneration, indexCount);
                     renderCommandEncoder.DrawIndexedPrimitives(
                         primitiveType,
                         (ulong)indexCount,
@@ -2442,6 +2444,7 @@ namespace Ryujinx.Graphics.Metal
                     !(_skipShader.Length != 0 &&
                       _skipShader == _encoderStateManager.RenderProgram?.DebugLabel))
                 {
+                    CrashRing.Draw(CrashRing.Kind.DrawArrays, _encoderStateManager.RenderProgram?.DebugLabel, EncoderStateManager.LastPso, IntPtr.Zero, renderCommandEncoder.NativePtr, CommandBufferEncoder.RenderEncoderGeneration, vertexCount);
                     renderCommandEncoder.DrawPrimitives(
                         primitiveType,
                         (ulong)firstVertex,
@@ -2648,6 +2651,7 @@ namespace Ryujinx.Graphics.Metal
                     !(_skipShader.Length != 0 &&
                       _skipShader == _encoderStateManager.RenderProgram?.DebugLabel))
                 {
+                    CrashRing.Draw(CrashRing.Kind.DrawIndexed, _encoderStateManager.RenderProgram?.DebugLabel, EncoderStateManager.LastPso, mtlBuffer.NativePtr, renderCommandEncoder.NativePtr, CommandBufferEncoder.RenderEncoderGeneration, finalIndexCount);
                     renderCommandEncoder.DrawIndexedPrimitives(
                         primitiveType,
                         (ulong)finalIndexCount,
@@ -2724,6 +2728,7 @@ namespace Ryujinx.Graphics.Metal
                     !(_skipShader.Length != 0 &&
                       _skipShader == _encoderStateManager.RenderProgram?.DebugLabel))
                 {
+                    CrashRing.Draw(CrashRing.Kind.DrawIndirect, _encoderStateManager.RenderProgram?.DebugLabel, EncoderStateManager.LastPso, indexBuffer.NativePtr, renderCommandEncoder.NativePtr, CommandBufferEncoder.RenderEncoderGeneration, 0);
                     renderCommandEncoder.DrawIndexedPrimitives(
                         primitiveType,
                         type,
