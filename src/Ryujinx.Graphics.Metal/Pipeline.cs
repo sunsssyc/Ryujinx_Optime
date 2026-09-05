@@ -664,6 +664,10 @@ namespace Ryujinx.Graphics.Metal
             _encoderStateManager.SetClearLoadAction(clear);
         }
 
+        private static readonly int _prepassRebindMode =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_PREPASS_REBIND"), out int prepassMode) ? prepassMode : 1;
+        private long _prepassEncoderChanges;
+
         public MTLRenderCommandEncoder GetOrCreateRenderEncoder(bool forDraw = false)
         {
             // Mark all state as dirty to ensure it is set on the new encoder
@@ -862,7 +866,33 @@ namespace Ryujinx.Graphics.Metal
 
             if (forDraw)
             {
+                int preparedCb = Cbs.CommandBufferIndex;
+                EncoderType preparedType = Cbs.Encoders.CurrentEncoderType;
+                var preparedGeneration = CommandBufferEncoder.RenderEncoderGeneration;
                 _encoderStateManager.RenderResourcesPrepass();
+
+                // Resolving a mirror may upload pending bytes and end the render
+                // encoder. The initial dirty check above then describes the retired
+                // encoder, while the binding lists only contain the sets that were
+                // dirty before that upload. Prepare all sets for the new encoder.
+                if (_prepassRebindMode != 0 &&
+                    (Cbs.CommandBufferIndex != preparedCb ||
+                     CommandBufferEncoder.RenderEncoderGeneration != preparedGeneration ||
+                     (preparedType == EncoderType.Render && Cbs.Encoders.CurrentEncoderType != EncoderType.Render)))
+                {
+                    if (++_prepassEncoderChanges <= 24)
+                    {
+                        Logger.Warning?.PrintMsg(LogClass.Gpu,
+                            $"prepass-encoder-change frame={_presentCount} draw={DrawCount} mode={_prepassRebindMode} " +
+                            $"cb={preparedCb}->{Cbs.CommandBufferIndex} encoder={preparedType}->{Cbs.Encoders.CurrentEncoderType}");
+                    }
+
+                    if (_prepassRebindMode == 1)
+                    {
+                        _encoderStateManager.SignalRenderDirty();
+                        _encoderStateManager.RenderResourcesPrepass();
+                    }
+                }
             }
 
             // Before the pass opens, while switching encoders is still legal, record what

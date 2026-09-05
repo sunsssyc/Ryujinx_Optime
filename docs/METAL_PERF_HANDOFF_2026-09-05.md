@@ -74,6 +74,18 @@ shows GPU >= 85% busy with fetchWriter >= 200 a frame.
 
 ## Open issue 1: fog/cloud layer missing for single frames
 
+**2026-09-05 correction:** the causal interpretation below is withdrawn. The v428
+declaration audit shows guest program `02cf57fb52f91612` has only fragment bindings
+128/129 (handle words 8/A), not 136. A matching draw trace identifies it as Metal
+program `3ebc3a8f6b77cc8f`, the scene/bloom tone mapper. The old probe iterated every
+slot in the shared binding cache, including slots left by other programs. Consequently
+the binding-136 swaps and subsequent table reads do not establish a wrong input to
+this draw. The write probe observed `ConstantBufferUpdater.FlushUboDirty` on the GPU
+thread during startup; no link to a bad frame has been established. Keep the following
+paragraph as investigation history, not a proven mechanism. The user's newer report
+at the Nachoyah Shrine manual save is a one-frame loss of wall/ground sunlight, which
+must be distinguished from the older cloud-band symptom.
+
 Symptom: a fog sheet (or the sky-island cloud band) drops out, or pops in, for one to
 three frames, every 1-2 s while it is in view; stronger at the hot-spring save (Y=263).
 Present with `barrier=all`, with `RYUJINX_METAL_DEPTH_RAW=1`, and in a clean build.
@@ -94,6 +106,113 @@ guest-side table recycling; a real guest write. The map-flicker fix of 2026-08-2
 (`TexturePool.GetInternal` descriptor check, `RYUJINX_POOL_DESC_CHECK`) is on and is not
 this. Tooling: `tools/` and the scratchpad scripts named in the memory notes
 (`video_ab.sh`, `flash_count.py`, `band_events.py`, `crash_ring_read.py`).
+
+## Current sunlight investigation (2026-09-05)
+
+### Verified v445 result (latest)
+
+The dirty-state check preceded RenderResourcesPrepass. Buffer resolution can switch the
+encoder from Render to Blit or rotate the command buffer inside that prepass. The new
+encoder must receive every binding set, including sets that were clean before the
+transition. v444 detected this path and re-ran preparation with RenderAll dirty.
+Same-binary on/control testing at the manual save gave 0 versus 16 PRESENT jump edges
+per 6000 frames (edges count up/down separately), at about 50 FPS.
+
+The clean v445 is baseline `910872594a9ec3897c1376a5dc006042ab8d98b7` plus only
+this default-enabled fix and the cached-program output
+map correction. No new GPU/CPU sampling probes are in it. A 600-second video and another
+180-second video after a user-performed manual reload both had zero patch excursions;
+the same detector found 11 in the control video. The 600-second whole-frame check was
+also zero. Average throughput over 247 120-frame blocks was 49.62 FPS; the slowest block
+averaged 45.13 FPS (not a minimum individual-frame rate). RSS started around 14501 MiB
+and ended around 12882 MiB. This is scene-specific validation, not a claim to solve the
+older cloud-band report or indexed-draw driver crash. The earlier Vulkan comparison was
+not rerun after the user's controller/audio changes; do not claim a new Vulkan speedup.
+
+Evidence: `v445-fix.patch`, `v445-source.json`, `v445-binary.json`,
+`v445-clean-performance.json`, `v445-patch-control-and-soak.jsonl`, and
+`v445-user-reload-patches.json` in the local diagnostics directory. The two source fixes are committed with this hand-off;
+the binary, recordings, and diagnostic manifests are local artifacts excluded from Git.
+The remaining text below is the historical investigation preceding this result.
+
+
+The user confirmed that the new manual-save report is wall/ground lighting changing
+for one frame. They did not adjust UltraCam time, weather, sun, or shadow settings.
+The first manual save is Nachoyah Shrine, 09/05/2026 1:31 AM, position approximately
+(388.81, 2404.59, 1660.98). Its thumbnail is sunlit; fresh loads start around 06:45 AM.
+
+The original 12-hour v425 session produced 169 one-frame brightness excursions in
+30 seconds near noon. Fresh v426 produced 6 in 20 seconds after loading the outdoor
+Great Plateau save and returning, then none in the next short clip. In fresh sessions,
+the usual state is dark, and the transient frame gains direct sunlight. Do not label
+the dark state itself faulty: the same v429 executable on Vulkan stayed dark from
+morning to afternoon, with 0 excursions in 300 seconds. Vulkan's observed steady
+status-bar FPS was 23.26 versus roughly 50 on Metal; these are not matched-throughput
+trials and cannot exclude a common timing issue.
+
+One independent code omission was corrected in v429-cache-output-mask: disk-cached
+programs now receive `ShaderInfo.FragmentOutputMap`, just as freshly translated
+programs do. It loaded 4961 cached shaders and produced masked-pipeline counts of 125
+at the title and 714 in the save. However, its first 60-second video still has 28
+sunlight excursions. The same build with `RYUJINX_METAL_DEPTH_RAW=1` has one verified
+excursion at video time 7.783s in 90 seconds. Neither is a completed flicker fix.
+
+Earlier conservative hot-switch and per-draw pass-split A/B/A clips had no flickering
+control arm. They cannot exclude those mechanisms. v430 compared live texture/sampler
+descriptors with their pool cache entries on the binding fast path. It recorded 24
+excursions/90s after reloading, with 29 million comparisons and no mismatches. This
+does not check cached binding-object identity against the pool item, nor descriptor
+arrays. Do not reuse the invalid binding-136 attribution.
+
+v431 samples output patches immediately after small direct draws. Its two 90-second
+clips had no excursions; the same process with sampling finished then produced 3/90s.
+This instrument adds pass boundaries and cannot be treated as a fix. Some late draws
+hit its per-frame capacity, but the three watched lighting programs and tone mapper
+were present in all 5353 gameplay frames of the first sweep. Its present pixels match
+ICC-corrected screenshots within 0.003 RGB, and readbacks require a completed fence.
+
+v432 adds a CPU-only record of actual emitted fragment uniforms (up to 4 KiB), texture
+and sampler IDs, draws, and present timestamps. The watched programs are Metal labels
+`17a20d725b4b8c73`, `104821aad64ec9a6`, and `5a6eec8e1d385f76`. Fresh load: 0/90s;
+reload: 8/90s, with complete records and no skipped bindings. All 26 watched texture
+bindings kept the same IDs/dimensions/formats throughout the video. Some environment
+constants pulsed near the visual events, but external video start latency was unknown.
+
+The same v432 binary with CPU tracing plus **present-only** GPU samples produced
+20/90s on its next fresh load. The internal frame IDs agree (5999 shared frames,
+timestamps within 21 microseconds). `5a6eec`'s `fp_c13[36].x` pulses followed 11 positive
+patch events by exactly two frame IDs; `fp_c13[54].x` dropped 1 -> 0 -> 1 two IDs after
+seven other patch events. `fp_c13[37].z` follows 0.8 + 0.2*x^3. These are structured
+environment updates, not evidence of random memory corruption. Feedback is a plausible
+interpretation, but queued presentation and in-flight buffer writes must be considered;
+the ordering does not yet establish the cause. In this watched shader, [36].x is first
+reduced by 0.3 and clamped, so its measured small pulses cannot directly change that use.
+
+Later v432/v433 output and input sampling localized some events to earlier lighting
+outputs and others to the tone-map output, without establishing one root cause. v434
+confirmed native HDR input/attachment overlap and tested copying overlapping inputs
+before drawing. That candidate failed: the same-process 90-second recordings had 11
+events with copying off and 16 with copying on. Keep this opt-in experiment disabled;
+it is not a sunlight fix. Record by verified window ID: one earlier display-2 recording
+captured the wrong screen and was explicitly marked invalid.
+
+The existing RYUJINX_METAL_SYNC_STRICT=3 diagnostic disables signal coalescing and
+includes already committed command buffers in new sync handles. Its first 90 seconds
+had no detected events, but the user subsequently saw flickering in that same run;
+a following 90-second window recording detected 19 short brightness excursions.
+A quiet first load is not sufficient validation. Neither this result nor the descriptor
+audit excludes other cache-validity or shader-translation logic errors. In particular,
+the previous white-flash bug was shared translator logic despite differing visible
+behavior on Vulkan. No sunlight fix has been delivered. Current process IDs, active
+trials, and exact artefact paths belong in the local investigation log.
+
+Evidence, build manifests, source snapshots, videos, and exact counts are indexed in
+`artifacts/diagnostics/fog-2026-09-05/investigation.md` (local, not committed). The
+player's v426 directory remains intact. The historical candidate probes remain
+uncommitted; the two verified v445 source fixes are committed with this hand-off.
+UltraCam INI is byte-identical to the baseline: MaxFPS=50, MenuFPS=60, mMenuFPS=30.
+The Vulkan CLI switch persisted the backend choice; launching the subsequent Metal
+trial restored Config.json to the pre-Vulkan copy. No FPS cap was changed.
 
 ## Open issue 2: segfault inside `drawIndexedPrimitives`
 

@@ -306,7 +306,7 @@ namespace Ryujinx.Graphics.Metal
         public IProgram LoadProgramBinary(byte[] programBinary, bool hasFragmentShader, ShaderInfo info)
         {
             ShaderSource[] shaders = MslProgramBinarySerializer.Unpack(programBinary);
-            return new Program(this, _device, shaders, info.ResourceLayout, info.ComputeLocalSize);
+            return new Program(this, _device, shaders, info.ResourceLayout, info.ComputeLocalSize, info.FragmentOutputMap);
         }
 
         public void SetBufferData(BufferHandle buffer, int offset, ReadOnlySpan<byte> data)

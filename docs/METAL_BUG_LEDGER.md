@@ -24,6 +24,7 @@ commit messages; this file is the index. Dates are the fix dates.
 | Water surface collapses into a tiled sand texture | RG11B10 self-reads were being served by framebuffer fetch, but refraction samples the HDR target at a displaced coordinate, which fetch cannot express | 02f6962c (2026-09-03, v408) | user's play; hazard+fetch reproduces, R32F-only does not | fetch formats are R32F only |
 | Black decal blocks flickering with primitive order (hill save) | a draw that writes the slot it reads was fetched; the back face read the front face's fresh write instead of the pre-draw value | e186fff2 (2026-09-03, v409) | burst diff 301 cells -> 0 | - |
 | Black wedges at the hill save with `barrier=hazard` | hazard mode skipped guest barriers that guard stale-policy self-reads and fragment storage stores (visibility feedback flags) | c0f67455 (2026-09-04, v410/v411) | burst diff 241/291 -> 108/23 (baseline noise) | `RYUJINX_METAL_BARRIER_SCOPE=all` |
+| Wall/ground sunlight changes for one frame at the Nachoyah Shrine manual save | Resource preparation can retire the render encoder after the dirty-state check, leaving clean binding sets unprepared for the new encoder | v445 (source committed with this ledger): reprepare all render bindings after encoder/command-buffer transitions during prepass; cached output-map correction also retained | v444 on/control: 0/16 PRESENT jump edges per 6000 frames; clean v445 600s + user-reload 180s video: 0 patch excursions, ~49.6 FPS, no sustained RSS growth | `RYUJINX_METAL_PREPASS_REBIND=2` records without repairing; default 1 |
 
 ## Open
 
@@ -31,5 +32,14 @@ commit messages; this file is the index. Dates are the fix dates.
 |---|---|---|
 | Gloom deals damage in places that are safe on Vulkan (gameplay-breaking, Depths edge) | not reproduced since 2026-07-24; mechanism unknown (occlusion query, 3D BC, texture read-back, transform feedback all excluded) | `METAL_HANDOFF_2026-07-18.md` gloom sections |
 | Distant clouds show through mountains, flipping between states | reproduces with every optimisation off; likely the game's cloud impostor reading a periodically refreshed depth; upstream-class | memory note `metal-nvn-self-skip` |
-| Fog sheet / sky-island cloud band missing or popping for 1-3 frames every 1-2 s | frame-level mechanism found: the fog composite's binding 136 resolves to another texture (pool id 728) because the guest handle table word is rewritten right after the emulator reads it; who rewrites it is the open question | `METAL_PERF_HANDOFF_2026-09-05.md`, open issue 1 |
+| Fog sheet / sky-island cloud band missing or popping for 1-3 frames every 1-2 s | unresolved; the old binding-136 evidence was invalidated by the 2026-09-05 declaration audit: the watched program only uses 128/129, and the probe included stale slots from previous draws | `METAL_PERF_HANDOFF_2026-09-05.md`, open issue 1 and its correction |
 | Segfault in the driver's `drawIndexedPrimitives` (nil object at +0x8a0), four times on 2026-09-04 including a clean build | regression from the v412-v419 range or the same-day config change; crash ring (v425/v426) armed to catch the next one | `METAL_PERF_HANDOFF_2026-09-05.md`, open issue 2 |
+
+## Candidate correction, not a resolved picture bug
+
+`MetalRenderer.LoadProgramBinary` omitted `ShaderInfo.FragmentOutputMap` when creating
+the Metal program. Newly translated programs passed it correctly. The omission disabled
+the write-mask protection for channels absent from a cached fragment shader. The v429
+candidate passes the saved map; cache loading and the masked-pipeline counter confirm
+that it runs. Sunlight still flickers in v429, so this correction does **not** close the
+sunlight issue by itself. v445 retains it alongside the validated prepass rebind fix. Both source changes are committed with this ledger; the v445 binary remains a local artifact.
