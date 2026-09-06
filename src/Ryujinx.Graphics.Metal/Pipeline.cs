@@ -140,16 +140,15 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _dumpAllShaders = Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_SHADERS") == "1";
         private static readonly bool _drawTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_DRAW_TRACE") == "1";
         private static readonly bool _passTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_PASS_TRACE") == "1";
-        // Guest texture barriers end the pass only for a hazard the draw-time check
-        // would also split on (see TextureBarrier). Default since v419 (2026-09-04):
-        // it ran opt-in through the user's play from 2026-09-03 across two days of
-        // sessions - dense field, water, Ultrahand, the hill save that first showed
-        // its two defects - with no regression after v410/v411 restored the barriers
-        // over stale-policy reads and fragment stores. RYUJINX_METAL_BARRIER_SCOPE=all
-        // opts out. /tmp/ryujinx-metal-barrier-scope holds "hazard" or "all" and is
-        // re-read once a frame; any other content leaves the default in force.
+        // /tmp/ryujinx-metal-barrier-scope can explicitly select "hazard" or "all"
+        // for same-session diagnosis; absent/unknown values use the environment default.
+        // Honor guest texture barriers by default. The bindings visible at the
+        // barrier can belong to the preceding draw, so a hazard check there does
+        // not prove that subsequent draws will not consume earlier writes. The
+        // draw-time path also permits some self-reads, and cannot replace the
+        // skipped barrier. Keep the old policy only as an explicit diagnostic opt-in.
         private static bool _barrierHazardOnly =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") != "all";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") == "hazard";
         private static readonly bool _barrierHazardDefault = _barrierHazardOnly;
 
         private static void RefreshBarrierScope()
@@ -3203,8 +3202,8 @@ namespace Ryujinx.Graphics.Metal
             // A barrier that orders nothing can be skipped. The guest issues these in the
             // hundreds per frame; ending the pass for one whose bound textures were not
             // written by the pass now running costs a full attachment store and reload and
-            // orders a dependency that does not exist. This is the default (v419);
-            // RYUJINX_METAL_BARRIER_SCOPE=all ends the pass for every guest barrier. It
+            // orders a dependency that does not exist. This was the default in v419-v482;
+            // RYUJINX_METAL_BARRIER_SCOPE=hazard now explicitly opts into this heuristic. It
             // is only meaningful together with RAW_SPLIT_SCOPE=pass (also the default),
             // which makes the write set per pass rather than per command buffer.
             // The draw-time check runs for the next draw regardless, so ending the pass
