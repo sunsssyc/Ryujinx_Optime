@@ -1,3 +1,4 @@
+using Ryujinx.Common.Logging;
 using Ryujinx.HLE.HOS.Kernel.Common;
 using Ryujinx.HLE.HOS.Kernel.Process;
 using Ryujinx.Horizon.Common;
@@ -176,13 +177,44 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
 
             _context.CriticalSection.Enter();
 
+            KThread ownerAtWake = currentThread.MutexOwner;
+
             currentThread.MutexOwner?.RemoveMutexWaiter(currentThread);
 
             _condVarThreads[condVarAddress].Remove(currentThread);
 
             _context.CriticalSection.Leave();
 
-            return currentThread.ObjSyncResult;
+            Result waitResult = currentThread.ObjSyncResult;
+
+            if (waitResult != Result.Success)
+            {
+                LogCondVarWaitFailure(currentThread, ownerAtWake, mutexAddress, condVarAddress, threadHandle, waitResult);
+            }
+
+            return waitResult;
+        }
+
+        // Diagnostic (2026-09-06): the guest aborted inside nn::os::WaitConditionVariable with no
+        // kernel warning in the log, so the failure was one the dispatcher files as expected
+        // (InvalidState, TimedOut, Cancelled). Name it, with the mutex word and its owner.
+        private static void LogCondVarWaitFailure(KThread thread, KThread ownerAtWake, ulong mutexAddress, ulong condVarAddress, int threadHandle, Result result)
+        {
+            try
+            {
+                KProcess process = KernelStatic.GetCurrentProcess();
+                int mutexValue = process.CpuMemory.IsMapped(mutexAddress) ? process.CpuMemory.Read<int>(mutexAddress) : -1;
+                KThread owner = mutexValue > 0 ? process.HandleTable.GetObject<KThread>(mutexValue & ~HasListenersMask) : null;
+
+                Logger.Warning?.Print(LogClass.KernelSvc,
+                    $"condvar wait failed: result={result} thread={thread.GetThreadName()}/{thread.ThreadUid} handle=0x{threadHandle:x} " +
+                    $"mutex=0x{mutexAddress:x} value=0x{mutexValue:x} ownerNow={(owner != null ? owner.GetThreadName() + "/" + owner.ThreadUid : "none")} " +
+                    $"ownerAtWake={(ownerAtWake != null ? ownerAtWake.GetThreadName() + "/" + ownerAtWake.ThreadUid : "none")} condvar=0x{condVarAddress:x}");
+            }
+            catch (Exception e)
+            {
+                Logger.Warning?.Print(LogClass.KernelSvc, $"condvar wait failed: result={result} (detail unavailable: {e.GetType().Name})");
+            }
         }
 
         private static (int, KThread) MutexUnlock(KThread currentThread, ulong mutexAddress)

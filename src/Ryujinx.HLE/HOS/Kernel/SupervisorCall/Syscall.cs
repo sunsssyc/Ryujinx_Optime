@@ -1879,7 +1879,7 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
         }
 
         [Svc(0x26)]
-        public void Break(ulong reason)
+        public void Break(ulong reason, [PointerSized] ulong info, [PointerSized] ulong infoSize)
         {
             KThread currentThread = KernelStatic.GetCurrentThread();
 
@@ -1887,6 +1887,26 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
             {
                 currentThread.PrintGuestStackTrace();
                 currentThread.PrintGuestRegisterPrintout();
+
+                // Diagnostic (2026-09-06): nn::diag::detail::Abort breaks with the failing
+                // Result at info (size 4). Log it so a guest abort names its cause.
+                try
+                {
+                    KProcess process = currentThread.Owner;
+                    if (info != 0 && infoSize is 4 or 8 && process.CpuMemory.IsMapped(info))
+                    {
+                        uint value = process.CpuMemory.Read<uint>(info);
+                        Logger.Error?.Print(LogClass.KernelSvc, $"Break reason=0x{reason:x} info=0x{info:x} size={infoSize} value=0x{value:x8} result={new Result((int)value)}");
+                    }
+                    else
+                    {
+                        Logger.Error?.Print(LogClass.KernelSvc, $"Break reason=0x{reason:x} info=0x{info:x} size={infoSize}");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Logger.Error?.Print(LogClass.KernelSvc, $"Break reason=0x{reason:x} (info unreadable: {e.GetType().Name})");
+                }
 
                 // As the process is exiting, this is probably caused by emulation termination.
                 if (currentThread.Owner.State == ProcessState.Exiting)

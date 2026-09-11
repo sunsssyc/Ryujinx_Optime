@@ -1365,6 +1365,18 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
             KernelContext.CriticalSection.Enter();
 
             // Wake up all threads that may be waiting for a mutex being held by this thread.
+            if (_mutexWaiters.Count > 0)
+            {
+                // Diagnostic (2026-09-06): every waiter woken here returns InvalidState from its
+                // condvar/mutex wait, which nn::os aborts on. Record who exited holding what.
+                StringBuilder waiters = new();
+                foreach (KThread waiter in _mutexWaiters)
+                {
+                    waiters.Append($" {waiter.GetThreadName()}/{waiter.ThreadUid}@0x{waiter.MutexAddress:x}");
+                }
+                Logger.Warning?.Print(LogClass.KernelSvc, $"thread exit {HostThread?.Name}/{ThreadUid} wakes {_mutexWaiters.Count} mutex waiters with InvalidState:{waiters}");
+            }
+
             foreach (KThread thread in _mutexWaiters)
             {
                 thread.MutexOwner = null;
