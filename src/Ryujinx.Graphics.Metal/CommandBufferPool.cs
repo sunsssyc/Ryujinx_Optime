@@ -20,10 +20,36 @@ namespace Ryujinx.Graphics.Metal
         private readonly int _totalCommandBuffers;
         private readonly int _totalCommandBuffersMask;
         private readonly MTLCommandQueue _queue;
-        private readonly Thread _owner;
+        private Thread _owner;
         private IEncoderFactory _defaultEncoderFactory;
 
         public bool OwnedByCurrentThread => _owner == Thread.CurrentThread;
+
+        /// <summary>
+        /// Make the calling thread the pool's owner, but only once the previous owner has
+        /// exited. ThreadedRenderer joins the backend thread before it disposes the base
+        /// renderer, so teardown runs on whichever thread called Dispose; the ownership
+        /// guards (off-thread dispose census, cross-thread flush marshalling) would
+        /// otherwise report every buffer of the shutdown as a bypass and try to marshal
+        /// the final flush onto a thread that no longer runs.
+        /// </summary>
+        /// <returns>True if the current thread now owns the pool</returns>
+        public bool AdoptCurrentThread()
+        {
+            if (_owner == Thread.CurrentThread)
+            {
+                return true;
+            }
+
+            if (_owner.IsAlive)
+            {
+                return false;
+            }
+
+            _owner = Thread.CurrentThread;
+
+            return true;
+        }
 
         [SupportedOSPlatform("macos")]
         private struct ReservedCommandBuffer

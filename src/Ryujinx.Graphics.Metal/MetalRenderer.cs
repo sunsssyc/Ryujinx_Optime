@@ -385,6 +385,16 @@ namespace Ryujinx.Graphics.Metal
 
         public void Dispose()
         {
+            // The backend thread has been joined by the time ThreadedRenderer disposes us,
+            // so this runs on the caller (GUI.WindowThread). Take the pool over so the
+            // shutdown flushes run here directly instead of being marshalled onto the
+            // dead thread, and so the off-thread census stays quiet for a path that is
+            // single-threaded by construction.
+            if (CommandBufferPool.AdoptCurrentThread())
+            {
+                InterruptAction = null;
+            }
+
             BackgroundResources.Dispose();
 
             foreach (Program program in Programs)
