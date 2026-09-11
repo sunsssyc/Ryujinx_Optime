@@ -34,6 +34,7 @@ namespace Ryujinx.Graphics.Metal
         ComputeEncoder,
         Dispose,
         DrawBudget,
+        FragmentDependencyDeferred,
     }
 
     public enum EncoderType
@@ -150,6 +151,16 @@ namespace Ryujinx.Graphics.Metal
         private static bool _barrierHazardOnly =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") == "hazard";
         private static readonly bool _barrierHazardDefault = _barrierHazardOnly;
+        // RYUJINX_METAL_BARRIER_SCOPE=deferred: a guest texture barrier ends nothing by
+        // itself; it marks what the pass has written, and the draw that later samples one
+        // of those attachments ends the pass right before itself (the barrier's actual
+        // consumer, which the hazard heuristic could not see because it judged from the
+        // preceding draw's bindings). A barrier nothing samples costs no pass. Passes with
+        // a fragment storage store still end at the barrier, as in hazard mode. Needs the
+        // draw-time RAW split; without it the mode falls back to "all".
+        private static bool _barrierDeferred =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") == "deferred";
+        private static readonly bool _barrierDeferredDefault = _barrierDeferred;
 
         private static void RefreshBarrierScope()
         {
@@ -162,8 +173,14 @@ namespace Ryujinx.Graphics.Metal
                 _barrierHazardOnly = scope switch
                 {
                     "hazard" => true,
-                    "all" => false,
+                    "all" or "deferred" => false,
                     _ => _barrierHazardDefault,
+                };
+                _barrierDeferred = scope switch
+                {
+                    "deferred" => true,
+                    "all" or "hazard" => false,
+                    _ => _barrierDeferredDefault,
                 };
             }
             catch (System.IO.IOException)
@@ -1573,7 +1590,7 @@ namespace Ryujinx.Graphics.Metal
                     // from a build that never had the change in it.
                     string configText =
                         $" config: splitScope={(EncoderStateManager.SplitScopePass ? "pass" : "cb")}, " +
-                        $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : "all")}, " +
+                        $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : _barrierDeferred ? "deferred" : "all")}, " +
                         $"markOnDraw={EncoderStateManager.MarkOnDrawActive}, " +
                         $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}, fbFetch={_fbFetch}, tileSnapshot={TileSnapshot.Enabled}/{TileSnapshot.Mode}.";
 
@@ -3227,6 +3244,18 @@ namespace Ryujinx.Graphics.Metal
             // flags), the decals among them, and skipping their barrier is what painted
             // the flickering black footprints at the user's save. So once the pass holds
             // a fragment store the guest's barrier ends it, whatever the textures say.
+            if (_barrierDeferred && _rawSplit && !_passHasFragmentStore)
+            {
+                // Deferred: mark the pass's writes and let their consumer split. See the
+                // field comment. Blit and compute consumers already end the render pass by
+                // changing encoder, so only same-pass draws need the mark.
+                _encoderStateManager.NoteGuestBarrier();
+                _passEndReasons[(int)PassEndReason.FragmentDependencyDeferred]++;
+                UploadCorrelator.NoteBarrierSkipped();
+
+                return;
+            }
+
             if (_barrierHazardOnly && !_passHasFragmentStore)
             {
                 EncoderStateManager.RawHazard barrierHazard = _encoderStateManager.SamplesEarlierWrite();

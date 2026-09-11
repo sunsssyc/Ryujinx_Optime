@@ -2466,6 +2466,12 @@ namespace Ryujinx.Graphics.Metal
         /// </summary>
         private readonly Dictionary<IntPtr, SubRange> _writtenThisCb = new();
         private readonly HashSet<IntPtr> _reallyWrittenThisPass = new();
+        // Attachments written by this pass before a guest texture barrier that the
+        // deferred barrier mode did not act on. A later draw that samples one of them
+        // is the barrier's real consumer and splits there (SamplesEarlierWrite).
+        private readonly HashSet<IntPtr> _barrieredWrites = new();
+        private static long _barriersDeferred;
+        private static long _splitBarriered;
 
         /// <summary>
         /// Subresource span of a view within its storage. Instrument-only: the split
@@ -2641,6 +2647,8 @@ namespace Ryujinx.Graphics.Metal
             _splitFetchRefusedWriter = 0;
             long storageWrites = _storageWrites, storageRawDraws = _storageRawDraws, storageBarriersKept = _storageBarriersKept, storageRawBarriers = _storageRawBarriers;
             long snapshotServed = _splitSnapshot, snapshotDispatches = TileSnapshot.Dispatches;
+            long barriersDeferred = _barriersDeferred, splitBarriered = _splitBarriered;
+            _barriersDeferred = _splitBarriered = 0;
             _splitSnapshot = 0;
             TileSnapshot.Dispatches = 0;
             _storageWrites = _storageRawDraws = _storageBarriersKept = _storageRawBarriers = 0;
@@ -2677,6 +2685,7 @@ namespace Ryujinx.Graphics.Metal
             _otherLabels.Clear();
 
             return $" rawsplit classes/frame: hotSelf={self / frames}, hotOther={other / frames}, subres={subres / frames}, selfSkipped={skipped / frames}" +
+                   (barriersDeferred != 0 || splitBarriered != 0 ? $", barrierDeferred={barriersDeferred / frames} splitBarriered={splitBarriered / frames}" : string.Empty) +
                    (legacy != 0 ? $", legacy={legacy / frames}" : string.Empty) +
                    $", onUnwritten: other={otherUnwritten / frames} self={selfUnwritten / frames}" +
                    $", fetchable={fetchable / frames} fetched={fetched / frames} fetchPending={fetchPending / frames} fetchWriter={fetchWriter / frames}" +
@@ -2822,6 +2831,7 @@ namespace Ryujinx.Graphics.Metal
                 _writtenThisCb.Clear();
                 _reallyWrittenThisPass.Clear();
                 _storageWrittenThisPass.Clear();
+                _barrieredWrites.Clear();
             }
         }
 
@@ -2927,6 +2937,63 @@ namespace Ryujinx.Graphics.Metal
             _writtenThisCb.Clear();
             _reallyWrittenThisPass.Clear();
             _storageWrittenThisPass.Clear();
+            _barrieredWrites.Clear();
+        }
+
+        /// <summary>
+        /// Deferred guest texture barrier: remember that everything this pass has written so
+        /// far must be visible to whatever samples it later in the same pass. The pass is not
+        /// ended here; the draw that actually samples one of these attachments ends it
+        /// (SamplesEarlierWrite reports Hazard instead of SelfOnly/Fetchable-with-skip), and a
+        /// barrier nothing later samples costs no pass at all. Storage-buffer consumers are
+        /// not visible to this table; the caller keeps ending the pass for those.
+        /// </summary>
+        public readonly void NoteGuestBarrier()
+        {
+            _barriersDeferred++;
+
+            foreach (IntPtr root in _writtenThisCb.Keys)
+            {
+                _barrieredWrites.Add(root);
+            }
+        }
+
+        /// <summary>
+        /// Whether a bound storage image (any stage, single or array) aliases an attachment
+        /// written before a deferred barrier. The texture walk covers sampled bindings only.
+        /// </summary>
+        private readonly bool ImagesReadBarrieredWrite()
+        {
+            if (_barrieredWrites.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (ImageRef reference in _currentState.ImageRefs)
+            {
+                if (reference.Storage is Texture image && _barrieredWrites.Contains(image.CanonicalPtr))
+                {
+                    return true;
+                }
+            }
+
+            foreach (EncoderState.ArrayRef<ImageArray> arrayRef in _currentState.ImageArrayRefs)
+            {
+                if (arrayRef.Array == null)
+                {
+                    continue;
+                }
+
+                foreach (TextureRef reference in arrayRef.Array.GetTextureRefs())
+                {
+                    if (reference.Storage is Texture image && _barrieredWrites.Contains(image.CanonicalPtr))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -3048,8 +3115,16 @@ namespace Ryujinx.Graphics.Metal
             bool anyReallyWritten = false;
             bool anyFetchable = false;
             bool anySkippableSelf = false;
+            bool anyBarriered = false;
             _fetchPlanCount = 0;
             _fetchPlanNeedsSnapshot = false;
+
+            if (ImagesReadBarrieredWrite())
+            {
+                _splitBarriered++;
+
+                return RawHazard.Hazard;
+            }
 
             ResourceBindingSegment[] segments = program.BindingSegments[Constants.TexturesSetIndex];
 
@@ -3075,7 +3150,7 @@ namespace Ryujinx.Graphics.Metal
 
                         if (_currentState.TextureRefs[index].Storage is Texture sampled)
                         {
-                            ClassifyMatch(sampled, index, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten, ref anyFetchable, ref anySkippableSelf);
+                            ClassifyMatch(sampled, index, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten, ref anyFetchable, ref anySkippableSelf, ref anyBarriered);
                         }
                     }
                 }
@@ -3097,7 +3172,7 @@ namespace Ryujinx.Graphics.Metal
                     {
                         if (reference.Storage is Texture sampled)
                         {
-                            ClassifyMatch(sampled, -1, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten, ref anyFetchable, ref anySkippableSelf);
+                            ClassifyMatch(sampled, -1, ref any, ref anyOverlap, ref anySelf, ref anyForeign, ref anyReallyWritten, ref anyFetchable, ref anySkippableSelf, ref anyBarriered);
                         }
                     }
                 }
@@ -3133,6 +3208,17 @@ namespace Ryujinx.Graphics.Metal
                 return RawHazard.Hazard;
             }
 
+            if (anyBarriered && (anySkippableSelf || !anyFetchable))
+            {
+                // The guest put a barrier between the write and this read. The stale
+                // self-skip is only tolerable without one (NVN would have served memory
+                // that the barrier had just made fresh); a fetch of the data formats is
+                // still fine, tile memory is fresher than memory would have been.
+                _splitBarriered++;
+
+                return RawHazard.Hazard;
+            }
+
             if (anyFetchable)
             {
                 // Only same-pixel attachment reads: the data-format ones go to a fetch
@@ -3159,7 +3245,7 @@ namespace Ryujinx.Graphics.Metal
             return RawHazard.SelfOnly;
         }
 
-        private readonly void ClassifyMatch(Texture sampled, int binding, ref bool any, ref bool anyOverlap, ref bool anySelf, ref bool anyForeign, ref bool anyReallyWritten, ref bool anyFetchable, ref bool anySkippableSelf)
+        private readonly void ClassifyMatch(Texture sampled, int binding, ref bool any, ref bool anyOverlap, ref bool anySelf, ref bool anyForeign, ref bool anyReallyWritten, ref bool anyFetchable, ref bool anySkippableSelf, ref bool anyBarriered)
         {
             if (!_writtenThisCb.TryGetValue(sampled.CanonicalPtr, out SubRange written))
             {
@@ -3167,6 +3253,7 @@ namespace Ryujinx.Graphics.Metal
             }
 
             any = true;
+            anyBarriered |= _barrieredWrites.Contains(sampled.CanonicalPtr);
 
             if (!written.Overlaps(SubRange.Of(sampled)))
             {
