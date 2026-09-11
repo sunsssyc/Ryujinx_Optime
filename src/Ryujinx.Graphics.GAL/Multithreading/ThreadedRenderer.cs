@@ -481,9 +481,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
         {
             // Interrupt the backend thread from any external thread and invoke the given action.
 
-            if (Thread.CurrentThread == _backendThread)
+            if (Thread.CurrentThread == _backendThread || !_running)
             {
                 // If this is called from the backend thread, the action can run immediately.
+                // Once the loop has stopped (Dispose), nothing would ever service the
+                // interrupt, so run it here rather than wait forever.
                 action();
             }
             else

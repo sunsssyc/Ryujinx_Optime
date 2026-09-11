@@ -26,29 +26,18 @@ namespace Ryujinx.Graphics.Metal
         public bool OwnedByCurrentThread => _owner == Thread.CurrentThread;
 
         /// <summary>
-        /// Make the calling thread the pool's owner, but only once the previous owner has
-        /// exited. ThreadedRenderer joins the backend thread before it disposes the base
-        /// renderer, so teardown runs on whichever thread called Dispose; the ownership
-        /// guards (off-thread dispose census, cross-thread flush marshalling) would
-        /// otherwise report every buffer of the shutdown as a bypass and try to marshal
-        /// the final flush onto a thread that no longer runs.
+        /// Make the calling thread the pool's owner. For the renderer's Dispose only:
+        /// ThreadedRenderer stops its command loop and joins the GPU thread before it
+        /// disposes the base renderer, so by contract nothing else touches the pool from
+        /// then on, but the thread that ran the loop (GUI.RenderThread) is still alive -
+        /// AppHost keeps it around until the renderer is gone - and Dispose runs on the
+        /// caller (GUI.WindowThread). Without the hand-over the ownership guards report
+        /// every buffer of the shutdown as an off-thread dispose and marshal the final
+        /// flush onto a loop that no longer runs, which never returns.
         /// </summary>
-        /// <returns>True if the current thread now owns the pool</returns>
-        public bool AdoptCurrentThread()
+        public void AdoptCurrentThread()
         {
-            if (_owner == Thread.CurrentThread)
-            {
-                return true;
-            }
-
-            if (_owner.IsAlive)
-            {
-                return false;
-            }
-
             _owner = Thread.CurrentThread;
-
-            return true;
         }
 
         [SupportedOSPlatform("macos")]
