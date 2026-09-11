@@ -108,6 +108,8 @@ RYUJINX_METAL_BARRIER_SCOPE=all ./Ryujinx
 | 变量 | 默认 | 可选值与作用 |
 |---|---|---|
 | `RYUJINX_METAL_BARRIER_SCOPE` | `deferred` | `all`：每个游戏纹理屏障都结束渲染通道，最保守、帧率略低；`hazard`：已撤回的旧策略，会复现雪山平台单帧消失，仅供诊断 |
+| `RYUJINX_METAL_ASYNC_PSO` | 开 | `0`：管线状态改回在渲染线程同步构建（转视角更卡，但新材质不会晚一帧出现） |
+| `RYUJINX_METAL_ASYNC_PSO_WAIT_MS` | `4` | 每帧最多等待后台构建的毫秒数，`0` 为不等直接跳过 |
 | `RYUJINX_METAL_SKIP_SELF_SPLIT` | 开 | `0`：关闭"自读放行"，更保守但慢很多 |
 | `RYUJINX_METAL_FB_FETCH` | 开 | `0`：关闭 framebuffer fetch（R32F 深度自读改走拆通道） |
 | `RYUJINX_METAL_BUFFER_MIRRORS` | 开 | `0`：关闭缓冲镜像写入 |
@@ -132,6 +134,7 @@ rm /tmp/ryujinx-metal-barrier-scope
 | 文件 | 内容 |
 |---|---|
 | `/tmp/ryujinx-metal-barrier-scope` | `deferred` / `all` / `hazard` |
+| `/tmp/ryujinx-metal-async-pso` | `1` 开 / `0` 关 |
 | `/tmp/ryujinx-metal-skip-self-split` | `1` 开 / `0` 关 |
 | `/tmp/ryujinx-metal-fb-fetch` | `1` 开 / `0` 关 |
 | `/tmp/ryujinx-metal-state-cache` | `0`–`3` |
