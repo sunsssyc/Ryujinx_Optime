@@ -187,7 +187,10 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
 
             Result waitResult = currentThread.ObjSyncResult;
 
-            if (waitResult != Result.Success)
+            // A timed wait running out is the normal outcome of a timed wait (the rumble
+            // thread does one every 10 ms); only an untimed wait ending in TimedOut, or any
+            // other failure, is worth naming.
+            if (waitResult != Result.Success && !(waitResult == KernelResult.TimedOut && timeout >= 0))
             {
                 LogCondVarWaitFailure(currentThread, ownerAtWake, mutexAddress, condVarAddress, threadHandle, waitResult);
             }
