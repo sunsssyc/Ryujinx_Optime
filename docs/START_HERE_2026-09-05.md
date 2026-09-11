@@ -5,6 +5,73 @@ for *The Legend of Zelda: Tears of the Kingdom* 1.4.2 on an M1 Max. The user is 
 graphics engineer; they play, report what they see, and decide what to switch. Talk to
 them in Chinese.
 
+## Latest platform fix: v483 (2026-09-06)
+
+v483 fixes the tested snow-campfire platform flicker. Current sole process at handoff:
+PID90920, `artifacts/terminal/Ryujinx-metal-v483-guest-barriers`, window102821,
+log `v483-default.log`. User is now playing in a shrine; recheck before any action.
+This is clean HEAD2fe2cec8 plus ONLY the Pipeline.cs guest-barrier default correction.
+It has no diagnostic environment overrides. Task-created serialize/barrier-scope hot
+files were removed. Default barrier=all was verified at runtime. No new Git commit.
+
+Same-process v482 controls: hazard271/1349, all0/1364, hazard280/1381, all0/1373
+actual GPU-frame candidate returns (not flash counts), near49FPS. Video confirms the
+one-frame platform disappearance under hazard; all-repeat maximum ROI score0.54 versus
+8.79. Ending every draw's pass also suppresses it but costs12FPS and was not shipped.
+
+Clean v483 then completed600.005s of mixed gameplay (campfire, roaming, abilities,
+inventory, shrine). User confirmed platform no longer flickers but white flashes remain.
+Video was scanned and peak contexts reviewed: independent white flash at~69.12s, wind
+effect at~201.93s, shrine movement/lighting at~553.11s. Early campfire peak was camera/
+character motion with platform intact. This is not proof of zero flashes everywhere.
+Mixed-scene window-weighted FPS46.36, RSS12.24→9.80GiB, no skipped draws in229 windows.
+Graphics settings unchanged; input assignments/audio/time-offset changed during user
+play and were not overwritten. See local `v483-verification.md` for exact limitations.
+
+Barrier-time bindings can describe the previous draw; testing them cannot guarantee
+future consumers are safe, and draw-time self-read policy does not replace the skipped
+barrier. v483 honors guest barriers by default; hazard is explicit diagnostic opt-in.
+The exact offending texture/barrier has not been independently traced.
+
+Keep white flashes OPEN: Vulkan also captured one (native video f2812). Older roaming
+reports, fog/cloud dropout and indexed-draw crash are not automatically closed by this
+scene-scoped fix. Preserve v426/v445 baselines. All recorder/analysis jobs finished.
+Artifacts/patch/signature/source manifest remain LOCAL, not committed Git contents.
+The user authorized this investigation's PID-only single-instance switches and recording;
+continue to respect the rule to ask before a new round of game-process intervention.
+
+v480 corrected premature coverage reads and missing vertex matrix bindings. v481 also
+records actual submission (including indirect draws) and completed GPU-read matrices.
+Two v481 samples each compared 4152 GPU/CPU matrix bindings with zero mismatches, and
+all recorded draws were submitted. Its 60-second video still flickers. These are limited
+negative results, not proof that all geometry/texture data is correct. Old zero-coverage
+claims remain unreliable and must not be treated as the root cause.
+
+v482 adds sparse GPU samples of the `affcd889c8dbb375` material's alpha/discard decision:
+texture alpha, interpolated fade (vertex input Attr12.w), mixed alpha, threshold, and
+sampled discard counts. It preserves the original comparison and discard. This shader
+may explain a disappearing material layer, but it has NOT yet been proven to carry the
+bad frame. Build/signature and 14 fake-dependency bookkeeping/patch tests passed; both
+instrumented shaders compile on M1 Max. v482 now has in-game results: three sampled windows (36 frames total) show
+identical alpha sample/discard counts for n11793 (5179/1712) and threshold 0.02,
+including an image-grid event window. This does not measure post-depth coverage.
+User still reports scene flashes; see `v482-game-*` and nearby draw dumps. Scripts: `grid_watch_inputs.py` (requires bundled numpy Python),
+`gpu_draw_compare.py`, `alpha_draw_report.py`. All under local `tools/handoff-2026-09-05`.
+
+No game fix delivered and no new Git commit. New source is diagnostic only; manifests,
+videos and backups remain local artifacts. See `v481-*`, `v482-*` and `investigation.md`
+under `artifacts/diagnostics/fog-2026-09-05`. Do not restore keyboard scripts or old probes
+that force guest occlusion answers. Current DRAW_COVERAGE and COV_ANOM are both OFF.
+
+## Follow-up: roaming flashes reported on v445
+
+The user subsequently reported occasional flashes while moving through the world,
+resembling content from another location. v445 and prepass mode 1 were verified active.
+The static manual-save validation below does not cover all roaming/streaming paths.
+Cause and relationship to the older fog issue are unconfirmed; prioritize correctness
+before performance experiments. Read the latest local investigation entry for evidence
+and pending location/time details. No game process or settings were changed on receipt.
+
 ## Latest verified sunlight fix: v445 (2026-09-05)
 
 Current verified terminal build: `artifacts/terminal/Ryujinx-metal-v445-prepass-rebind`.
@@ -157,3 +224,12 @@ naming the switches it ran under. Check both before trusting a measurement.
    exposes one-frame sunlight loss on walls/ground, confirmed by the user; keep that
    symptom separate from the older hot-spring cloud-band report (player Y = 263).
 3. Do not reopen the closed performance lines in the perf hand-off without new evidence.
+
+## 2026-09-05 17:00 补充（阳光单帧跳变，第二位 agent）
+最新进展看 `artifacts/diagnostics/fog-2026-09-05/investigation.md` 末尾三条（15:45 起）。要点：坏帧绘制列表与好帧完全一致（ringdiff.py）；`RYUJINX_METAL_BUFFER_MIRRORS=0` 事件 0/6000 帧（对照 9–13），是目前唯一把事件清零且画面不变的干预，代价 pass 255→347；texture-buffer、命令缓冲切换重建参数缓冲、readback 竞争三条线已否定；下一条未测线索是共享 Dirty 位被另一条管线消费导致同程序后续绘制沿用旧参数缓冲（详见台账）。进程内 PRESENT patch 检测器（SunlightSweep，`echo "6000 PRESENT" > /tmp/ryujinx-sunlight-sweep`，日志 `present-jump`）是可靠计数仪器，外部录像看不到这种局部事件。工具在 scratchpad：`run_arm.sh <tag> ENV=..`（ARM_CAND 指定候选目录）、`ringdiff.py`、`mirror_ring_diff.py`。
+
+## 2026-09-06 02:05 补充（雪地石头边冲刺一帧巨石错景）
+台账 `investigation.md` 末条。要点：坏帧 = 一块石头以错误变换画满屏、只一帧；已排除 compute prepass 重绑、镜像、状态缓存三族；探针 PresentGridProbe（v449+）能自动抓并导出绘制环；下一步是 AUTO_FLUSH=0 与 Vulkan 对照，各需用户 2 分钟。工具与数据：grid-user-20260906/，scratchpad 的 event_bindings.py / stream_diff.py / video_outliers2.py。
+
+## 2026-09-06 12:20 补充（巨石错景：已定性为条件绘制画坏数据，时序类假说全部排除）
+台账 `investigation.md` 末两条。Vulkan 同样复现（核心层）；`RYUJINX_CONDR_FORCE=draw` 能稳定复现同形态巨面；判定时机、GPU 线程滞后/超前、CPU 输入重传、GPU 回写、mirrors、状态缓存、auto-flush 全部现场 A/B 否定。剩余方向见台账结论 (a)(b)(c)。注意：本仓库 git 会因浅克隆懒拉取卡死，打包用 scratchpad 的 `build_v451_direct.sh` 直接发布。

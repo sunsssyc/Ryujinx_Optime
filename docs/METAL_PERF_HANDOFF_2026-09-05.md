@@ -1,5 +1,17 @@
 # TOTK on the Metal backend — performance line and open issues, state as of 2026-09-05
 
+
+## Correctness update: v483 (2026-09-06)
+
+The default guest texture-barrier policy is now `all`; `hazard` skipping is an explicit
+diagnostic opt-in. Same-process campfire controls reproduced platform corruption twice
+with hazard and eliminated it twice with all at about49FPS. Clean v483 passed600s mixed
+play and user confirmation, with independent white flash still open. Do not re-enable
+hazard as a default based on the older performance conclusions below. Its barrier-time
+binding check cannot establish the absence of dependencies for later changed bindings.
+See START_HERE and local v483-verification.md; no new source commit yet.
+
+
 This is the hand-off for the work between v393 (2026-08-30) and v426 (2026-09-04). The
 commit messages carry the per-change reasoning; this file is the map. Numbers are
 scene-scoped: a result measured at one save says nothing about another (that lesson

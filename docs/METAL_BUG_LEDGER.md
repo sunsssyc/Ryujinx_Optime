@@ -33,7 +33,27 @@ commit messages; this file is the index. Dates are the fix dates.
 | Gloom deals damage in places that are safe on Vulkan (gameplay-breaking, Depths edge) | not reproduced since 2026-07-24; mechanism unknown (occlusion query, 3D BC, texture read-back, transform feedback all excluded) | `METAL_HANDOFF_2026-07-18.md` gloom sections |
 | Distant clouds show through mountains, flipping between states | reproduces with every optimisation off; likely the game's cloud impostor reading a periodically refreshed depth; upstream-class | memory note `metal-nvn-self-skip` |
 | Fog sheet / sky-island cloud band missing or popping for 1-3 frames every 1-2 s | unresolved; the old binding-136 evidence was invalidated by the 2026-09-05 declaration audit: the watched program only uses 128/129, and the probe included stale slots from previous draws | `METAL_PERF_HANDOFF_2026-09-05.md`, open issue 1 and its correction |
+| Occasional one-frame flashes while roaming on v445, resembling content from another location | user-reported after the static-save fix; v445/mode 1 verified active; mechanism and relationship to the fog issue unconfirmed, pending event location/time and bad-frame capture | local investigation entry `roaming-report-20260905-222443`; static-save validation does not establish roaming coverage |
 | Segfault in the driver's `drawIndexedPrimitives` (nil object at +0x8a0), four times on 2026-09-04 including a clean build | regression from the v412-v419 range or the same-day config change; crash ring (v425/v426) armed to catch the next one | `METAL_PERF_HANDOFF_2026-09-05.md`, open issue 2 |
+
+## Snow-platform fix: v483 (2026-09-06)
+
+The high-frequency campfire platform corruption responds reversibly to Metal's guest
+texture-barrier policy. Same-process 30-second controls: hazard 271/1349 candidate
+returns, all 0/1364, hazard 280/1381, all 0/1373 (game frames, around49FPS). Video confirms
+one-frame platform loss in hazard mode; repeat all-mode video's maximum ROI return
+score is0.54 versus8.79 in hazard mode. These are scene-scoped measurements, not a count
+of all bugs. An independent white flash was captured on Vulkan too and remains open.
+
+The barrier-time check uses current bindings, which need not describe later consumers;
+the draw-time self-read policy cannot replace every skipped guest barrier. v483 restores
+honoring guest texture barriers by default; hazard skipping requires explicit opt-in.
+Its clean candidate is HEAD2fe2cec8 plus only this Pipeline.cs change. Build/signature passed, followed by 600 seconds of default-setting mixed gameplay.
+User confirmed platform no longer flickers; independent white flashes remain. RSS fell
+12.24→9.80 GiB; mixed-scene weighted FPS46.36, no skipped draws. Reviewed video peaks
+showed white flash, wind, or movement, not the old platform disappearance. This closes
+this tested platform issue, not all older roaming reports. Committed as 5b5e7519 (Pipeline.cs only; probes stay uncommitted). Evidence and patch: local `artifacts/diagnostics/fog-2026-09-05/v483-*`
+and `v482-pass-arms.jsonl`. See START_HERE for current PID and validation status.
 
 ## Candidate correction, not a resolved picture bug
 
