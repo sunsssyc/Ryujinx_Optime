@@ -1,3 +1,31 @@
+# Ryujinx_Optime：带原生 Metal 后端的 Ryujinx
+
+这是 [Ryubing 版 Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) 1.3.3 的一个个人分支，加了一个**原生 Metal 渲染后端**，主要针对《塞尔达传说：王国之泪》1.4.2 在 Apple Silicon Mac 上调优，修掉了一批画面、稳定性和性能问题。Metal 后端仍是实验性的。
+
+- **主分支**：`codex/native-metal-backend`
+- **测试环境**：Apple M1 Max，macOS 26.5
+- **本地使用指南**：[docs/METAL_FORK_GUIDE.md](docs/METAL_FORK_GUIDE.md)，包括编译、签名、启动、推荐设置、调试开关和问题反馈
+- **修复说明**：[docs/METAL_FIXES.md](docs/METAL_FIXES.md)，每个修复的现象、原因、提交号，以及已知问题
+
+### 快速开始
+
+需要 .NET SDK 10.0.301 或更高版本。
+
+```bash
+dotnet publish src/Ryujinx/Ryujinx.csproj -c Release -r osx-arm64 --self-contained true \
+  -p:Version=1.3.3+local-metal -p:AssemblyVersion=1.3.3.0 -p:FileVersion=1.3.3.0 \
+  -p:InformationalVersion=1.3.3+local-metal \
+  -o artifacts/terminal/Ryujinx-metal-local
+codesign --entitlements distribution/macos/entitlements.xml -f -s - artifacts/terminal/Ryujinx-metal-local/Ryujinx
+artifacts/terminal/Ryujinx-metal-local/Ryujinx --graphics-backend Metal
+```
+
+所有修复默认开启，正常游玩不需要设置环境变量。王国之泪建议把 UltraCam Mod 的帧率上限设为 50，原因见使用指南。
+
+---
+
+*以下为上游 Ryubing README 原文。*
+
 <table align="center">
     <tr>
         <td align="center" width="25%">
