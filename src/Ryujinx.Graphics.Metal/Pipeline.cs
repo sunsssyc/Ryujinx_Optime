@@ -141,25 +141,27 @@ namespace Ryujinx.Graphics.Metal
         private static readonly bool _dumpAllShaders = Environment.GetEnvironmentVariable("RYUJINX_METAL_DUMP_SHADERS") == "1";
         private static readonly bool _drawTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_DRAW_TRACE") == "1";
         private static readonly bool _passTraceOn = Environment.GetEnvironmentVariable("RYUJINX_METAL_PASS_TRACE") == "1";
-        // /tmp/ryujinx-metal-barrier-scope can explicitly select "hazard" or "all"
-        // for same-session diagnosis; absent/unknown values use the environment default.
-        // Honor guest texture barriers by default. The bindings visible at the
-        // barrier can belong to the preceding draw, so a hazard check there does
-        // not prove that subsequent draws will not consume earlier writes. The
-        // draw-time path also permits some self-reads, and cannot replace the
-        // skipped barrier. Keep the old policy only as an explicit diagnostic opt-in.
+        // /tmp/ryujinx-metal-barrier-scope can explicitly select "hazard", "all" or
+        // "deferred" for same-session diagnosis; absent/unknown values use the
+        // environment default. The bindings visible at the barrier can belong to the
+        // preceding draw, so a hazard check there does not prove that subsequent draws
+        // will not consume earlier writes. The draw-time path also permits some
+        // self-reads, and cannot replace the skipped barrier. The old policy stays as
+        // an explicit diagnostic opt-in; RYUJINX_METAL_BARRIER_SCOPE=all ends the pass
+        // at every guest barrier.
         private static bool _barrierHazardOnly =
             Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") == "hazard";
         private static readonly bool _barrierHazardDefault = _barrierHazardOnly;
-        // RYUJINX_METAL_BARRIER_SCOPE=deferred: a guest texture barrier ends nothing by
-        // itself; it marks what the pass has written, and the draw that later samples one
+        // Default (v486, 2026-09-11; RYUJINX_METAL_BARRIER_SCOPE=deferred): a guest
+        // texture barrier ends nothing by itself; it marks what the pass has written,
+        // and the draw that later samples one
         // of those attachments ends the pass right before itself (the barrier's actual
         // consumer, which the hazard heuristic could not see because it judged from the
         // preceding draw's bindings). A barrier nothing samples costs no pass. Passes with
         // a fragment storage store still end at the barrier, as in hazard mode. Needs the
         // draw-time RAW split; without it the mode falls back to "all".
         private static bool _barrierDeferred =
-            Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") == "deferred";
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_SCOPE") is not ("all" or "hazard");
         private static readonly bool _barrierDeferredDefault = _barrierDeferred;
 
         private static void RefreshBarrierScope()
