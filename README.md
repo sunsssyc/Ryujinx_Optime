@@ -20,7 +20,7 @@ codesign --entitlements distribution/macos/entitlements.xml -f -s - artifacts/te
 artifacts/terminal/Ryujinx-metal-local/Ryujinx --graphics-backend Metal
 ```
 
-所有修复默认开启，正常游玩不需要设置环境变量。王国之泪建议把 UltraCam Mod 的帧率上限设为 50，原因见使用指南。
+**首次运行前必须安装密钥和固件**，它们只能从你自己的 Switch 导出，步骤见使用指南第 3 节。所有修复默认开启，正常游玩不需要设置环境变量。王国之泪建议把 UltraCam Mod 的帧率上限设为 50，原因见使用指南。
 
 ---
 
