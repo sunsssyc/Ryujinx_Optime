@@ -7,6 +7,7 @@ using SharpMetal.Metal;
 using System;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -41,6 +42,14 @@ namespace Ryujinx.Graphics.Metal
         public ComputeSize ComputeLocalSize { get; }
 
         private HashTableSlim<PipelineUid, MTLRenderPipelineState> _graphicsPipelineCache;
+        // Asynchronous pipeline-state builds (PipelineState.CreateRenderPipeline): the keys
+        // whose build is in flight are render-thread state; the builds land on worker
+        // threads and are handed back through the queue, drained on the render thread
+        // before every cache lookup.
+        private HashTableSlim<PipelineUid, bool> _pendingGraphicsPipelines;
+        private readonly ConcurrentQueue<(PipelineUid Key, MTLRenderPipelineState Pipeline)> _completedGraphicsPipelines = new();
+        private int _inFlightGraphicsPipelineBuilds;
+        private volatile bool _disposed;
         private MTLComputePipelineState? _computePipelineCache;
         private bool _firstBackgroundUse;
         private string _debugLabel;
@@ -1609,8 +1618,60 @@ namespace Ryujinx.Graphics.Metal
             _computePipelineCache = pipeline;
         }
 
+        public bool IsGraphicsPipelinePending(ref PipelineUid key)
+        {
+            return _pendingGraphicsPipelines != null && _pendingGraphicsPipelines.TryGetValue(ref key, out _);
+        }
+
+        /// <summary>Render thread: a build for this key has been queued.</summary>
+        public void BeginGraphicsPipelineBuild(ref PipelineUid key)
+        {
+            (_pendingGraphicsPipelines ??= new()).Add(ref key, true);
+            Interlocked.Increment(ref _inFlightGraphicsPipelineBuilds);
+        }
+
+        /// <summary>Any thread: the queued build finished (a zero pipeline means it failed).</summary>
+        public void EndGraphicsPipelineBuild(ref PipelineUid key, MTLRenderPipelineState pipeline)
+        {
+            lock (_completedGraphicsPipelines)
+            {
+                if (_disposed)
+                {
+                    if (pipeline.NativePtr != IntPtr.Zero)
+                    {
+                        pipeline.Dispose();
+                    }
+                }
+                else
+                {
+                    _completedGraphicsPipelines.Enqueue((key, pipeline));
+                }
+            }
+
+            Interlocked.Decrement(ref _inFlightGraphicsPipelineBuilds);
+        }
+
+        private void DrainCompletedGraphicsPipelines()
+        {
+            while (_completedGraphicsPipelines.TryDequeue(out (PipelineUid Key, MTLRenderPipelineState Pipeline) done))
+            {
+                PipelineUid key = done.Key;
+
+                _pendingGraphicsPipelines?.Remove(ref key);
+
+                // Only cache valid pipeline states, as the synchronous path does; a failed
+                // build is retried by the next draw that needs it.
+                if (done.Pipeline.NativePtr != IntPtr.Zero)
+                {
+                    AddGraphicsPipeline(ref key, done.Pipeline);
+                }
+            }
+        }
+
         public bool TryGetGraphicsPipeline(ref PipelineUid key, out MTLRenderPipelineState pipeline)
         {
+            DrainCompletedGraphicsPipelines();
+
             if (_graphicsPipelineCache == null)
             {
                 pipeline = default;
@@ -1933,6 +1994,31 @@ namespace Ryujinx.Graphics.Metal
             if (!_renderer.Programs.Remove(this))
             {
                 return;
+            }
+
+            // A build still running on a worker thread reads this program's functions
+            // through its descriptor; let it finish before the functions go away. Builds
+            // take milliseconds, so the bound is only a safety net.
+            SpinWait waitBuilds = new();
+            long waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
+
+            while (Volatile.Read(ref _inFlightGraphicsPipelineBuilds) > 0 &&
+                   System.Diagnostics.Stopwatch.GetElapsedTime(waitStart).TotalSeconds < 2)
+            {
+                waitBuilds.SpinOnce();
+            }
+
+            lock (_completedGraphicsPipelines)
+            {
+                _disposed = true;
+
+                while (_completedGraphicsPipelines.TryDequeue(out (PipelineUid Key, MTLRenderPipelineState Pipeline) done))
+                {
+                    if (done.Pipeline.NativePtr != IntPtr.Zero)
+                    {
+                        done.Pipeline.Dispose();
+                    }
+                }
             }
 
             if (_graphicsPipelineCache != null)

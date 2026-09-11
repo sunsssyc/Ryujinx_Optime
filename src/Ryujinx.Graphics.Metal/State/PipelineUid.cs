@@ -149,7 +149,11 @@ namespace Ryujinx.Graphics.Metal
 
         public readonly override bool Equals(object obj)
         {
-            return obj is PipelineUid other && Equals(other);
+            // Equals(other) without the ref would bind to this very overload again and
+            // recurse forever, boxing on every level; nothing in the backend relied on
+            // it until a HashSet<PipelineUid> did (v489), and the GC scanning that stack
+            // froze the render thread.
+            return obj is PipelineUid other && Unsafe.AsRef(in this).Equals(ref other);
         }
 
         public bool Equals(ref PipelineUid other)

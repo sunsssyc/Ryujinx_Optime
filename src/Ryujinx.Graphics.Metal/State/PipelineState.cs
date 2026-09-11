@@ -4,6 +4,9 @@ using SharpMetal.Foundation;
 using SharpMetal.Metal;
 using System;
 using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Threading;
 using System.Runtime.Versioning;
 
 namespace Ryujinx.Graphics.Metal
@@ -263,11 +266,156 @@ namespace Ryujinx.Graphics.Metal
         public static long PsoComputeCreated;
         public static long PsoComputeTicks;
 
+        // Asynchronous pipeline-state builds (v489). The v403 probe measured a camera
+        // turn at ~1000 render pipeline builds in 22 s, 0.3 ms each when the OS shader
+        // cache hits, stacked 170-200 to a frame - a 24-75 ms frame from builds alone,
+        // about a quarter of the excess of the slow frames. A cache miss now creates the
+        // descriptor on the render thread (it reads the program and this state) and hands
+        // the driver build to the thread pool; the draw is skipped until the pipeline
+        // lands, exactly as a draw whose shaders are still compiling is skipped, and the
+        // dirty flag left set by the invalid pipeline retries it on the next draw.
+        // RYUJINX_METAL_ASYNC_PSO=0, or /tmp/ryujinx-metal-async-pso holding 0, restores
+        // the synchronous build. Compute pipelines stay synchronous (28 per session).
+        private static readonly bool _asyncPsoDefault = Environment.GetEnvironmentVariable("RYUJINX_METAL_ASYNC_PSO") != "0";
+        public static bool AsyncPso = _asyncPsoDefault;
+        public static long PsoRenderQueued;
+        public static long PsoRenderPendingSkips;
+
+        // Per-frame wait budget. A draw whose pipeline is still building waits for it,
+        // up to this many milliseconds per frame in total, before it is skipped. A build
+        // takes ~0.3 ms and the pool runs them in parallel, so the budget turns nearly
+        // every pending skip (v490: 6225 skipped draws for 2814 builds in 3.5 minutes,
+        // one missing object per skip) into a sub-millisecond wait while still bounding
+        // what a burst can cost a frame. RYUJINX_METAL_ASYNC_PSO_WAIT_MS, default 4;
+        // 0 never waits.
+        private static readonly long _asyncPsoWaitBudgetTicks =
+            (long)((double.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_ASYNC_PSO_WAIT_MS"), NumberStyles.Float, CultureInfo.InvariantCulture, out double waitMs) ? waitMs : 4.0) * Stopwatch.Frequency / 1000.0);
+        private static long _psoWaitSpentTicksThisFrame;
+        public static long PsoRenderWaited;
+        public static long PsoRenderWaitTicks;
+        public static long PsoFramePendingSkips;
+        public static long PsoFrameWaitTicks;
+
+        /// <summary>Once per presented frame: this frame's pending skips and wait time, and a fresh wait budget.</summary>
+        public static void TakeFrameCounters(out long pendingSkips, out long waitTicks)
+        {
+            pendingSkips = PsoFramePendingSkips;
+            waitTicks = PsoFrameWaitTicks;
+            PsoFramePendingSkips = 0;
+            PsoFrameWaitTicks = 0;
+            _psoWaitSpentTicksThisFrame = 0;
+        }
+
+        private MTLRenderPipelineState WaitForPendingPipeline(Program program)
+        {
+            long waitStart = Stopwatch.GetTimestamp();
+            SpinWait spin = new();
+
+            while (true)
+            {
+                if (program.TryGetGraphicsPipeline(ref Internal, out MTLRenderPipelineState built))
+                {
+                    long waited = Stopwatch.GetTimestamp() - waitStart;
+                    _psoWaitSpentTicksThisFrame += waited;
+                    PsoFrameWaitTicks += waited;
+                    PsoRenderWaitTicks += waited;
+                    PsoRenderWaited++;
+
+                    return built;
+                }
+
+                if (!program.IsGraphicsPipelinePending(ref Internal))
+                {
+                    // The build failed; the next draw that needs it queues it again.
+                    break;
+                }
+
+                long now = Stopwatch.GetTimestamp();
+
+                if (_psoWaitSpentTicksThisFrame + (now - waitStart) >= _asyncPsoWaitBudgetTicks)
+                {
+                    _psoWaitSpentTicksThisFrame += now - waitStart;
+                    PsoFrameWaitTicks += now - waitStart;
+                    break;
+                }
+
+                spin.SpinOnce(-1);
+            }
+
+            PsoRenderPendingSkips++;
+            PsoFramePendingSkips++;
+
+            return default;
+        }
+
+        public static void RefreshAsyncPso()
+        {
+            try
+            {
+                AsyncPso = File.Exists("/tmp/ryujinx-metal-async-pso")
+                    ? File.ReadAllText("/tmp/ryujinx-metal-async-pso").Trim() != "0"
+                    : _asyncPsoDefault;
+            }
+            catch (IOException)
+            {
+                // Raced with the writer; the next frame picks it up.
+            }
+        }
+
         public MTLRenderPipelineState CreateRenderPipeline(MTLDevice device, Program program)
         {
             if (program.TryGetGraphicsPipeline(ref Internal, out MTLRenderPipelineState pipelineState))
             {
                 return pipelineState;
+            }
+
+            if (AsyncPso)
+            {
+                if (!program.IsGraphicsPipelinePending(ref Internal))
+                {
+                    MTLRenderPipelineDescriptor asyncDescriptor = CreateRenderDescriptor(program);
+                    PipelineUid key = Internal;
+
+                    program.BeginGraphicsPipelineBuild(ref key);
+                    PsoRenderQueued++;
+
+                    ThreadPool.UnsafeQueueUserWorkItem(_ =>
+                    {
+                        NSError asyncError = new(IntPtr.Zero);
+                        long asyncStart = Stopwatch.GetTimestamp();
+                        MTLRenderPipelineState built = device.NewRenderPipelineState(asyncDescriptor, ref asyncError);
+                        long asyncTicks = Stopwatch.GetTimestamp() - asyncStart;
+
+                        asyncDescriptor.Dispose();
+
+                        Interlocked.Increment(ref PsoRenderCreated);
+                        Interlocked.Add(ref PsoRenderTicks, asyncTicks);
+
+                        if (asyncTicks > PsoRenderMaxTicks)
+                        {
+                            PsoRenderMaxTicks = asyncTicks;
+                        }
+
+                        if (asyncError != IntPtr.Zero)
+                        {
+                            Logger.Error?.PrintMsg(LogClass.Gpu, $"Failed to create Render Pipeline State: {StringHelper.String(asyncError.LocalizedDescription)}");
+                            built = default;
+                        }
+
+                        PipelineUid builtKey = key;
+                        program.EndGraphicsPipelineBuild(ref builtKey, built);
+                    }, null);
+                }
+
+                if (_asyncPsoWaitBudgetTicks > 0 && _psoWaitSpentTicksThisFrame < _asyncPsoWaitBudgetTicks)
+                {
+                    return WaitForPendingPipeline(program);
+                }
+
+                PsoRenderPendingSkips++;
+                PsoFramePendingSkips++;
+
+                return default;
             }
 
             using MTLRenderPipelineDescriptor descriptor = CreateRenderDescriptor(program);

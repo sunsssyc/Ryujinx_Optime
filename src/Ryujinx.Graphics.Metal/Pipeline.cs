@@ -68,6 +68,10 @@ namespace Ryujinx.Graphics.Metal
         private long _statsPsoWorstFrameTicks;
         private long _statsPsoWorstFrameCount;
         private long _lastStatsPsoRenderCreated;
+        private long _lastStatsPsoRenderQueued;
+        private long _lastStatsPsoPendingSkips;
+        private long _lastStatsPsoWaited;
+        private long _lastStatsPsoWaitTicks;
         private long _lastStatsPsoRenderTicks;
         private long _lastStatsPsoComputeCreated;
         private long _lastStatsPsoComputeTicks;
@@ -1309,6 +1313,7 @@ namespace Ryujinx.Graphics.Metal
             RefreshFbFetch();
             EncoderStateManager.RefreshRawDeclared();
             RefreshBarrierScope();
+            PipelineState.RefreshAsyncPso();
             EncoderStateManager.RefreshSplitScope();
             RefreshRawFence();
             _passIndexInFrame = 0;
@@ -1507,6 +1512,8 @@ namespace Ryujinx.Graphics.Metal
                 }
             }
 
+            PipelineState.TakeFrameCounters(out long framePsoSkips, out long framePsoWaitTicks);
+
             if (_frameLine)
             {
                 // One line per presented frame: the map flicker lasts about five frames
@@ -1519,7 +1526,8 @@ namespace Ryujinx.Graphics.Metal
                 Logger.Warning?.PrintMsg(LogClass.Gpu,
                     $"frameline f={_presentCount} t={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} " +
                     $"passes={fPasses} draws={fDraws} skipped={_skippedDraws} rawsplits={_rawSplits} " +
-                    $"pso={framePsoCreated}/{framePsoTicks * 1000.0 / Stopwatch.Frequency:F1}ms");
+                    $"pso={framePsoCreated}/{framePsoTicks * 1000.0 / Stopwatch.Frequency:F1}ms " +
+                    $"psoSkip={framePsoSkips} psoWait={framePsoWaitTicks * 1000.0 / Stopwatch.Frequency:F1}ms");
             }
 
             if (_presentCount % SyncStatsLogFrameInterval == 0)
@@ -1555,6 +1563,14 @@ namespace Ryujinx.Graphics.Metal
                 long psoFramesWithCreation = _statsPsoFramesWithCreation;
                 long psoWorstFrameTicks = _statsPsoWorstFrameTicks;
                 long psoWorstFrameCount = _statsPsoWorstFrameCount;
+                long psoRenderQueued = PipelineState.PsoRenderQueued - _lastStatsPsoRenderQueued;
+                long psoPendingSkips = PipelineState.PsoRenderPendingSkips - _lastStatsPsoPendingSkips;
+                long psoWaited = PipelineState.PsoRenderWaited - _lastStatsPsoWaited;
+                long psoWaitTicks = PipelineState.PsoRenderWaitTicks - _lastStatsPsoWaitTicks;
+                _lastStatsPsoWaited = PipelineState.PsoRenderWaited;
+                _lastStatsPsoWaitTicks = PipelineState.PsoRenderWaitTicks;
+                _lastStatsPsoRenderQueued = PipelineState.PsoRenderQueued;
+                _lastStatsPsoPendingSkips = PipelineState.PsoRenderPendingSkips;
                 _lastStatsPsoRenderCreated = PipelineState.PsoRenderCreated;
                 _lastStatsPsoRenderTicks = PipelineState.PsoRenderTicks;
                 _lastStatsPsoComputeCreated = PipelineState.PsoComputeCreated;
@@ -1592,7 +1608,7 @@ namespace Ryujinx.Graphics.Metal
                     // from a build that never had the change in it.
                     string configText =
                         $" config: splitScope={(EncoderStateManager.SplitScopePass ? "pass" : "cb")}, " +
-                        $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : _barrierDeferred ? "deferred" : "all")}, " +
+                        $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : _barrierDeferred ? "deferred" : "all")}, asyncPso={PipelineState.AsyncPso}, " +
                         $"markOnDraw={EncoderStateManager.MarkOnDrawActive}, " +
                         $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}, fbFetch={_fbFetch}, tileSnapshot={TileSnapshot.Enabled}/{TileSnapshot.Mode}.";
 
@@ -1648,6 +1664,7 @@ namespace Ryujinx.Graphics.Metal
                     string psoText =
                         $" pso compiles: {psoRenderCreated} render ({psoRenderTicks * tickMs:F1}ms, longest {psoRenderMaxTicks * tickMs:F1}ms), " +
                         $"{psoComputeCreated} compute ({psoComputeTicks * tickMs:F1}ms); " +
+                        $"async {(PipelineState.AsyncPso ? "on" : "off")}: {psoRenderQueued} queued, {psoWaited} waited ({psoWaitTicks * tickMs:F1}ms), {psoPendingSkips} draws skipped pending; " +
                         $"{psoFramesWithCreation} of {SyncStatsLogFrameInterval} frames compiled, " +
                         $"worst frame {psoWorstFrameCount} in {psoWorstFrameTicks * tickMs:F1}ms.";
 
