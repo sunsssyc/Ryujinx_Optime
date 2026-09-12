@@ -110,6 +110,8 @@ RYUJINX_METAL_BARRIER_SCOPE=all ./Ryujinx
 | `RYUJINX_METAL_BARRIER_SCOPE` | `deferred` | `all`：每个游戏纹理屏障都结束渲染通道，最保守、帧率略低；`hazard`：已撤回的旧策略，会复现雪山平台单帧消失，仅供诊断 |
 | `RYUJINX_METAL_ASYNC_PSO` | 开 | `0`：管线状态改回在渲染线程同步构建（转视角更卡，但新材质不会晚一帧出现） |
 | `RYUJINX_METAL_ASYNC_PSO_WAIT_MS` | `4` | 每帧最多等待后台构建的毫秒数，`0` 为不等直接跳过 |
+| `RYUJINX_METAL_ASYNC_PSO_FULLSCREEN_SYNC` | 开 | `0`：全屏绘制（3–6 顶点的后处理）也允许跳过；默认它们原地构建，避免整帧出错 |
+| `RYUJINX_METAL_ASYNC_PSO_BURST` | `64` | 一帧排队构建超过该数后剩余的原地构建（读档爆发）；`0` 关闭 |
 | `RYUJINX_METAL_SKIP_SELF_SPLIT` | 开 | `0`：关闭"自读放行"，更保守但慢很多 |
 | `RYUJINX_METAL_FB_FETCH` | 开 | `0`：关闭 framebuffer fetch（R32F 深度自读改走拆通道） |
 | `RYUJINX_METAL_BUFFER_MIRRORS` | 开 | `0`：关闭缓冲镜像写入 |
