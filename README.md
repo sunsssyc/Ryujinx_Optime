@@ -3,7 +3,7 @@
 这是 [Ryubing 版 Ryujinx](https://git.ryujinx.app/ryubing/ryujinx) 1.3.3 的一个个人分支，加了一个**原生 Metal 渲染后端**，主要针对《塞尔达传说：王国之泪》1.4.2 在 Apple Silicon Mac 上调优，修掉了一批画面、稳定性和性能问题。Metal 后端仍是实验性的。
 
 - **主分支**：`codex/native-metal-backend`
-- **测试环境**：Apple M1 Max，macOS 26.5
+- **测试环境**：Apple M1 Max，macOS 26.5 32内存
 - **本地使用指南**：[docs/METAL_FORK_GUIDE.md](docs/METAL_FORK_GUIDE.md)，包括编译、签名、启动、推荐设置、调试开关和问题反馈
 - **修复说明**：[docs/METAL_FIXES.md](docs/METAL_FIXES.md)，每个修复的现象、原因、提交号，以及已知问题
 
