@@ -72,6 +72,7 @@ namespace Ryujinx.Graphics.Metal
         private long _lastStatsPsoPendingSkips;
         private long _lastStatsPsoWaited;
         private long _lastStatsPsoWaitTicks;
+        private long _lastStatsPsoSyncFallbacks;
         private long _lastStatsPsoRenderTicks;
         private long _lastStatsPsoComputeCreated;
         private long _lastStatsPsoComputeTicks;
@@ -1569,6 +1570,8 @@ namespace Ryujinx.Graphics.Metal
                 long psoWaitTicks = PipelineState.PsoRenderWaitTicks - _lastStatsPsoWaitTicks;
                 _lastStatsPsoWaited = PipelineState.PsoRenderWaited;
                 _lastStatsPsoWaitTicks = PipelineState.PsoRenderWaitTicks;
+                long psoSyncFallbacks = PipelineState.PsoRenderSyncFallbacks - _lastStatsPsoSyncFallbacks;
+                _lastStatsPsoSyncFallbacks = PipelineState.PsoRenderSyncFallbacks;
                 _lastStatsPsoRenderQueued = PipelineState.PsoRenderQueued;
                 _lastStatsPsoPendingSkips = PipelineState.PsoRenderPendingSkips;
                 _lastStatsPsoRenderCreated = PipelineState.PsoRenderCreated;
@@ -1664,7 +1667,7 @@ namespace Ryujinx.Graphics.Metal
                     string psoText =
                         $" pso compiles: {psoRenderCreated} render ({psoRenderTicks * tickMs:F1}ms, longest {psoRenderMaxTicks * tickMs:F1}ms), " +
                         $"{psoComputeCreated} compute ({psoComputeTicks * tickMs:F1}ms); " +
-                        $"async {(PipelineState.AsyncPso ? "on" : "off")}: {psoRenderQueued} queued, {psoWaited} waited ({psoWaitTicks * tickMs:F1}ms), {psoPendingSkips} draws skipped pending; " +
+                        $"async {(PipelineState.AsyncPso ? "on" : "off")}: {psoRenderQueued} queued, {psoWaited} waited ({psoWaitTicks * tickMs:F1}ms), {psoPendingSkips} draws skipped pending, {psoSyncFallbacks} built in place (fullscreen/burst); " +
                         $"{psoFramesWithCreation} of {SyncStatsLogFrameInterval} frames compiled, " +
                         $"worst frame {psoWorstFrameCount} in {psoWorstFrameTicks * tickMs:F1}ms.";
 
@@ -2378,6 +2381,8 @@ namespace Ryujinx.Graphics.Metal
                 return;
             }
 
+            PipelineState.CurrentDrawVertices = vertexCount;
+
             NoteAttachmentWriter();
 
             if (_encoderStateManager.RenderProgram?.FragmentWritesStorage == true) { _passHasFragmentStore = true; _encoderStateManager.NoteFragmentStorageWrites(); }
@@ -2583,6 +2588,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndexed(int indexCount, int instanceCount, int firstIndex, int firstVertex, int firstInstance)
         {
+            PipelineState.CurrentDrawVertices = indexCount;
+
             if (_watchEncode && _encoderStateManager.RenderProgram?.IsWatchedMapShader == true)
             {
                 // The one draw that composites the Depths map is issued on every frame and
@@ -2763,6 +2770,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndexedIndirectOffset(BufferRange indirectBuffer, int offset = 0)
         {
+            PipelineState.CurrentDrawVertices = int.MaxValue;
+
             // Indirect draws write attachments too; the writer census had only the direct
             // entry points and never saw a target painted through here.
             NoteAttachmentWriter();
@@ -2825,6 +2834,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawIndirectOffset(BufferRange indirectBuffer, int offset = 0)
         {
+            PipelineState.CurrentDrawVertices = int.MaxValue;
+
             // Indirect draws write attachments too; the writer census had only the direct
             // entry points and never saw a target painted through here.
             NoteAttachmentWriter();
@@ -2869,6 +2880,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void DrawTexture(ITexture texture, ISampler sampler, Extents2DF srcRegion, Extents2DF dstRegion)
         {
+            PipelineState.CurrentDrawVertices = 4;
+
             NoteAttachmentWriter();
             _renderer.HelperShader.DrawTexture(texture, sampler, srcRegion, dstRegion);
         }

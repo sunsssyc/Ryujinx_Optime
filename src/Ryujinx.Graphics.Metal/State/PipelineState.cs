@@ -291,6 +291,17 @@ namespace Ryujinx.Graphics.Metal
         private static readonly long _asyncPsoWaitBudgetTicks =
             (long)((double.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_ASYNC_PSO_WAIT_MS"), NumberStyles.Float, CultureInfo.InvariantCulture, out double waitMs) ? waitMs : 4.0) * Stopwatch.Frequency / 1000.0);
         private static long _psoWaitSpentTicksThisFrame;
+        // Vertex (or index) count of the draw being prepared, set by the Pipeline draw
+        // entry points; int.MaxValue for indirect draws. 3-6 means a fullscreen pass.
+        public static int CurrentDrawVertices = int.MaxValue;
+        // RYUJINX_METAL_ASYNC_PSO_FULLSCREEN_SYNC=0 lets fullscreen draws skip like the rest;
+        // RYUJINX_METAL_ASYNC_PSO_BURST=N (default 64, 0 off) is the per-frame queue count
+        // past which the frame builds the rest synchronously.
+        private static readonly bool _fullscreenSync = Environment.GetEnvironmentVariable("RYUJINX_METAL_ASYNC_PSO_FULLSCREEN_SYNC") != "0";
+        private static readonly int _burstSyncThreshold =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_ASYNC_PSO_BURST"), out int burst) ? burst : 64;
+        private static int _psoFrameQueued;
+        public static long PsoRenderSyncFallbacks;
         public static long PsoRenderWaited;
         public static long PsoRenderWaitTicks;
         public static long PsoFramePendingSkips;
@@ -304,9 +315,10 @@ namespace Ryujinx.Graphics.Metal
             PsoFramePendingSkips = 0;
             PsoFrameWaitTicks = 0;
             _psoWaitSpentTicksThisFrame = 0;
+            _psoFrameQueued = 0;
         }
 
-        private MTLRenderPipelineState WaitForPendingPipeline(Program program)
+        private MTLRenderPipelineState WaitForPendingPipeline(Program program, bool unbounded)
         {
             long waitStart = Stopwatch.GetTimestamp();
             SpinWait spin = new();
@@ -332,7 +344,7 @@ namespace Ryujinx.Graphics.Metal
 
                 long now = Stopwatch.GetTimestamp();
 
-                if (_psoWaitSpentTicksThisFrame + (now - waitStart) >= _asyncPsoWaitBudgetTicks)
+                if (!unbounded && _psoWaitSpentTicksThisFrame + (now - waitStart) >= _asyncPsoWaitBudgetTicks)
                 {
                     _psoWaitSpentTicksThisFrame += now - waitStart;
                     PsoFrameWaitTicks += now - waitStart;
@@ -371,13 +383,42 @@ namespace Ryujinx.Graphics.Metal
 
             if (AsyncPso)
             {
-                if (!program.IsGraphicsPipelinePending(ref Internal))
+                // Two draws must not be skipped: a fullscreen one (3-6 vertices: the
+                // post-processing, exposure and tonemap passes - skipping one of those
+                // paints the whole frame wrong, the white flashes reported on v490/v491),
+                // and any draw once a frame has queued more than the burst threshold,
+                // which is a scene load rather than a turn (v491 skipped 1974 draws in
+                // the 120 frames after a load). Those build in place, or wait without a
+                // budget for the build already in flight.
+                bool mustHave = (_fullscreenSync && CurrentDrawVertices <= 6) ||
+                                (_burstSyncThreshold > 0 && _psoFrameQueued >= _burstSyncThreshold);
+
+                if (program.IsGraphicsPipelinePending(ref Internal))
+                {
+                    if (mustHave)
+                    {
+                        return WaitForPendingPipeline(program, unbounded: true);
+                    }
+
+                    if (_asyncPsoWaitBudgetTicks > 0 && _psoWaitSpentTicksThisFrame < _asyncPsoWaitBudgetTicks)
+                    {
+                        return WaitForPendingPipeline(program, unbounded: false);
+                    }
+
+                    PsoRenderPendingSkips++;
+                    PsoFramePendingSkips++;
+
+                    return default;
+                }
+
+                if (!mustHave)
                 {
                     MTLRenderPipelineDescriptor asyncDescriptor = CreateRenderDescriptor(program);
                     PipelineUid key = Internal;
 
                     program.BeginGraphicsPipelineBuild(ref key);
                     PsoRenderQueued++;
+                    _psoFrameQueued++;
 
                     ThreadPool.UnsafeQueueUserWorkItem(_ =>
                     {
@@ -405,17 +446,20 @@ namespace Ryujinx.Graphics.Metal
                         PipelineUid builtKey = key;
                         program.EndGraphicsPipelineBuild(ref builtKey, built);
                     }, null);
+
+                    if (_asyncPsoWaitBudgetTicks > 0 && _psoWaitSpentTicksThisFrame < _asyncPsoWaitBudgetTicks)
+                    {
+                        return WaitForPendingPipeline(program, unbounded: false);
+                    }
+
+                    PsoRenderPendingSkips++;
+                    PsoFramePendingSkips++;
+
+                    return default;
                 }
 
-                if (_asyncPsoWaitBudgetTicks > 0 && _psoWaitSpentTicksThisFrame < _asyncPsoWaitBudgetTicks)
-                {
-                    return WaitForPendingPipeline(program);
-                }
-
-                PsoRenderPendingSkips++;
-                PsoFramePendingSkips++;
-
-                return default;
+                // Fullscreen or burst: the synchronous build below, counted.
+                PsoRenderSyncFallbacks++;
             }
 
             using MTLRenderPipelineDescriptor descriptor = CreateRenderDescriptor(program);
