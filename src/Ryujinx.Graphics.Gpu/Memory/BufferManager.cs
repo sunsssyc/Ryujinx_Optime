@@ -103,6 +103,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
         private readonly BuffersPerStage _cpUniformBuffers;
         private readonly BuffersPerStage[] _gpStorageBuffers;
         private readonly BuffersPerStage[] _gpUniformBuffers;
+        private readonly Engine.GPFifo.UniformSubmitSnapshot.Ref[][] _gpUniformSnapshots;
+        private SnapshotStagingTarget _snapshotTarget;
+        private long _uniformSnapshotBatch;
+        private int _uniformSnapshotGeneration;
+        private int _uniformSnapshotGpuWrites;
 
         private bool _gpStorageBuffersDirty;
         private bool _gpUniformBuffersDirty;
@@ -134,11 +139,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
             _gpStorageBuffers = new BuffersPerStage[Constants.ShaderStages];
             _gpUniformBuffers = new BuffersPerStage[Constants.ShaderStages];
+            _gpUniformSnapshots = new Engine.GPFifo.UniformSubmitSnapshot.Ref[Constants.ShaderStages][];
 
             for (int index = 0; index < Constants.ShaderStages; index++)
             {
                 _gpStorageBuffers[index] = new BuffersPerStage(Constants.TotalGpStorageBuffers);
                 _gpUniformBuffers[index] = new BuffersPerStage(Constants.TotalGpUniformBuffers);
+                _gpUniformSnapshots[index] = new Engine.GPFifo.UniformSubmitSnapshot.Ref[Constants.TotalGpUniformBuffers];
             }
 
             _bufferTextures = [];
@@ -320,8 +327,70 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             MultiRange range = _channel.MemoryManager.Physical.BufferCache.TranslateAndCreateBuffer(_channel.MemoryManager, gpuVa, size, BufferStageUtils.FromShaderStage(stage));
 
+            _gpUniformSnapshots[stage][index] = Engine.GPFifo.UniformSubmitSnapshot.Capture(gpuVa, size);
             _gpUniformBuffers[stage].SetBounds(index, range);
             _gpUniformBuffersDirty = true;
+        }
+
+        /// <summary>
+        /// The range a draw binds for a uniform buffer linked to the copy taken when its batch was submitted: the
+        /// uploaded copy, or <paramref name="range"/> when the copy cannot be used. Guest memory may already hold the
+        /// next frame's data; the copy holds what the batch was submitted with.
+        /// </summary>
+        private BufferRange SubstituteUniformSnapshot(in Engine.GPFifo.UniformSubmitSnapshot.Ref snapshot, BufferBounds bounds, BufferRange range, bool gpuModified)
+        {
+            if (!snapshot.IsCurrent || bounds.Range.Count != 1)
+            {
+                return range;
+            }
+
+            if (gpuModified)
+            {
+                // The host buffer holds GPU writes that guest memory, and so the copy, does not have yet.
+                Engine.GPFifo.UniformSubmitSnapshot.CountSkippedGpuModified();
+                return range;
+            }
+
+            _snapshotTarget ??= new SnapshotStagingTarget(_context.Renderer);
+
+            BufferRange staged = Engine.GPFifo.UniformSubmitSnapshot.Bind(snapshot, bounds.Range.GetSubRange(0).Address, _snapshotTarget, out int generation);
+
+            if (staged.Handle == BufferHandle.Null)
+            {
+                return range;
+            }
+
+            if (_uniformSnapshotBatch == 0)
+            {
+                _uniformSnapshotBatch = snapshot.BatchId;
+                _uniformSnapshotGeneration = generation;
+            }
+
+            return staged;
+        }
+
+        /// <summary>
+        /// Deletes the host buffers holding uniform snapshot copies, when the channel is destroyed.
+        /// </summary>
+        public void DisposeUniformSnapshots()
+        {
+            _snapshotTarget?.Pool.Release(_snapshotTarget);
+            _snapshotTarget = null;
+        }
+
+        private sealed class SnapshotStagingTarget : Engine.GPFifo.UniformSubmitSnapshot.IStagingTarget
+        {
+            private readonly IRenderer _renderer;
+
+            public SnapshotStagingTarget(IRenderer renderer) => _renderer = renderer;
+
+            public Engine.GPFifo.UniformSubmitSnapshot.StagingPool Pool { get; } = new();
+
+            public BufferHandle Create(int size) => _renderer.CreateBuffer(size);
+
+            public void Write(BufferHandle handle, int offset, ReadOnlySpan<byte> data) => _renderer.SetBufferData(handle, offset, data);
+
+            public void Delete(BufferHandle handle) => _renderer.DeleteBuffer(handle);
         }
 
         /// <summary>
@@ -718,9 +787,20 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 UpdateBuffers(_gpStorageBuffers);
             }
 
-            if (_gpUniformBuffersDirty || _rebind)
+            // Uniform buffers bound from submitted copies stay bound only while their batch executes unchanged.
+            bool snapshotsStale = _uniformSnapshotBatch != 0 &&
+                !Engine.GPFifo.UniformSubmitSnapshot.BindingsStillValid(_uniformSnapshotBatch, _uniformSnapshotGeneration, _uniformSnapshotGpuWrites);
+
+            if (_gpUniformBuffersDirty || _rebind || snapshotsStale)
             {
+                if (!_gpUniformBuffersDirty && !_rebind)
+                {
+                    Engine.GPFifo.UniformSubmitSnapshot.CountForcedRebind();
+                }
+
                 _gpUniformBuffersDirty = false;
+                _uniformSnapshotBatch = 0;
+                _uniformSnapshotGpuWrites = Engine.GPFifo.UniformSubmitSnapshot.GpuWrites;
 
                 BindBuffers(bufferCache, _gpUniformBuffers, isStorage: false);
             }
@@ -763,9 +843,18 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     if (!bounds.IsUnmapped)
                     {
                         bool isWrite = (bounds.Flags & BufferUsageFlags.Write) == BufferUsageFlags.Write;
+                        bool snapshotLinked = !isStorage && _gpUniformSnapshots[(int)stage - 1][bindingInfo.Slot].Batch != null;
+                        bool gpuModified = false;
                         BufferRange range = isStorage
                             ? bufferCache.GetBufferRangeAligned(bounds.Range, bufferStage | BufferStageUtils.FromUsage(bounds.Flags), isWrite)
-                            : bufferCache.GetBufferRange(bounds.Range, bufferStage);
+                            : snapshotLinked
+                                ? bufferCache.GetBufferRange(bounds.Range, bufferStage, out gpuModified)
+                                : bufferCache.GetBufferRange(bounds.Range, bufferStage);
+
+                        if (snapshotLinked)
+                        {
+                            range = SubstituteUniformSnapshot(_gpUniformSnapshots[(int)stage - 1][bindingInfo.Slot], bounds, range, gpuModified);
+                        }
 
                         ranges[rangesCount++] = new BufferAssignment(bindingInfo.Binding, range);
                     }

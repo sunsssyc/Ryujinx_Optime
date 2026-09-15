@@ -137,6 +137,7 @@ namespace Ryujinx.Graphics.Gpu
         {
             _processor.Dispose();
             TextureManager.Dispose();
+            BufferManager.DisposeUniformSnapshots();
 
             MemoryManager oldMemoryManager = Interlocked.Exchange(ref _memoryManager, null);
             if (oldMemoryManager != null)

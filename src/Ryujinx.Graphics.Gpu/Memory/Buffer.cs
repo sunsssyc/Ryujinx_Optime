@@ -366,6 +366,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="stage">Buffer stage that triggered the modification</param>
         public void SignalModified(ulong address, ulong size, BufferStage stage)
         {
+            // Uniform buffers bound from submitted copies must be bound again: the copies lack this write.
+            Engine.GPFifo.UniformSubmitSnapshot.NoteGpuWrite();
+
             EnsureRangeList();
 
             TryQueueBackingChange(stage);

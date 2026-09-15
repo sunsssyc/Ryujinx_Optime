@@ -53,6 +53,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
 
         private DmaState _state;
 
+        /// <summary>
+        /// Submission-side decoder for <see cref="UniformSubmitSnapshot"/>, used only by the thread pushing entries.
+        /// </summary>
+        internal readonly UniformSubmitSnapshot.Decoder SubmitDecoder = new();
+
         private readonly ThreedClass _3dClass;
         private readonly ComputeClass _computeClass;
         private readonly InlineToMemoryClass _i2mClass;

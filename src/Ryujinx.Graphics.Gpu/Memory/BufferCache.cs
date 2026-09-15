@@ -842,6 +842,30 @@ namespace Ryujinx.Graphics.Gpu.Memory
         }
 
         /// <summary>
+        /// Gets a buffer sub-range for reading a given memory range, and whether the GPU wrote to the range
+        /// without the write having been flushed back to guest memory yet.
+        /// </summary>
+        /// <param name="range">Physical regions of memory where the buffer is mapped</param>
+        /// <param name="stage">Buffer stage that triggered the access</param>
+        /// <param name="gpuModified">True if the host buffer holds GPU writes newer than guest memory in the range, or the range is split</param>
+        /// <returns>The buffer sub-range for the given range</returns>
+        public BufferRange GetBufferRange(MultiRange range, BufferStage stage, out bool gpuModified)
+        {
+            if (range.Count > 1)
+            {
+                gpuModified = true;
+
+                return GetBuffer(range, stage, false).GetRange(range);
+            }
+
+            MemoryRange subRange = range.GetSubRange(0);
+            Buffer buffer = GetBuffer(subRange.Address, subRange.Size, stage, false);
+            gpuModified = buffer.IsModified(subRange.Address, subRange.Size);
+
+            return buffer.GetRange(subRange.Address, subRange.Size, false);
+        }
+
+        /// <summary>
         /// Gets a buffer for a given memory range.
         /// A buffer overlapping with the specified range is assumed to already exist on the cache.
         /// </summary>

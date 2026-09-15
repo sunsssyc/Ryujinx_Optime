@@ -119,6 +119,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 if (memoryManager.Physical.WriteWithRedundancyCheck(_ubBeginCpuAddress, data))
                 {
                     memoryManager.Physical.BufferCache.ForceDirty(memoryManager, _ubFollowUpAddress - _ubByteCount, _ubByteCount);
+                    GPFifo.UniformSubmitSnapshot.InvalidateCurrent(_ubFollowUpAddress - _ubByteCount, _ubByteCount);
                 }
 
                 _ubFollowUpAddress = 0;
