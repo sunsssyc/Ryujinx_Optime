@@ -40,6 +40,13 @@ namespace Ryujinx.Common
         public static void IncrementClear() => Interlocked.Increment(ref _clears);
         public static void IncrementDraw() => Interlocked.Increment(ref _draws);
 
+        // Extra host syncs from the sync-cadence experiment (RYUJINX_GPU_SYNC_EVERY_DRAWS),
+        // counted here so the Metal stats line can report them without the backend having
+        // to see the GPU core.
+        private static long _extraSyncs;
+        public static void IncrementExtraSync() => Interlocked.Increment(ref _extraSyncs);
+        public static long SnapshotAndResetExtraSync() => Interlocked.Exchange(ref _extraSyncs, 0);
+
         /// <summary>Indirect draws - the first draw counter missed these entirely.</summary>
         private static int _indirectDraws;
 

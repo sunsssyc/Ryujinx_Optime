@@ -390,6 +390,61 @@ namespace Ryujinx.Graphics.Gpu
         /// If no actions are present, a host sync object is not created.
         /// </summary>
         /// <param name="flags">Modifiers for how host sync should be created</param>
+        /// <summary>
+        /// Experiment (2026-09-17): a host sync every N draws, on top of the ones the guest
+        /// asks for. A buffer range records the sync number current when the GPU wrote it,
+        /// and a guest read of that range waits for that sync - which means waiting for
+        /// every command buffer up to the point where that sync was eventually created, not
+        /// for the one that did the write. The guest creates about 4 syncs a frame against
+        /// 17 command buffers, so a wait can be several command buffers coarser than the
+        /// dependency it is really expressing; this knob shortens that distance so the cost
+        /// of the coarseness can be measured. 0 (default) is off, and
+        /// /tmp/ryujinx-gpu-sync-every-draws holds the value while the game runs.
+        /// It is not free: every extra sync runs the registered flush actions.
+        /// </summary>
+        private static int _syncEveryDraws =
+            int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_GPU_SYNC_EVERY_DRAWS"), out int sed) ? sed : 0;
+        private static readonly int _syncEveryDrawsDefault = _syncEveryDraws;
+        private int _drawsSinceSync;
+        private static long _extraSyncs;
+
+        public static void RefreshSyncEveryDraws()
+        {
+            try
+            {
+                string text = System.IO.File.Exists("/tmp/ryujinx-gpu-sync-every-draws")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-gpu-sync-every-draws").Trim()
+                    : null;
+
+                _syncEveryDraws = int.TryParse(text, out int v) && v >= 0 ? v : _syncEveryDrawsDefault;
+            }
+            catch (System.IO.IOException)
+            {
+                // Raced with the writer; the next frame picks it up.
+            }
+        }
+
+        public static long TakeExtraSyncs() => System.Threading.Interlocked.Exchange(ref _extraSyncs, 0);
+
+        public static int SyncEveryDraws => _syncEveryDraws;
+
+        /// <summary>Called after each draw; creates an extra host sync every N draws when the knob is on.</summary>
+        internal void NoteDrawForSyncCadence()
+        {
+            if (_syncEveryDraws <= 0)
+            {
+                return;
+            }
+
+            if (++_drawsSinceSync >= _syncEveryDraws)
+            {
+                _drawsSinceSync = 0;
+                System.Threading.Interlocked.Increment(ref _extraSyncs);
+                Ryujinx.Common.SyncMemDiag.IncrementExtraSync();
+                CreateHostSyncIfNeeded(HostSyncFlags.Force, HostSyncCreateSource.Unknown);
+            }
+        }
+
         internal void CreateHostSyncIfNeeded(HostSyncFlags flags, HostSyncCreateSource source = HostSyncCreateSource.Unknown)
         {
             bool syncPoint = (flags & HostSyncFlags.Syncpoint) == HostSyncFlags.Syncpoint;

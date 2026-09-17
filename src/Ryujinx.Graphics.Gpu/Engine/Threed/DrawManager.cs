@@ -895,6 +895,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 }
             }
 
+            _context.NoteDrawForSyncCadence();
         }
 
         /// <summary>

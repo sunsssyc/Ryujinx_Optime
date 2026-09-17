@@ -225,6 +225,8 @@ namespace Ryujinx.Graphics.Gpu
         /// <param name="swapBuffersCallback">Callback method to call when a new texture should be presented on the screen</param>
         public void Present(Action swapBuffersCallback)
         {
+            GpuContext.RefreshSyncEveryDraws();
+
             _context.AdvanceSequence();
 
             if (_frameLine)

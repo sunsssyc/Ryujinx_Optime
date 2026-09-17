@@ -1698,7 +1698,8 @@ namespace Ryujinx.Graphics.Metal
                         $"{psoComputeCreated} compute ({psoComputeTicks * tickMs:F1}ms); " +
                         $"async {(PipelineState.AsyncPso ? "on" : "off")}: {psoRenderQueued} queued, {psoWaited} waited ({psoWaitTicks * tickMs:F1}ms), {psoPendingSkips} draws skipped pending, {psoSyncFallbacks} built in place (fullscreen/burst); " +
                         $"{psoFramesWithCreation} of {SyncStatsLogFrameInterval} frames compiled, " +
-                        $"worst frame {psoWorstFrameCount} in {psoWorstFrameTicks * tickMs:F1}ms." + CounterManager.TakeStats();
+                        $"worst frame {psoWorstFrameCount} in {psoWorstFrameTicks * tickMs:F1}ms." + CounterManager.TakeStats() +
+                        (Ryujinx.Common.SyncMemDiag.SnapshotAndResetExtraSync() is long extraSyncs && extraSyncs != 0 ? $" extra syncs: {extraSyncs}." : string.Empty);
 
                     Logger.Info?.PrintMsg(
                         LogClass.Gpu,
