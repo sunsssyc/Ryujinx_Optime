@@ -139,6 +139,7 @@ rm /tmp/ryujinx-metal-barrier-scope
 | `/tmp/ryujinx-metal-barrier-scope` | `deferred` / `all` / `hazard` |
 | `/tmp/ryujinx-metal-async-pso` | `1` 开 / `0` 关 |
 | `/tmp/ryujinx-metal-counter-in-pass` | `1` 开 / `0` 关（遮挡查询是否在通道内切换） |
+| `/tmp/ryujinx-gpu-sync-every-draws` | 每 N 次绘制额外建一个同步点，`0`/删除为关（诊断用，实测无收益） |
 | `/tmp/ryujinx-metal-skip-self-split` | `1` 开 / `0` 关 |
 | `/tmp/ryujinx-metal-fb-fetch` | `1` 开 / `0` 关 |
 | `/tmp/ryujinx-metal-state-cache` | `0`–`3` |
