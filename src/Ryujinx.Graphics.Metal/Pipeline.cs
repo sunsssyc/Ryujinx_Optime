@@ -1099,6 +1099,8 @@ namespace Ryujinx.Graphics.Metal
 
         public void EndCurrentPass(PassEndReason reason = PassEndReason.Unspecified)
         {
+            _renderer.Counters?.NotePassEnded();
+
             if (_encoderFence && CurrentEncoderType == EncoderType.Render)
             {
                 if (_encFence.NativePtr == IntPtr.Zero)
@@ -1218,6 +1220,32 @@ namespace Ryujinx.Graphics.Metal
             return _renderer.Counters.PrepareRenderPass(descriptor, Cbs);
         }
 
+        /// <summary>
+        /// A guest counter report or reset used to end the render pass, because the new
+        /// counter had a result buffer of its own and a pass binds exactly one. With every
+        /// counter in a slot of the same buffer the encoder can just be pointed at the new
+        /// slot: draws already encoded keep the offset they were issued with, so the split
+        /// they used to need buys nothing. False when there is no open render pass, when the
+        /// pass belongs to the coverage probe, or when the slot pool is exhausted - the
+        /// caller ends the pass as before.
+        /// </summary>
+        public bool TrySwitchCounterInPass()
+        {
+            if (Cbs.Encoders.CurrentEncoderType != EncoderType.Render ||
+                !_renderer.Counters.PassBoundSlotBuffer ||
+                !_renderer.Counters.TryGetCurrentSlotOffset(Cbs, out ulong offset))
+            {
+                CounterManager.NotePassEndFallback();
+
+                return false;
+            }
+
+            Cbs.Encoders.RenderEncoder.SetVisibilityResultMode(MTLVisibilityResultMode.Counting, offset);
+            CounterManager.NoteInPassSwitch();
+
+            return true;
+        }
+
         public MTLComputeCommandEncoder CreateComputeCommandEncoder()
         {
             return _encoderStateManager.CreateComputeCommandEncoder();
@@ -1315,6 +1343,7 @@ namespace Ryujinx.Graphics.Metal
             EncoderStateManager.RefreshRawDeclared();
             RefreshBarrierScope();
             PipelineState.RefreshAsyncPso();
+            CounterManager.RefreshToggle();
             EncoderStateManager.RefreshSplitScope();
             RefreshRawFence();
             _passIndexInFrame = 0;
@@ -1669,7 +1698,7 @@ namespace Ryujinx.Graphics.Metal
                         $"{psoComputeCreated} compute ({psoComputeTicks * tickMs:F1}ms); " +
                         $"async {(PipelineState.AsyncPso ? "on" : "off")}: {psoRenderQueued} queued, {psoWaited} waited ({psoWaitTicks * tickMs:F1}ms), {psoPendingSkips} draws skipped pending, {psoSyncFallbacks} built in place (fullscreen/burst); " +
                         $"{psoFramesWithCreation} of {SyncStatsLogFrameInterval} frames compiled, " +
-                        $"worst frame {psoWorstFrameCount} in {psoWorstFrameTicks * tickMs:F1}ms.";
+                        $"worst frame {psoWorstFrameCount} in {psoWorstFrameTicks * tickMs:F1}ms." + CounterManager.TakeStats();
 
                     Logger.Info?.PrintMsg(
                         LogClass.Gpu,

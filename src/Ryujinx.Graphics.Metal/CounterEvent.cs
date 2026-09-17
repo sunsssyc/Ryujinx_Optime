@@ -16,6 +16,10 @@ namespace Ryujinx.Graphics.Metal
         private readonly List<MTLBuffer> _buffers = [];
 
         private MTLBuffer _activeBuffer;
+        // Slot of the manager's shared visibility buffer, or -1 when this counter owns a
+        // buffer of its own (slot mode off, or the pool was exhausted).
+        private int _activeSlot = -1;
+        private readonly List<int> _slots = [];
         private EventHandler<ulong> _resultHandler;
         private double _divisor;
 
@@ -31,12 +35,59 @@ namespace Ryujinx.Graphics.Metal
             Completed = manager == null;
         }
 
+        /// <summary>This counter accumulates into the manager's shared slot buffer.</summary>
+        internal bool UsesSlotBuffer => _activeSlot >= 0;
+
+        /// <summary>
+        /// Give this counter a slot of the shared buffer the open pass already bound, so a
+        /// counter change needs no new pass. The pass's command buffer has to wait on this
+        /// counter too: from here on its draws accumulate into this slot.
+        /// </summary>
+        internal bool TryBindToSlotBuffer(CommandBufferScoped cbs, out ulong offset)
+        {
+            if (_activeBuffer.NativePtr == IntPtr.Zero)
+            {
+                if (!_manager.TryRentSlot(out int slot))
+                {
+                    offset = 0;
+
+                    return false;
+                }
+
+                _activeSlot = slot;
+                _slots.Add(slot);
+                _activeBuffer = _manager.SlotBuffer;
+                cbs.AddWaitable(_waitable);
+            }
+            else if (_activeSlot < 0)
+            {
+                // Already writing a buffer of its own; it cannot move mid-pass.
+                offset = 0;
+
+                return false;
+            }
+
+            offset = (ulong)_activeSlot * sizeof(ulong);
+
+            return true;
+        }
+
         internal ulong PrepareRenderPass(MTLRenderPassDescriptor descriptor, CommandBufferScoped cbs)
         {
             if (_activeBuffer.NativePtr == IntPtr.Zero)
             {
-                _activeBuffer = _manager.RentResultBuffer();
-                _buffers.Add(_activeBuffer);
+                if (_manager.TryRentSlot(out int slot))
+                {
+                    _activeSlot = slot;
+                    _slots.Add(slot);
+                    _activeBuffer = _manager.SlotBuffer;
+                }
+                else
+                {
+                    _activeSlot = -1;
+                    _activeBuffer = _manager.RentResultBuffer();
+                    _buffers.Add(_activeBuffer);
+                }
             }
 
             // The same counter can span many Metal render encoders. macOS 26's
@@ -49,7 +100,7 @@ namespace Ryujinx.Graphics.Metal
             // command-buffer slot before the guest asks for the counter.
             cbs.AddWaitable(_waitable);
 
-            return 0;
+            return _activeSlot >= 0 ? (ulong)_activeSlot * sizeof(ulong) : 0;
         }
 
         internal void Reset()
@@ -58,6 +109,7 @@ namespace Ryujinx.Graphics.Metal
             // post-reset interval a fresh result buffer and retain older buffers until
             // all their command buffers complete.
             _activeBuffer = default;
+            _activeSlot = -1;
             ClearCounter = true;
         }
 
@@ -84,6 +136,11 @@ namespace Ryujinx.Graphics.Metal
                 return 0;
             }
 
+            if (_activeSlot >= 0)
+            {
+                return _manager.ReadSlot(_activeSlot);
+            }
+
             long result = Marshal.ReadInt64(_activeBuffer.Contents);
 
             return result > 0 ? (ulong)result : 0;
@@ -107,8 +164,15 @@ namespace Ryujinx.Graphics.Metal
                 _manager.ReturnResultBuffer(buffer);
             }
 
+            foreach (int slot in _slots)
+            {
+                _manager.ReturnSlot(slot);
+            }
+
+            _slots.Clear();
             _buffers.Clear();
             _activeBuffer = default;
+            _activeSlot = -1;
         }
 
         public bool ReserveForHostAccess()

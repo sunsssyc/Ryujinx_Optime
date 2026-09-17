@@ -328,14 +328,21 @@ namespace Ryujinx.Graphics.Metal
         {
             if (type == CounterType.SamplesPassed && Counters.SupportsSamplesPassed)
             {
-                // Close the encoder so every draw before the report contributes to the
-                // old counter and subsequent draws use the new counter's result buffer.
-                _pipeline.EndCurrentPass(PassEndReason.Counter);
-
+                // Rotate first: the draws already encoded carry the offset they were issued
+                // with, so they count into the reported counter either way. The new counter
+                // then takes a slot of the same buffer and the encoder is pointed at it; only
+                // when that is not possible does the pass still have to end.
                 // The value the guest will read for this SamplesPassed report, stamped with
                 // the presented frame, so it can be set beside the flare intensity it feeds.
                 EventHandler<ulong> wrapped = resultHandler == null ? null : (s, v) => { UploadCorrelator.NoteCounterReport(v); resultHandler(s, v); };
-                return Counters.Report(wrapped, divisor);
+                CounterEvent reported = Counters.Report(wrapped, divisor);
+
+                if (!_pipeline.TrySwitchCounterInPass())
+                {
+                    _pipeline.EndCurrentPass(PassEndReason.Counter);
+                }
+
+                return reported;
             }
 
             CounterEvent counterEvent = new(null);
@@ -348,8 +355,12 @@ namespace Ryujinx.Graphics.Metal
         {
             if (type == CounterType.SamplesPassed && Counters.SupportsSamplesPassed)
             {
-                _pipeline.EndCurrentPass(PassEndReason.Counter);
                 Counters.Reset();
+
+                if (!_pipeline.TrySwitchCounterInPass())
+                {
+                    _pipeline.EndCurrentPass(PassEndReason.Counter);
+                }
             }
         }
 
