@@ -449,6 +449,17 @@ namespace Ryujinx.Graphics.Metal
             }
 
             MTLTextureType textureType = Info.Target.Convert();
+
+            // A 2D view of one slice of a 3D texture (NVN renders volumes slice by slice through
+            // such views): Metal cannot view a 3D texture as 2D, so the view stays 3D over the one
+            // level and the slice becomes the render pass attachment's depth plane.
+            if (sourceTexture.TextureType == MTLTextureType.Type3D && textureType != MTLTextureType.Type3D)
+            {
+                textureType = MTLTextureType.Type3D;
+                DepthPlane = firstLayer;
+                firstLayer = 0;
+            }
+
             NSRange levels;
             levels.location = (ulong)firstLevel;
             levels.length = (ulong)Info.Levels;
@@ -513,9 +524,13 @@ namespace Ryujinx.Graphics.Metal
             }
         }
 
+        /// <summary>The slice a 2D view of a 3D texture renders to (see the view constructor); 0 otherwise.</summary>
+        public int DepthPlane { get; }
+
         public void PopulateRenderPassAttachment(MTLRenderPassColorAttachmentDescriptor descriptor, CommandBufferScoped cbs)
         {
             descriptor.Texture = GetIdentityHandle(cbs);
+            descriptor.DepthPlane = (ulong)DepthPlane;
         }
 
         public override MTLTexture GetIdentityHandle()

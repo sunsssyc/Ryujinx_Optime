@@ -16,6 +16,9 @@ namespace Ryujinx.Graphics.Metal
         private const ulong MaxReportedGpuMemory = 8UL * 1024 * 1024 * 1024;
 
         private readonly MTLDevice _device;
+
+        /// <summary>Bytes the Metal device has allocated (textures, buffers, heaps): for telling GPU-side growth from managed growth.</summary>
+        internal ulong DeviceAllocatedBytes => _device.CurrentAllocatedSize;
         private readonly MTLCommandQueue _queue;
         private readonly Func<CAMetalLayer> _getMetalLayer;
 

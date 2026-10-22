@@ -1762,7 +1762,7 @@ namespace Ryujinx.Graphics.Metal
 
                     Logger.Info?.PrintMsg(
                         LogClass.Gpu,
-                        $"Metal sync stats over last {SyncStatsLogFrameInterval} frames: {waitMs:F2}ms in {syncWaitCount} waits, " +
+                        $"Metal sync stats over last {SyncStatsLogFrameInterval} frames (device allocated {_renderer.DeviceAllocatedBytes >> 20} MiB, managed heap {GC.GetTotalMemory(false) >> 20} MiB): {waitMs:F2}ms in {syncWaitCount} waits, " +
                         $"{forcedSyncFlushCount} forced flushes, {proactiveSyncFlushCount} proactive flushes, " +
                         $"{coalescedSyncSignalCount} coalesced signals, " +
                         $"{autoFlushDrawCount} draw auto-flushes, {autoFlushAttachmentCount} attachment auto-flushes " +
