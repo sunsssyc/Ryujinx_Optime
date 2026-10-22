@@ -67,6 +67,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             public bool UboLastInBatch;
 
             /// <summary>
+            /// Host work run on the GPU thread in queue order instead of commands (the NVN replay).
+            /// </summary>
+            public Action HostAction;
+
+            /// <summary>
             /// Get the entries for the command buffer from memory.
             /// </summary>
             /// <param name="memoryManager">The memory manager used to fetch the data</param>
@@ -145,6 +150,22 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
                 EntryAddress = ulong.MaxValue,
                 EntryCount = (uint)commandBuffer.Length,
             });
+        }
+
+        /// <summary>
+        /// Runs <paramref name="action"/> on the GPU thread, in order with the GPFIFO entries pushed
+        /// before and after it. Used by the paravirtual NVN replay, which issues GAL calls itself.
+        /// </summary>
+        public void PushHostAction(Action action)
+        {
+            _commandBufferQueue.Enqueue(new CommandBuffer
+            {
+                Type = CommandBufferType.Prefetch,
+                Words = Array.Empty<int>(),
+                HostAction = action,
+            });
+
+            _event.Set();
         }
 
         /// <summary>
@@ -486,6 +507,14 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
             // Process command buffers.
             while (_ibEnable && !_interrupt && _commandBufferQueue.TryDequeue(out CommandBuffer entry))
             {
+                if (entry.HostAction != null)
+                {
+                    // No GPFIFO batch: uniform buffers bound by the action must not take a batch's snapshots.
+                    UniformSubmitSnapshot.EnterEntry(null, 0);
+                    entry.HostAction();
+                    continue;
+                }
+
                 bool flushCommandBuffer = true;
 
                 if (_flushSkips != 0)

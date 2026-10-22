@@ -17,7 +17,7 @@ namespace Ryujinx.HLE.HOS.Kernel.SupervisorCall
             KThread currentThread = KernelStatic.GetCurrentThread();
 
             // NVN call counter's own supervisor calls (ids above anything Horizon defines).
-            if (Process.NvnCallCounter.TryHandleSvc(context, id))
+            if (Process.NvnCallCounter.TryHandleSvc(context, id) || Process.NvnPv.NvnPvHost.TryHandleSvc(context, id))
             {
                 currentThread.HandlePostSyscall();
 

@@ -65,4 +65,25 @@
     <EmbeddedResource Include="HOS\Services\Account\Acc\GuestUserImage.jpg" />
   </ItemGroup>
 
+  <!-- Paravirtual NVN, guest side: an AArch64 ELF object run inside the game (HOS/Kernel/Process/NvnPv).
+       Built with the host's clang; without it the assembly simply lacks the resource and RYUJINX_NVN_PV reports so. -->
+  <ItemGroup>
+    <NvnPvGuestSource Include="HOS\Kernel\Process\NvnPv\Guest\*.c;HOS\Kernel\Process\NvnPv\Guest\*.h;HOS\Kernel\Process\NvnPv\Guest\*.inc" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <NvnPvGuestFlags>-target aarch64-none-elf -march=armv8.2-a+lse -O2 -std=gnu11 -ffreestanding -nostdlib -fno-pic -fno-pie -mcmodel=small -fno-stack-protector -fno-exceptions -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-common -ffixed-x18 -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter -Werror=implicit-function-declaration -Werror=incompatible-pointer-types</NvnPvGuestFlags>
+  </PropertyGroup>
+
+  <Target Name="BuildNvnPvGuest" BeforeTargets="PrepareResourceNames" Inputs="@(NvnPvGuestSource)" Outputs="$(IntermediateOutputPath)nvnpv.o" Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <Exec Command="clang $(NvnPvGuestFlags) -c &quot;$(MSBuildProjectDirectory)/HOS/Kernel/Process/NvnPv/Guest/nvnpv.c&quot; -o &quot;$(IntermediateOutputPath)nvnpv.o&quot;" />
+  </Target>
+
+  <Target Name="EmbedNvnPvGuest" AfterTargets="BuildNvnPvGuest" BeforeTargets="PrepareResourceNames" Condition="Exists('$(IntermediateOutputPath)nvnpv.o')">
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)nvnpv.o" LogicalName="Ryujinx.HLE.NvnPv.nvnpv.o" WithCulture="false" Type="Non-Resx" />
+    </ItemGroup>
+  </Target>
+
 </Project>

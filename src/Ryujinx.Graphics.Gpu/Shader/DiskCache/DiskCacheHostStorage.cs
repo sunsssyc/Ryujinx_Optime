@@ -25,7 +25,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
         // RYUJINX_CODEGEN_SALT=N keeps translation-affecting A/B toggles (RYUJINX_MSL_*) from
         // sharing one host cache: a toggle that changes the emitted MSL without a new version
         // would silently load the other configuration's cached shaders.
-        private static readonly uint CodeGenVersion = 7389 +
+        internal static readonly uint CodeGenVersion = 7389 +
             (uint.TryParse(Environment.GetEnvironmentVariable("RYUJINX_CODEGEN_SALT"), out uint salt) ? salt : 0);
 
         private const string SharedTocFileName = "shared.toc";

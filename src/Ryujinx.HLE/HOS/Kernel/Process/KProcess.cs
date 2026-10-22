@@ -694,7 +694,11 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
                     NvnProbe.Inventory(this);
                 }
 
-                if (NvnCallCounter.Enabled && IsApplication)
+                if (NvnPv.NvnPvHost.Enabled && IsApplication)
+                {
+                    NvnPv.NvnPvHost.Install(this, KernelContext);
+                }
+                else if (NvnCallCounter.Enabled && IsApplication)
                 {
                     NvnCallCounter.Install(this, KernelContext);
                 }
