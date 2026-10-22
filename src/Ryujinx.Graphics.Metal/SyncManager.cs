@@ -88,6 +88,18 @@ namespace Ryujinx.Graphics.Metal
                     : "Metal auto-flush is disabled; deferred sync batch is the only proactive submission mechanism.");
         }
 
+        // Strict syncs that committed while a render pass was live, by what created them.
+        private static readonly long[] _strictMidPass = new long[Enum.GetValues<HostSyncCreateSource>().Length];
+
+        public static string TakeStrictMidPass(int frames)
+        {
+            string text = string.Join(", ", Enum.GetValues<HostSyncCreateSource>()
+                .Where(s => Interlocked.Read(ref _strictMidPass[(int)s]) != 0)
+                .Select(s => $"{s}={Interlocked.Exchange(ref _strictMidPass[(int)s], 0) / (double)frames:F1}"));
+
+            return text.Length == 0 ? null : text;
+        }
+
         public void RegisterFlush()
         {
             _flushId++;
@@ -104,6 +116,11 @@ namespace Ryujinx.Graphics.Metal
             }
             if (strict || _renderer.InterruptAction == null)
             {
+                if (_renderer.CurrentEncoderType == EncoderType.Render)
+                {
+                    Interlocked.Increment(ref _strictMidPass[(int)source]);
+                }
+
                 // Attach the sync to the command buffers that form this exact boundary
                 // before submitting them. Metal queues execute in order, so waiting for
                 // these fences also covers earlier submissions without retaining every
@@ -260,6 +277,11 @@ namespace Ryujinx.Graphics.Metal
                     }
                     else
                     {
+                        if (GapAnatomy.Enabled)
+                        {
+                            GapAnatomy.NoteWaitReturned(beforeTicks);
+                        }
+
                         long elapsedTicks = Stopwatch.GetTimestamp() - beforeTicks;
 
                         Interlocked.Add(ref _waitTicks, elapsedTicks);

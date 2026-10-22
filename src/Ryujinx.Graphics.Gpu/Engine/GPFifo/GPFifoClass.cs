@@ -28,6 +28,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         private const int MacroCodeSize = 256 * 256;
 
         private readonly Macro[] _macros;
+
+        private readonly bool[] _macroSlotLogged = new bool[0x80];
         private readonly int[] _macroCode;
 
         /// <summary>
@@ -209,7 +211,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         {
             _context.Renderer.Pipeline.CommandBufferBarrier();
 
-            _context.CreateHostSyncIfNeeded(HostSyncFlags.Strict, HostSyncCreateSource.SetReference);
+            bool lazy = _context.Capabilities.Api == Ryujinx.Graphics.Shader.Translation.TargetApi.Metal && LazySetReference.Active;
+
+            _context.CreateHostSyncIfNeeded(lazy ? HostSyncFlags.None : HostSyncFlags.Strict, HostSyncCreateSource.SetReference);
         }
 
         /// <summary>
@@ -228,6 +232,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         public void LoadMmeStartAddressRam(int argument)
         {
             _macros[_state.State.LoadMmeStartAddressRamPointer++] = new Macro(argument);
+            Array.Clear(_macroSlotLogged);
         }
 
         /// <summary>
@@ -258,6 +263,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         public void MmeStart(int index, int argument)
         {
             _macros[index].StartExecution(_context, _parent, _macroCode, argument);
+
+            if (Threed.DrawCensus.Enabled && index < _macroSlotLogged.Length && !_macroSlotLogged[index])
+            {
+                _macroSlotLogged[index] = true;
+                Common.Logging.Logger.Warning?.Print(Common.Logging.LogClass.Gpu, $"draw-census: macro slot {index} = {_macros[index].HleFunction}");
+            }
         }
 
         /// <summary>

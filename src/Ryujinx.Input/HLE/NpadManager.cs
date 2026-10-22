@@ -424,6 +424,11 @@ namespace Ryujinx.Input.HLE
                         motionState.Item1.Orientation = new float[9];
                     }
 
+                    if (ScriptedInput.Enabled && playerIndex == PlayerIndex.Player1)
+                    {
+                        inputState.Buttons |= ScriptedInput.Current();
+                    }
+
                     inputState.PlayerId = playerIndex;
                     motionState.Item1.PlayerId = playerIndex;
 

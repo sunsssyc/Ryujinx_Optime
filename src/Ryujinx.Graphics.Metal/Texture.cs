@@ -5,6 +5,7 @@ using SharpMetal.Foundation;
 using SharpMetal.Metal;
 using System;
 using System.Runtime.Versioning;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Metal
 {
@@ -32,6 +33,9 @@ namespace Ryujinx.Graphics.Metal
         /// this" conclusions in the white-flash investigation, each of them wrong.
         /// </summary>
         public IntPtr CanonicalPtr { get; private set; }
+
+        /// <summary>The root texture's usage census record; null unless UsageProbe is enabled.</summary>
+        internal UsageProbe.Root UsageRoot;
 
         public static IntPtr ResolveViewRoot(IntPtr native)
         {
@@ -172,6 +176,17 @@ namespace Ryujinx.Graphics.Metal
             // Not a view: its own storage is the canonical identity.
             CanonicalPtr = _identitySwizzleHandle.GetUnsafe().Value.NativePtr;
 
+            if (UsageProbe.Enabled)
+            {
+                UsageRoot = UsageProbe.NoteRoot(info, pixelFormat);
+            }
+
+            if (_leanTargets && IsLeanTargetClass(info))
+            {
+                LeanUsage = true;
+                Interlocked.Increment(ref _leanCreated);
+            }
+
             StainOnCreate();
 
             descriptor.Dispose();
@@ -278,8 +293,63 @@ namespace Ryujinx.Graphics.Metal
                 ? leanUsage
                 : 0;
 
+        /// <summary>
+        /// Lossless-compression experiment. Apple GPUs compress a texture's tile stores and
+        /// loads only when it declares neither ShaderWrite nor PixelFormatView, and every
+        /// colour texture here declares both, so each split render pass moves uncompressed
+        /// data. A 25,200-frame census (UsageProbe) found no storage-image binds at all and
+        /// no view in a format other than its own, a swizzle or its sRGB twin on the three
+        /// full-resolution colour classes - about 65% of attachment traffic by bytes. Those
+        /// alone are created with ShaderRead | RenderTarget. A later use that would need a
+        /// dropped flag is logged as a violation (see NoteLeanViolation), not repaired:
+        /// rebuilding the storage would leave existing views on the old texture.
+        /// Measured 2026-09-30, four alternating launches at one standing spot: GPU time per
+        /// frame 23.40 -> 22.24 ms (-5.0%), frame rate +2.7%, no violations, no visible change.
+        /// On by default; RYUJINX_METAL_LEAN_TARGETS=0 restores the full usage flags.
+        /// </summary>
+        private static readonly bool _leanTargets =
+            Environment.GetEnvironmentVariable("RYUJINX_METAL_LEAN_TARGETS") != "0";
+
+        public static bool LeanTargetsEnabled => _leanTargets;
+
+        private static long _leanCreated;
+        private static long _leanViolations;
+
+        public static long LeanCreated => Interlocked.Read(ref _leanCreated);
+
+        public static long LeanViolations => Interlocked.Read(ref _leanViolations);
+
+        /// <summary>True for a texture created without ShaderWrite and PixelFormatView; views inherit it.</summary>
+        internal bool LeanUsage;
+
+        private static bool IsLeanTargetClass(TextureCreateInfo info) =>
+            info.Target == Target.Texture2D &&
+            info.Samples == 1 &&
+            info.Width >= 1600 && info.Height >= 900 &&
+            info.Format is Format.R11G11B10Float or Format.R8G8B8A8Unorm or Format.R8G8B8A8Srgb;
+
+        /// <summary>
+        /// A lean texture was used in a way that needs a flag it was created without. The
+        /// use goes ahead (the experiment measures, it does not repair), so any hit means
+        /// that class must leave the lean set before this can be a default.
+        /// </summary>
+        internal static void NoteLeanViolation(string what)
+        {
+            long n = Interlocked.Increment(ref _leanViolations);
+
+            if (n <= 20)
+            {
+                Logger.Warning?.PrintMsg(LogClass.Gpu, $"lean-targets violation #{n}: {what}");
+            }
+        }
+
         private static MTLTextureUsage GetTextureUsage(TextureCreateInfo info, MTLPixelFormat pixelFormat)
         {
+            if (_leanTargets && IsLeanTargetClass(info))
+            {
+                return MTLTextureUsage.ShaderRead | MTLTextureUsage.RenderTarget;
+            }
+
             MTLTextureUsage usage = MTLTextureUsage.ShaderRead | MTLTextureUsage.PixelFormatView;
 
             if (_leanUsage > 0 && IsSceneClass(info))
@@ -734,7 +804,25 @@ namespace Ryujinx.Graphics.Metal
 
         public ITexture CreateView(TextureCreateInfo info, int firstLayer, int firstLevel)
         {
-            return new Texture(Device, Renderer, Pipeline, info, _identitySwizzleHandle, firstLayer, firstLevel);
+            Texture view = new(Device, Renderer, Pipeline, info, _identitySwizzleHandle, firstLayer, firstLevel);
+
+            if (LeanUsage)
+            {
+                view.LeanUsage = true;
+
+                if (view.MtlFormat != MtlFormat && !UsageProbe.IsSrgbTwin(MtlFormat, view.MtlFormat))
+                {
+                    NoteLeanViolation($"{view.MtlFormat} view of {Info.Width}x{Info.Height} {MtlFormat}");
+                }
+            }
+
+            if (UsageProbe.Enabled)
+            {
+                view.UsageRoot = UsageRoot;
+                UsageProbe.NoteView(UsageRoot, view.MtlFormat, view._identityIsDifferent);
+            }
+
+            return view;
         }
 
         private void CopyDataToBuffer(Span<byte> storage, ReadOnlySpan<byte> input)

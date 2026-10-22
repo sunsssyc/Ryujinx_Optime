@@ -19,6 +19,17 @@ namespace Ryujinx.Graphics.Metal.SharpMetalExtensions
         /// preview21 predates this Metal API, so call the Objective-C selector
         /// directly until the binding can be updated.
         /// </summary>
+        /// <summary>The default result type: each pass writes its own counts (nothing accumulates).</summary>
+        public static void SetVisibilityResultTypeReset(this MTLRenderPassDescriptor descriptor)
+        {
+            const ulong MTLVisibilityResultTypeReset = 0;
+
+            ObjectiveCRuntime.objc_msgSend(
+                descriptor.NativePtr,
+                SelSetVisibilityResultType,
+                MTLVisibilityResultTypeReset);
+        }
+
         public static void SetVisibilityResultTypeAccumulate(this MTLRenderPassDescriptor descriptor)
         {
             const ulong MTLVisibilityResultTypeAccumulate = 1;

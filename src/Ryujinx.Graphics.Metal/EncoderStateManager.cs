@@ -3083,6 +3083,58 @@ namespace Ryujinx.Graphics.Metal
         /// performing. RYUJINX_METAL_RAW_DECLARED=0 (or /tmp/ryujinx-metal-raw-declared)
         /// restores the whole-table walk for comparison.
         /// </summary>
+        /// <summary>
+        /// Whether the draw about to be encoded samples any texture whose storage is in
+        /// <paramref name="roots"/> (canonical pointers). Walks the bindings the program declares,
+        /// like <see cref="SamplesEarlierWrite"/>. Used by EncoderLabels to mark passes that read
+        /// what the previous pass rendered.
+        /// </summary>
+        public readonly bool SamplesAnyOf(HashSet<IntPtr> roots)
+        {
+            Program program = _currentState.RenderProgram;
+
+            if (roots.Count == 0 || program == null)
+            {
+                return false;
+            }
+
+            foreach (ResourceBindingSegment segment in program.BindingSegments[Constants.TexturesSetIndex])
+            {
+                if (segment.Type is ResourceType.Sampler or ResourceType.BufferTexture)
+                {
+                    continue;
+                }
+
+                if (!segment.IsArray)
+                {
+                    for (int i = 0; i < segment.Count; i++)
+                    {
+                        int index = segment.Binding + i;
+
+                        if ((uint)index < (uint)_currentState.TextureRefs.Length &&
+                            _currentState.TextureRefs[index].Storage is Texture sampled &&
+                            roots.Contains(sampled.CanonicalPtr))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                else if ((uint)segment.Binding < (uint)_currentState.TextureArrayRefs.Length &&
+                         _currentState.TextureArrayRefs[segment.Binding].Array is TextureArray array)
+                {
+                    foreach (TextureRef reference in array.GetTextureRefs())
+                    {
+                        if (reference.Storage is Texture sampled && roots.Contains(sampled.CanonicalPtr))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
         public readonly RawHazard SamplesEarlierWrite()
         {
             if (_writtenThisCb.Count == 0)

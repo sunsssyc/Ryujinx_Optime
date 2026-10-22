@@ -73,10 +73,26 @@ class CommandBufferEncoder
     // caused by a blit or a dispatch apart from a deliberate end.
     private EncoderType _endingFor = EncoderType.None;
 
+    /// <summary>
+    /// When the first encoder of this command buffer was opened, for GapAnatomy; 0 until
+    /// then, and always 0 with the probe off.
+    /// </summary>
+    internal long FirstEncodeTicks;
+
     public void Initialize(MTLCommandBuffer commandBuffer, IEncoderFactory encoderFactory)
     {
         _commandBuffer = commandBuffer;
         _encoderFactory = encoderFactory;
+        FirstEncodeTicks = 0;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void NoteFirstEncode()
+    {
+        if (GapAnatomy.Enabled && FirstEncodeTicks == 0)
+        {
+            FirstEncodeTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -205,6 +221,7 @@ class CommandBufferEncoder
 
     private MTLRenderCommandEncoder BeginRenderPass()
     {
+        NoteFirstEncode();
         _endingFor = EncoderType.Render;
         EndCurrentPass();
         _endingFor = EncoderType.None;
@@ -262,6 +279,8 @@ class CommandBufferEncoder
 
     private MTLBlitCommandEncoder BeginBlitPass()
     {
+        NoteFirstEncode();
+
         if (_blitTrace && CurrentEncoderType == EncoderType.Render)
         {
             System.Diagnostics.StackTrace trace = new(1, false);
@@ -294,6 +313,11 @@ class CommandBufferEncoder
 
         ObjcOwnership.Retain(blitCommandEncoder.NativePtr);
 
+        if (EncoderLabels.Active)
+        {
+            EncoderLabels.Label(blitCommandEncoder, $"{EncoderLabels.NextId('b')} {EncoderLabels.Caller()}");
+        }
+
         CurrentEncoder = blitCommandEncoder;
         CurrentEncoderType = EncoderType.Blit;
         return blitCommandEncoder;
@@ -301,6 +325,7 @@ class CommandBufferEncoder
 
     private MTLComputeCommandEncoder BeginComputePass()
     {
+        NoteFirstEncode();
         _endingFor = EncoderType.Compute;
         EndCurrentPass();
         _endingFor = EncoderType.None;
@@ -308,6 +333,11 @@ class CommandBufferEncoder
         MTLComputeCommandEncoder computeCommandEncoder = _encoderFactory.CreateComputeCommandEncoder();
 
         ObjcOwnership.Retain(computeCommandEncoder.NativePtr);
+
+        if (EncoderLabels.Active)
+        {
+            EncoderLabels.Label(computeCommandEncoder, $"{EncoderLabels.NextId('c')} {EncoderLabels.Caller()}");
+        }
 
         CurrentEncoder = computeCommandEncoder;
         CurrentEncoderType = EncoderType.Compute;

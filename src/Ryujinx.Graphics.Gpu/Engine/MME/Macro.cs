@@ -14,6 +14,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
         /// </summary>
         public int Position { get; }
 
+        /// <summary>The high-level function this macro was recognised as, if any.</summary>
+        public MacroHLEFunctionName HleFunction => _hleFunction;
+
         private IMacroEE _executionEngine;
         private bool _executionPending;
         private int _argument;

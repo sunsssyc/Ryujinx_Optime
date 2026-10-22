@@ -10,6 +10,7 @@ using Ryujinx.Memory.Range;
 using System;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Ryujinx.Graphics.Gpu.Engine.Threed
 {
@@ -347,6 +348,17 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             }
 
             int firstInstance = (int)_state.State.FirstInstance;
+
+            if (DrawCensus.Enabled)
+            {
+                DrawCensus.Start();
+                Interlocked.Increment(ref DrawCensus.Plain);
+
+                if (_instanceIndex > 0)
+                {
+                    Interlocked.Increment(ref DrawCensus.PlainSplitInstance);
+                }
+            }
 
             int inlineIndexCount = _drawState.IbStreamer.GetAndResetInlineIndexCount(_context.Renderer);
 
@@ -711,6 +723,15 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
 
             engine.UpdateState();
 
+            if (DrawCensus.Enabled)
+            {
+                DrawCensus.Start();
+                Interlocked.Increment(ref DrawCensus.Macro);
+                Interlocked.Add(ref DrawCensus.MacroInstances, instanceCount);
+                DrawCensus.NoteMacroDraw(indexed ? _state.State.IndexBufferState.Address.Pack() : 0, firstIndex, count, firstVertex, instanceCount, firstInstance);
+                DrawCensus.MaybeWatch(_channel.MemoryManager, count);
+            }
+
             DrawImpl(engine, count, instanceCount, firstIndex, firstVertex, firstInstance, indexed);
 
             if (indexed)
@@ -1023,6 +1044,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 int instanceCount = _instanceIndex + 1;
                 int firstInstance = _instancedFirstInstance;
                 bool indexedInline = _instancedIndexedInline;
+
+                if (DrawCensus.Enabled)
+                {
+                    DrawCensus.Start();
+                    Interlocked.Increment(ref DrawCensus.Merged);
+                    Interlocked.Add(ref DrawCensus.MergedInstances, instanceCount);
+                }
 
                 if (_instancedIndexed || indexedInline)
                 {

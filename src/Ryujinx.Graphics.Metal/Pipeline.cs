@@ -1110,6 +1110,7 @@ namespace Ryujinx.Graphics.Metal
                 Cbs.Encoders.RenderEncoder.UpdateFence(_encFence, MTLRenderStages.RenderStageFragment);
                 _encFencePending = true;
             }
+            _endingPassFragmentStore = _passHasFragmentStore;
             _passHasFragmentStore = false;
             if (CurrentEncoderType == EncoderType.Render) { UploadCorrelator.Seq(reason == PassEndReason.RenderTargets ? "P-RT" : reason == PassEndReason.FragmentDependency ? "P-FD" : reason == PassEndReason.Flush ? "P-F" : "P-" + reason); }
             _pendingPassEndReason = reason;
@@ -1151,6 +1152,19 @@ namespace Ryujinx.Graphics.Metal
             };
 
             _passEndReasons[(int)reason]++;
+
+            if (_passLabelId == null)
+            {
+                _endingPassFragmentStore = false;
+            }
+            else
+            {
+                string programs = string.Join(",", _passPrograms.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key}:{kv.Value}"));
+                bool fragmentStore = _endingPassFragmentStore || _passHasFragmentStore;
+                EncoderLabels.Record($"{_passLabelId}\t{reason}\t{DrawCount - _drawCountAtPassStart}\t{programs}\tfs={(fragmentStore ? 1 : 0)}\trp={(_passReadsPrev ? 1 : 0)}");
+                _passLabelId = null;
+                _endingPassFragmentStore = false;
+            }
 
             if (PresentProbe.Enabled)
             {
@@ -1212,8 +1226,42 @@ namespace Ryujinx.Graphics.Metal
             _passSignatureRing[_passSignatureCount & 3] = signature;
             _passSignatureCount++;
 
-            return _encoderStateManager.CreateRenderCommandEncoder();
+            MTLRenderCommandEncoder encoder = _encoderStateManager.CreateRenderCommandEncoder();
+
+            if (EncoderLabels.Active)
+            {
+                _passLabelId = EncoderLabels.NextId('r');
+                _passPrograms.Clear();
+                (_labelPrevTargets, _labelCurTargets) = (_labelCurTargets, _labelPrevTargets);
+                _labelCurTargets.Clear();
+
+                foreach (Texture target in _encoderStateManager.RenderTargets)
+                {
+                    if (target != null)
+                    {
+                        _labelCurTargets.Add(target.CanonicalPtr);
+                    }
+                }
+
+                if (_encoderStateManager.DepthStencil is Texture depthTarget)
+                {
+                    _labelCurTargets.Add(depthTarget.CanonicalPtr);
+                }
+
+                _passReadsPrev = false;
+                EncoderLabels.Label(encoder, _passLabelId + EncoderLabels.DescribeTargets(_encoderStateManager.RenderTargets, _encoderStateManager.DepthStencil));
+            }
+
+            return encoder;
         }
+
+        // EncoderLabels: the id of the render pass being encoded and its programs' draw counts.
+        private string _passLabelId;
+        private readonly Dictionary<string, int> _passPrograms = new();
+        // EncoderLabels: the previous and the current render pass's attachments, and whether a
+        // draw of the current pass sampled one of the previous pass's.
+        private HashSet<IntPtr> _labelPrevTargets = new(), _labelCurTargets = new();
+        private bool _passReadsPrev;
 
         public ulong PrepareCounterRenderPass(MTLRenderPassDescriptor descriptor)
         {
@@ -1270,6 +1318,7 @@ namespace Ryujinx.Graphics.Metal
 
         public void Present(CAMetalDrawable drawable, Texture src, Extents2D srcRegion, Extents2D dstRegion, bool isLinear, bool useFsrSharpener, float scalingFilterLevel)
         {
+            UsageProbe.OnPresent();
 
             UploadCorrelator._inPresent = true;
             try
@@ -1344,6 +1393,8 @@ namespace Ryujinx.Graphics.Metal
             RefreshBarrierScope();
             PipelineState.RefreshAsyncPso();
             CounterManager.RefreshToggle();
+            StarveFlush.Refresh();
+            EncoderLabels.RefreshPerFrame((int)_presentCount);
             EncoderStateManager.RefreshSplitScope();
             RefreshRawFence();
             _passIndexInFrame = 0;
@@ -1642,7 +1693,8 @@ namespace Ryujinx.Graphics.Metal
                         $" config: splitScope={(EncoderStateManager.SplitScopePass ? "pass" : "cb")}, " +
                         $"rawSplit={_rawSplit}, barrier={(_barrierHazardOnly ? "hazard" : _barrierDeferred ? "deferred" : "all")}, asyncPso={PipelineState.AsyncPso}, " +
                         $"markOnDraw={EncoderStateManager.MarkOnDrawActive}, " +
-                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}, fbFetch={_fbFetch}, tileSnapshot={TileSnapshot.Enabled}/{TileSnapshot.Mode}.";
+                        $"declaredOnly={EncoderStateManager.RawDeclaredOnly}, skipSelf={_skipSelfSplit}, fbFetch={_fbFetch}, tileSnapshot={TileSnapshot.Enabled}/{TileSnapshot.Mode}, " +
+                        $"leanTargets={Texture.LeanTargetsEnabled}/{Texture.LeanCreated} made/{Texture.LeanViolations} violations.";
 
                     // Occupancy, and the evidence that the occupancy is readable. The span
                     // is the GPU clock's own measure of the same window the wall clock just
@@ -1672,6 +1724,9 @@ namespace Ryujinx.Graphics.Metal
                             $"{(gpu.Rejected != 0 ? $", REJECTED {gpu.Rejected}" : string.Empty)}.";
                     }
 
+                    gpuText += GapAnatomy.TakeAndFormat(SyncStatsLogFrameInterval);
+                    gpuText += StarveFlush.TakeStats(SyncStatsLogFrameInterval);
+
                     string splitClassText = EncoderStateManager.TakeSplitClasses(SyncStatsLogFrameInterval) ?? string.Empty;
                     string storeText = StoreLiveness.Take(SyncStatsLogFrameInterval) ?? string.Empty;
 
@@ -1691,6 +1746,10 @@ namespace Ryujinx.Graphics.Metal
                     string gateText = uploadGates == null ? string.Empty : $" upload gates: {uploadGates}.";
                     string blitCallers = CommandBufferEncoder.TakeBlitCallers();
                     string blitText = blitCallers == null ? string.Empty : $" blit callers: {blitCallers}.";
+                    string flushCallers = TakeFlushCallers(SyncStatsLogFrameInterval);
+                    blitText += flushCallers == null ? string.Empty : $" flush callers mid-pass per frame: {flushCallers}.";
+                    string strictMidPass = SyncManager.TakeStrictMidPass(SyncStatsLogFrameInterval);
+                    blitText += strictMidPass == null ? string.Empty : $" strict syncs mid-pass per frame: {strictMidPass}.";
 
                     double tickMs = 1000.0 / Stopwatch.Frequency;
                     string psoText =
@@ -1757,8 +1816,56 @@ namespace Ryujinx.Graphics.Metal
 
         private static int _crossThreadFlushLogs;
 
+        // RYUJINX_METAL_FLUSH_TRACE=1: which caller committed while a render pass was live, i.e.
+        // which flushes cost a pass split. Two frames of context: the caller and its caller.
+        private static readonly bool _flushTrace = Environment.GetEnvironmentVariable("RYUJINX_METAL_FLUSH_TRACE") == "1";
+        private static readonly Dictionary<string, int> _flushCallers = new();
+
+        private static string TakeFlushCallers(int frames)
+        {
+            lock (_flushCallers)
+            {
+                if (_flushCallers.Count == 0)
+                {
+                    return null;
+                }
+
+                string text = string.Join(", ", _flushCallers
+                    .OrderByDescending(entry => entry.Value)
+                    .Take(8)
+                    .Select(entry => $"{entry.Key}={entry.Value / (double)frames:F1}"));
+
+                _flushCallers.Clear();
+
+                return text;
+            }
+        }
+
+        private void NoteFlushCaller()
+        {
+            System.Diagnostics.StackTrace trace = new(2, false);
+            string Name(int i)
+            {
+                System.Reflection.MethodBase method = i < trace.FrameCount ? trace.GetFrame(i)?.GetMethod() : null;
+
+                return method == null ? "?" : $"{method.DeclaringType?.Name}.{method.Name}";
+            }
+
+            string key = $"{Name(0)}<{Name(1)}";
+
+            lock (_flushCallers)
+            {
+                _flushCallers[key] = _flushCallers.GetValueOrDefault(key) + 1;
+            }
+        }
+
         public void FlushCommandsImpl()
         {
+            if (_flushTrace && Cbs.Encoders.CurrentEncoderType == EncoderType.Render)
+            {
+                NoteFlushCaller();
+            }
+
             // The pipeline's encoder state machine is single-threaded by construction:
             // ThreadedRenderer makes the thread that called RunLoop the backend thread
             // (GUI.RenderThread here), and draws, presents and interrupts all execute on
@@ -1855,6 +1962,8 @@ namespace Ryujinx.Graphics.Metal
         private static readonly int _barrierEndsPass =
             int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_METAL_BARRIER_ENDS_PASS"), out int bep) ? bep : 0;
         private bool _passHasFragmentStore;
+        // EncoderLabels: whether the pass being ended stored from its fragment stage (cleared above before the end lands).
+        private bool _endingPassFragmentStore;
         private long _barrierPassEnds;
 
         public void Barrier()
@@ -2179,6 +2288,20 @@ namespace Ryujinx.Graphics.Metal
 
         private void AutoFlushPreDraw()
         {
+            if (_dumpAllShaders)
+            {
+                // RYUJINX_METAL_DUMP_SHADERS=1: every program's MSL the first time it draws
+                // (DumpSources writes each program once), without the upload correlator.
+                _encoderStateManager.CurrentEncoderState.RenderProgram?.DumpSources(FrameCapture.ShaderDumpDir);
+            }
+
+            if (_passLabelId != null)
+            {
+                string label = _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel ?? "?";
+                _passPrograms[label] = _passPrograms.GetValueOrDefault(label) + 1;
+                _passReadsPrev |= !_passReadsPrev && _encoderStateManager.SamplesAnyOf(_labelPrevTargets);
+            }
+
             bool isPre = _preProbeLabel.Length != 0 && UploadCorrelator.Enabled &&
                 _encoderStateManager.CurrentEncoderState.RenderProgram?.DebugLabel is string pl &&
                 pl.StartsWith(_preProbeLabel, StringComparison.Ordinal);
@@ -2188,6 +2311,10 @@ namespace Ryujinx.Graphics.Metal
             {
                 _autoFlushDrawCount++;
                 if (isPre) { _preDrawsFlushedBefore++; }
+                FlushCommandsImpl();
+            }
+            else if (StarveFlush.ShouldFlushAtDraw(DrawCount, _renderer.AutoFlush.LastFlushDrawCount, _renderer.CommandBufferPool))
+            {
                 FlushCommandsImpl();
             }
 
@@ -2984,6 +3111,16 @@ namespace Ryujinx.Graphics.Metal
                 UploadCorrelator.NoteAttachmentDraw(imgTex.CanonicalPtr, "image");
             }
 
+            if (UsageProbe.Enabled && image is Texture probeTex)
+            {
+                UsageProbe.NoteStorage(probeTex.UsageRoot);
+            }
+
+            if (image is Texture { LeanUsage: true } leanTex)
+            {
+                Texture.NoteLeanViolation($"storage bind of {leanTex.Info.Width}x{leanTex.Info.Height} {leanTex.MtlFormat}");
+            }
+
             if (image is TextureBase img)
             {
                 _encoderStateManager.UpdateImage(stage, binding, img);
@@ -3075,6 +3212,21 @@ namespace Ryujinx.Graphics.Metal
             {
                 _autoFlushAttachmentCount++;
                 FlushCommandsImpl();
+            }
+            else if (StarveFlush.ShouldFlushAtAttachmentChange(DrawCount, _renderer.AutoFlush.LastFlushDrawCount, _renderer.CommandBufferPool))
+            {
+                FlushCommandsImpl();
+            }
+
+            if (UsageProbe.Enabled)
+            {
+                foreach (ITexture color in colors)
+                {
+                    if (color is Texture colorTex)
+                    {
+                        UsageProbe.NoteRenderTarget(colorTex.UsageRoot);
+                    }
+                }
             }
 
             _encoderStateManager.UpdateRenderTargets(colors, depthStencil);

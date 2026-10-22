@@ -55,6 +55,9 @@ namespace Ryujinx.Graphics.Metal
         public bool Enabled { get; }
         public bool FastFlushMode => _fastFlushMode;
 
+        /// <summary>The draw count at the last flush, whatever triggered it.</summary>
+        public ulong LastFlushDrawCount => _lastDrawCount;
+
         public AutoFlushCounter(MetalRenderer renderer)
         {
             _renderer = renderer;

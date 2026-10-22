@@ -90,6 +90,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// <param name="commandBuffer">Command buffer</param>
         public void Process(ulong baseGpuVa, ReadOnlySpan<int> commandBuffer)
         {
+            Threed.DrawCensus.EntryGpuVa = baseGpuVa;
+            Threed.DrawCensus.EntryBytes = commandBuffer.Length * 4;
+
             for (int index = 0; index < commandBuffer.Length; index++)
             {
                 int command = commandBuffer[index];

@@ -95,6 +95,41 @@ namespace Ryujinx.Graphics.Metal
         private long _commitCounter;
         private readonly long[] _commitSeq = new long[64];
 
+        // GapAnatomy only: when each slot's buffer opened its first encoder and was committed.
+        private readonly long[] _gapEncodeTicks = new long[64];
+        private readonly long[] _gapCommitTicks = new long[64];
+
+        // The two most recently committed buffers, retained, so the recording thread can
+        // tell how much work the GPU has left (StarveFlush). Both are only touched on the
+        // thread that commits, which is the thread that records.
+        private MTLCommandBuffer _lastCommitted;
+        private MTLCommandBuffer _previousCommitted;
+
+        private void TrackCommitted(MTLCommandBuffer commandBuffer)
+        {
+            ObjcOwnership.Retain(commandBuffer.NativePtr);
+
+            if (_previousCommitted.NativePtr != IntPtr.Zero)
+            {
+                ObjcOwnership.Release(_previousCommitted.NativePtr);
+            }
+
+            _previousCommitted = _lastCommitted;
+            _lastCommitted = commandBuffer;
+        }
+
+        /// <summary>
+        /// Level 1: the last committed buffer has completed, so the GPU is idle.
+        /// Level 2: the one before it has completed, so the GPU holds its last buffer.
+        /// Metal runs one queue in commit order, which is what makes either statement true.
+        /// </summary>
+        public bool GpuRunningDry(int level)
+        {
+            MTLCommandBuffer probe = level >= 2 ? _previousCommitted : _lastCommitted;
+
+            return probe.NativePtr != IntPtr.Zero && probe.Status >= MTLCommandBufferStatus.Completed;
+        }
+
         /// <summary>The rental sequence stamped on this command buffer when it was rented.</summary>
         public long RentSeqOf(int cbIndex) => (uint)cbIndex < (uint)_rentSeq.Length ? _rentSeq[cbIndex] : -1;
 
@@ -305,7 +340,14 @@ namespace Ryujinx.Graphics.Metal
                     _commitSeq[cbs.CommandBufferIndex] = ++_commitCounter;
                 }
 
+                if (GapAnatomy.Enabled && (uint)cbIndex < (uint)_gapCommitTicks.Length)
+                {
+                    _gapEncodeTicks[cbIndex] = entry.Encoders.FirstEncodeTicks;
+                    _gapCommitTicks[cbIndex] = Stopwatch.GetTimestamp();
+                }
+
                 commandBuffer.Commit();
+                TrackCommitted(commandBuffer);
 
                 // The one ordering experiment never run: make the whole GPU synchronous.
                 // Intra-command-buffer serialisation left 17%; this also closes ordering
@@ -355,6 +397,13 @@ namespace Ryujinx.Graphics.Metal
                 {
                     GpuTimeline.Note(entry.CommandBuffer.GetGpuStartTime(), entry.CommandBuffer.GetGpuEndTime());
                 }
+
+                if (GapAnatomy.Enabled && (uint)cbIndex < (uint)_gapCommitTicks.Length)
+                {
+                    GapAnatomy.NoteBuffer(_gapEncodeTicks[cbIndex], _gapCommitTicks[cbIndex],
+                        entry.CommandBuffer.GetGpuStartTime(), entry.CommandBuffer.GetGpuEndTime());
+                    _gapCommitTicks[cbIndex] = 0;
+                }
             }
 
             foreach (IAuto dependant in entry.Dependants)
@@ -384,6 +433,17 @@ namespace Ryujinx.Graphics.Metal
             {
                 WaitAndDecrementRef(i);
             }
+
+            foreach (MTLCommandBuffer tracked in new[] { _lastCommitted, _previousCommitted })
+            {
+                if (tracked.NativePtr != IntPtr.Zero)
+                {
+                    ObjcOwnership.Release(tracked.NativePtr);
+                }
+            }
+
+            _lastCommitted = default;
+            _previousCommitted = default;
         }
     }
 }

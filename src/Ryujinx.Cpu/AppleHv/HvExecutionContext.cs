@@ -259,7 +259,11 @@ namespace Ryujinx.Cpu.AppleHv
             switch (ec)
             {
                 case ExceptionClass.DataAbortLowerEl:
+                    HvApi.hv_vcpu_get_sys_reg(vcpuHandle, HvSysReg.FAR_EL1, out ulong faultAddress);
+                    Ryujinx.Memory.Tracking.GuestFaultContext.Pc = elr;
+                    Ryujinx.Memory.Tracking.GuestFaultContext.Address = faultAddress;
                     DataAbort(memoryManager.Tracking, vcpuHandle, (uint)esr);
+                    Ryujinx.Memory.Tracking.GuestFaultContext.Pc = 0;
                     break;
 
                 case ExceptionClass.TrappedMsrMrsSystem:
@@ -292,7 +296,11 @@ namespace Ryujinx.Cpu.AppleHv
                     break;
 
                 default:
-                    throw new Exception($"Unhandled guest exception {ec}.");
+                    HvApi.hv_vcpu_get_sys_reg(vcpuHandle, HvSysReg.FAR_EL1, out ulong far);
+                    HvApi.hv_vcpu_get_reg(vcpuHandle, HvReg.X0 + 16u, out ulong x16);
+                    HvApi.hv_vcpu_get_reg(vcpuHandle, HvReg.X0 + 17u, out ulong x17);
+                    HvApi.hv_vcpu_get_reg(vcpuHandle, HvReg.X0 + 30u, out ulong x30);
+                    throw new Exception($"Unhandled guest exception {ec} (ESR 0x{esr:X}, ELR 0x{elr:X}, FAR 0x{far:X}, X16 0x{x16:X}, X17 0x{x17:X}, X30 0x{x30:X}).");
             }
 
             // Make sure we will continue running at EL0.

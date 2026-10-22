@@ -68,10 +68,103 @@ namespace Ryujinx.Graphics.Metal
                     "0" => false,
                     _ => _slotsDefault,
                 };
+
+                string perPass = System.IO.File.Exists("/tmp/ryujinx-metal-vis-per-pass")
+                    ? System.IO.File.ReadAllText("/tmp/ryujinx-metal-vis-per-pass").Trim()
+                    : null;
+
+                _perPassEnabled = perPass switch
+                {
+                    "1" => true,
+                    "0" => false,
+                    _ => _perPassDefault,
+                };
             }
             catch (System.IO.IOException)
             {
                 // Raced with the writer; the next frame picks it up.
+            }
+        }
+
+        private static readonly MTLResourceOptions VisibilityBufferOptions = MTLResourceOptions.ResourceStorageModeShared;
+
+        /// <summary>
+        /// Per-pass visibility slots. Every render pass attaches a visibility buffer, and in
+        /// accumulate mode every pass of a counter adds into the same slot of the same tracked
+        /// buffer - so Metal orders each pass after the previous one's fragment stage and no
+        /// two passes ever overlap (a Metal System Trace: 0% of consecutive passes in one
+        /// command buffer overlapped; next vertex start - previous fragment end p50 +14.6us).
+        /// Here every pass gets a slot of its own in an untracked buffer and a counter sums its
+        /// slots when it is read; nothing is shared, so there is nothing to order (the same
+        /// scene: 58% of pass pairs overlapped, GPU 15.69 -> 14.04 ms a frame - measured with an
+        /// untracked shared slot, the unsafe shortcut this replaces). MacNativeGames' NVN
+        /// implementation uses the same scheme.
+        ///
+        /// MEASURED (2026-10-22, standing in the world, same process, ten 40 s segments switched
+        /// on/off): 36.09 +- 0.35 fps off against 39.58 +- 0.49 on, +9.7% (5.8 SE); GPU busy
+        /// 81.3% -> 75.8%; passes (356) and draws (about 3,900) per frame unchanged, so the
+        /// occlusion results the game culls with did not move. An earlier half-run agreed (38.1
+        /// against 41-42.5). About 368 slots are rented a frame and none ran out.
+        ///
+        /// On by default; RYUJINX_METAL_VIS_PER_PASS=0 restores the shared accumulated slot, and
+        /// /tmp/ryujinx-metal-vis-per-pass holding 1 or 0 switches it while the game runs. Either
+        /// direction is safe at any time: a counter reads every slot or buffer it wrote since its
+        /// last reset, whichever mode wrote it.
+        /// </summary>
+        private static readonly bool _perPassDefault = Environment.GetEnvironmentVariable("RYUJINX_METAL_VIS_PER_PASS") != "0";
+        private static volatile bool _perPassEnabled = _perPassDefault;
+
+        // The hardware honours only the low 15 bits of a visibility offset: 4095 slots of
+        // 8 bytes keep every offset below 32768.
+        private const int PerPassSlotCount = 4095;
+
+        private MTLBuffer _perPassBuffer;
+        private readonly Queue<int> _freePerPass = new();
+        private static long _perPassRents, _perPassExhaustions;
+
+        // What the pass being encoded bound: 0 nothing (or a buffer of its own), 1 the shared
+        // slot buffer, 2 the per-pass buffer. A counter change inside the pass stays in it.
+        private int _passBoundKind;
+
+        internal bool PerPassEnabled => _perPassEnabled && _perPassBuffer.NativePtr != IntPtr.Zero;
+
+        internal MTLBuffer PerPassBuffer => _perPassBuffer;
+
+        internal bool TryRentPerPassSlot(out int slot)
+        {
+            if (_perPassBuffer.NativePtr == IntPtr.Zero || _freePerPass.Count == 0)
+            {
+                System.Threading.Interlocked.Increment(ref _perPassExhaustions);
+                slot = -1;
+
+                return false;
+            }
+
+            slot = _freePerPass.Dequeue();
+            System.Threading.Interlocked.Increment(ref _perPassRents);
+
+            // Only a slot whose readers have all completed is on the free list.
+            unsafe
+            {
+                ((ulong*)_perPassBuffer.Contents)[slot] = 0;
+            }
+
+            return true;
+        }
+
+        internal void ReturnPerPassSlot(int slot)
+        {
+            if (slot >= 0 && !_disposed)
+            {
+                _freePerPass.Enqueue(slot);
+            }
+        }
+
+        internal ulong ReadPerPassSlot(int slot)
+        {
+            unsafe
+            {
+                return ((ulong*)_perPassBuffer.Contents)[slot];
             }
         }
 
@@ -109,7 +202,7 @@ namespace Ryujinx.Graphics.Metal
             // flipped at any point without needing an allocation on the render thread.
             if (SupportsSamplesPassed)
             {
-                _slotBuffer = _device.NewBuffer(SlotCount * SlotBytes, MTLResourceOptions.ResourceStorageModeShared);
+                _slotBuffer = _device.NewBuffer(SlotCount * SlotBytes, VisibilityBufferOptions);
 
                 unsafe
                 {
@@ -119,6 +212,19 @@ namespace Ryujinx.Graphics.Metal
                 for (int i = 0; i < SlotCount; i++)
                 {
                     _freeSlots.Enqueue(i);
+                }
+
+                _perPassBuffer = _device.NewBuffer(PerPassSlotCount * SlotBytes,
+                    MTLResourceOptions.ResourceStorageModeShared | MTLResourceOptions.ResourceHazardTrackingModeUntracked);
+
+                unsafe
+                {
+                    new Span<ulong>((void*)_perPassBuffer.Contents, PerPassSlotCount).Clear();
+                }
+
+                for (int i = 0; i < PerPassSlotCount; i++)
+                {
+                    _freePerPass.Enqueue(i);
                 }
             }
 
@@ -142,16 +248,18 @@ namespace Ryujinx.Graphics.Metal
             ulong offset = _current.PrepareRenderPass(descriptor, cbs);
 
             _passBoundSlotBuffer = _slotBuffer.NativePtr != IntPtr.Zero && _current.UsesSlotBuffer;
+            _passBoundKind = _current.UsesPerPassSlot ? 2 : _passBoundSlotBuffer ? 1 : 0;
 
             return offset;
         }
 
-        /// <summary>The pass being encoded bound the shared slot buffer, so a counter change can stay inside it.</summary>
-        internal bool PassBoundSlotBuffer => _passBoundSlotBuffer;
+        /// <summary>The pass being encoded bound a slot buffer, so a counter change can stay inside it.</summary>
+        internal bool PassBoundSlotBuffer => _passBoundKind != 0;
 
         internal void NotePassEnded()
         {
             _passBoundSlotBuffer = false;
+            _passBoundKind = 0;
         }
 
         /// <summary>
@@ -163,6 +271,11 @@ namespace Ryujinx.Graphics.Metal
         {
             lock (_lock)
             {
+                if (_passBoundKind == 2 && !_disposed)
+                {
+                    return _current.TryBindToPerPassSlot(cbs, out offset);
+                }
+
                 if (!_passBoundSlotBuffer || _disposed)
                 {
                     offset = 0;
@@ -190,8 +303,13 @@ namespace Ryujinx.Graphics.Metal
 
             long exhausted = System.Threading.Interlocked.Read(ref _slotExhaustions);
 
+            long perPass = System.Threading.Interlocked.Exchange(ref _perPassRents, 0);
+            long perPassOut = System.Threading.Interlocked.Exchange(ref _perPassExhaustions, 0);
+
             return $" counter switches ({(_slotsEnabled ? "in-pass on" : "off")}): {inPass} in pass, {ends} ended the pass" +
-                   (exhausted != 0 ? $", {exhausted} slot exhaustions" : string.Empty) + ".";
+                   (exhausted != 0 ? $", {exhausted} slot exhaustions" : string.Empty) +
+                   $"; per-pass slots {(_perPassEnabled ? "on" : "off")}: {perPass} rented" +
+                   (perPassOut != 0 ? $", {perPassOut} exhausted" : string.Empty) + ".";
         }
 
         /// <summary>A slot of the shared buffer, zeroed; false when slot mode is off or the pool is empty.</summary>
@@ -309,7 +427,7 @@ namespace Ryujinx.Graphics.Metal
             {
                 MTLBuffer buffer = _bufferPool.Count != 0
                     ? _bufferPool.Pop()
-                    : _device.NewBuffer(sizeof(ulong), MTLResourceOptions.ResourceStorageModeShared);
+                    : _device.NewBuffer(sizeof(ulong), VisibilityBufferOptions);
 
                 Marshal.WriteInt64(buffer.Contents, 0);
 
@@ -367,14 +485,26 @@ namespace Ryujinx.Graphics.Metal
 
             lock (_lock)
             {
+                // Pending reports are released without signalling their result handlers.
+                // GpuContext.Dispose destroys the closed channels before it disposes the
+                // renderer, so a handler here would write guest memory through a memory
+                // manager that is already gone - the NullReferenceException in
+                // SemaphoreUpdater that crashed every "stop emulation" taken in game. The
+                // Vulkan and OpenGL queues also drop pending events on dispose instead of
+                // reporting them.
+                int dropped = _events.Count;
+
                 while (_events.TryDequeue(out CounterEvent evt))
                 {
                     evt.Wait();
-                    Consume(evt);
+                    evt.ReleaseBuffers();
                 }
 
                 _current.Wait();
                 _current.ReleaseBuffers();
+
+                Logger.Info?.PrintMsg(LogClass.Gpu,
+                    $"Metal SamplesPassed counters disposed; {dropped} pending report(s) released without writing results.");
 
                 _disposed = true;
 
@@ -384,11 +514,18 @@ namespace Ryujinx.Graphics.Metal
                 }
 
                 _freeSlots.Clear();
+                _freePerPass.Clear();
 
                 if (_slotBuffer.NativePtr != IntPtr.Zero)
                 {
                     _slotBuffer.Dispose();
                     _slotBuffer = default;
+                }
+
+                if (_perPassBuffer.NativePtr != IntPtr.Zero)
+                {
+                    _perPassBuffer.Dispose();
+                    _perPassBuffer = default;
                 }
             }
         }

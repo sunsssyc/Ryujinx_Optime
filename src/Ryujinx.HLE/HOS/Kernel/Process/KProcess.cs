@@ -689,6 +689,16 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
 
                 SetState(newState);
 
+                if (NvnProbe.Enabled && IsApplication)
+                {
+                    NvnProbe.Inventory(this);
+                }
+
+                if (NvnCallCounter.Enabled && IsApplication)
+                {
+                    NvnCallCounter.Install(this, KernelContext);
+                }
+
                 if (KernelContext.Device.Configuration.DebuggerSuspendOnStart && IsApplication)
                 {
                     mainThread.Suspend(ThreadSchedState.ThreadPauseFlag);

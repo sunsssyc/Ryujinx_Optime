@@ -50,6 +50,8 @@
 
 ## Metal 修复的验证标准
 
+- 独立 Metal 离屏测试、最小探针即使不启动游戏，也可能加载默认开启的 `CrashRing`。运行这些测试必须在进程启动前设置 `RYUJINX_METAL_CRASH_RING=0`，并核验 `/tmp/ryujinx-metal-crash-ring.bin` 的哈希未改变。`CrashRing` 使用 `FileMode.Create` 重建共享文件，会截断正在运行的游戏所映射的文件；不得让测试覆盖游戏的环或把测试 PID 的环当作游戏崩溃证据。
+
 - 不能以“主界面打开”作为成功标准。很多 Graphics DLL 只在启动游戏后加载，签名破坏、缺失符号和 Metal 管线错误可能到此时才出现。
 - 每次修改 Metal、Shader 或 GPU 项目后都要完成以下最小回归：
   1. App 从 Finder 等价路径启动并稳定停留在主界面。

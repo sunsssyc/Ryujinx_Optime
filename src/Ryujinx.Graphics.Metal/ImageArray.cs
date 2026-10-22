@@ -40,6 +40,16 @@ namespace Ryujinx.Graphics.Metal
                 else if (image is Texture texture)
                 {
                     _textureRefs[index + i].Storage = texture;
+
+                    if (UsageProbe.Enabled)
+                    {
+                        UsageProbe.NoteStorage(texture.UsageRoot);
+                    }
+
+                    if (texture.LeanUsage)
+                    {
+                        Texture.NoteLeanViolation($"storage array bind of {texture.Info.Width}x{texture.Info.Height} {texture.MtlFormat}");
+                    }
                 }
                 else if (!_isBuffer)
                 {

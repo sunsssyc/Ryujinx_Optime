@@ -287,6 +287,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
         /// <param name="arg0">First argument of the call</param>
         private void DrawArraysInstanced(IDeviceState state, int arg0)
         {
+            Engine.Threed.DrawCensus.Source = "DrawArraysInstanced";
+
             PrimitiveTopology topology = (PrimitiveTopology)arg0;
 
             FifoWord count = FetchParam();
@@ -316,6 +318,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
         /// <param name="arg0">First argument of the call</param>
         private void DrawElements(IDeviceState state, int arg0)
         {
+            Engine.Threed.DrawCensus.Source = "DrawElements";
+
             PrimitiveTopology topology = (PrimitiveTopology)arg0;
 
             FifoWord indexAddressHigh = FetchParam();
@@ -346,6 +350,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
         /// <param name="arg0">First argument of the call</param>
         private void DrawElementsInstanced(IDeviceState state, int arg0)
         {
+            Engine.Threed.DrawCensus.Source = "DrawElementsInstanced";
+
             PrimitiveTopology topology = (PrimitiveTopology)arg0;
 
             FifoWord count = FetchParam();
@@ -376,6 +382,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
         /// <param name="arg0">First argument of the call</param>
         private void DrawElementsIndirect(IDeviceState state, int arg0)
         {
+            Engine.Threed.DrawCensus.Source = "DrawElementsIndirect";
+
             PrimitiveTopology topology = (PrimitiveTopology)arg0;
 
             FifoWord count = FetchParam();
